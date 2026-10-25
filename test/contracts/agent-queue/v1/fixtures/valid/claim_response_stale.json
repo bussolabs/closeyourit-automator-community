@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "R409-QUEUE-001",
+    "message": "Selezione della coda non più eleggibile"
+  }
+}

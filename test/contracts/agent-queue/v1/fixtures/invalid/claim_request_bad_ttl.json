@@ -1,0 +1,6 @@
+{
+  "selection_token": "<<host-bound-selection-token-issued-by-server>>",
+  "host_id": "22222222-2222-4222-8222-222222222222",
+  "run_id": "run-42",
+  "ttl_seconds": "3600"
+}

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://opencli.org/draft.json",
+  "opencli": "0.1",
+  "info": {
+    "title": "automator",
+    "version": "0.0.0",
+    "summary": "Scheduler Linux per l'ecosistema CloseYourIt",
+    "description": "Esegue azioni (Claude Code headless o comandi shell) da un playbook YAML, come servizio systemd utente persistente, con heartbeat a CloseYourIt.",
+    "license": {"name": "MIT"}
+  },
+  "conventions": {"groupOptions": true, "optionArgumentSeparator": " "},
+  "options": [
+    {"name": "--help", "aliases": ["-h"], "description": "Mostra l'aiuto.", "recursive": true},
+    {"name": "--version", "aliases": ["-V"], "description": "Mostra la versione."},
+    {"name": "--json", "description": "Output machine-readable JSON.", "recursive": true}
+  ],
+  "exitCodes": [
+    {"code": 0, "description": "Successo"},
+    {"code": 1, "description": "Errore a runtime / azione fallita / CLI richiesta mancante"},
+    {"code": 2, "description": "Uso invalido (playbook/azione/flag errati)"}
+  ],
+  "commands": [
+    {
+      "name": "validate",
+      "description": "Valida un playbook: schema (zod) + sintassi degli schedule.",
+      "arguments": [{"name": "playbook", "required": false, "description": "Path del playbook."}]
+    },
+    {
+      "name": "list",
+      "description": "Elenca le azioni con schedule, stato e prossima esecuzione.",
+      "arguments": [{"name": "playbook", "required": false, "description": "Path del playbook."}]
+    },
+    {
+      "name": "run",
+      "description": "Esegue UNA azione ora, ignorando lo schedule.",
+      "arguments": [{"name": "action", "required": true, "description": "Nome azione."}],
+      "options": [
+        {"name": "--dry-run", "description": "Mostra il comando risolto senza eseguirlo."},
+        {"name": "--playbook", "description": "Path del playbook."}
+      ]
+    },
+    {
+      "name": "tick",
+      "description": "Esegue una singola iterazione (valuta ed esegue le azioni due).",
+      "options": [
+        {"name": "--dry-run", "description": "Elenca le azioni due senza eseguirle."},
+        {"name": "--playbook", "description": "Path del playbook."}
+      ]
+    },
+    {
+      "name": "logs",
+      "description": "Mostra l'ultimo log di un'azione o elenca i log recenti.",
+      "arguments": [{"name": "action", "required": false, "description": "Nome azione."}],
+      "options": [{"name": "--lines", "aliases": ["-n"], "description": "Righe finali da mostrare."}]
+    },
+    {
+      "name": "daemon",
+      "description": "Avvia il loop persistente (tenuto vivo dal servizio).",
+      "options": [
+        {"name": "--playbook", "description": "Path del playbook."},
+        {"name": "--interval", "description": "Secondi tra le iterazioni."}
+      ]
+    },
+    {
+      "name": "install",
+      "description": "Installa il servizio systemd utente su Linux.",
+      "options": [
+        {"name": "--playbook", "description": "Path del playbook."},
+        {"name": "--interval", "description": "Secondi tra le iterazioni del daemon."}
+      ]
+    },
+    {"name": "uninstall", "description": "Disabilita e rimuove la unit systemd utente."},
+    {"name": "status", "description": "Mostra lo stato del servizio (installato / in esecuzione / pid)."},
+    {"name": "doctor", "description": "Verifica le CLI necessarie (mise/node/pnpm/cyi/claude/codex/gh)."},
+    {
+      "name": "setup",
+      "description": "Installa (idempotente) le CLI mancanti sul sistema Linux corrente.",
+      "options": [
+        {"name": "--dry-run", "description": "Mostra i comandi senza eseguirli."},
+        {"name": "--optional", "description": "Installa anche le CLI optional (codex, pnpm)."}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "name": "@bussolabs/closeyourit-automator",
+  "version": "0.0.0",
+  "description": "Scheduler Linux che esegue azioni (Claude headless o shell) da un playbook YAML, come servizio systemd utente, con heartbeat a CloseYourIt",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bussolabs/closeyourit-automator.git"
+  },
+  "bin": {
+    "automator": "./bin/run.js"
+  },
+  "files": [
+    "/bin",
+    "/dist",
+    "/assets",
+    "/oclif.manifest.json",
+    "/opencli.json",
+    "/playbook.example.yml"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "dependencies": {
+    "@oclif/core": "^4",
+    "@oclif/plugin-help": "^6",
+    "croner": "^8",
+    "yaml": "^2",
+    "zod": "^3"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@vitest/coverage-v8": "^3.2.6",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "typescript": "^5",
+    "vitest": "^3.2.6"
+  },
+  "oclif": {
+    "bin": "automator",
+    "dirname": "automator",
+    "commands": "./dist/commands",
+    "topicSeparator": " ",
+    "plugins": [
+      "@oclif/plugin-help"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "prepack": "pnpm build",
+    "test": "vitest run --coverage",
+    "test:e2e:multi-host": "AUTOMATOR_MULTI_HOST_E2E_REQUIRED=1 vitest run test/multi-host-e2e.test.ts --maxWorkers=1 --minWorkers=1",
+    "lint": "tsc --noEmit"
+  }
+}

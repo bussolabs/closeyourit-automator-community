@@ -1,0 +1,10 @@
+{
+  "code": "CYAU-97",
+  "category": "mixed",
+  "capabilities": ["frontend", "backend"],
+  "risk": "medium",
+  "requires_human_approval": true,
+  "reasons": ["Requisito ambiguo sul comportamento atteso"],
+  "state": "needs-clarification",
+  "questions": ["Quale comportamento ti aspetti al logout?", "Vale per tutti i ruoli?"]
+}

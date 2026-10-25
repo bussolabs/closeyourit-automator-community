@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "R409-QUEUE-005",
+    "message": "Il TTL richiesto non coincide con il timeout autoritativo della fase",
+    "details": {
+      "requested_ttl_seconds": 86400,
+      "expected_ttl_seconds": 3600
+    }
+  }
+}

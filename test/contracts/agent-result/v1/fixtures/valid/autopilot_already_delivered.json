@@ -1,0 +1,15 @@
+{
+  "code": "CYAU-97",
+  "state": "already-delivered",
+  "gate": {
+    "passed": null
+  },
+  "cycles": 0,
+  "delivery": {
+    "prUrl": "https://github.com/bussolabs/closeyourit-rails/pull/123",
+    "cyiStatus": "in_review",
+    "autoMerged": false
+  },
+  "reason": "Il piano risultava gia implementato e consegnato da una sessione precedente sullo stesso worktree: il commit e sul branch del ticket e la PR e aperta. Questa sessione non ha modificato nulla.",
+  "security_findings": []
+}

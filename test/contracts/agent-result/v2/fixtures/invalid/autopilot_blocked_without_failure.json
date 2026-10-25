@@ -1,0 +1,7 @@
+{
+  "contract_version": 2,
+  "code": "CYRA-660",
+  "state": "blocked",
+  "reason": "Il testo libero non basta a guidare il retry.",
+  "security_findings": []
+}

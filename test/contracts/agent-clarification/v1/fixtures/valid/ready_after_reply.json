@@ -1,0 +1,14 @@
+{
+  "state": "ready",
+  "cycles": 1,
+  "has_reply": true,
+  "rounds": [
+    {
+      "cycle": 1,
+      "questions": ["Quale comportamento ti aspetti al logout?"],
+      "response": "1. Torna alla dashboard",
+      "answered_at": "2026-07-31T09:12:00Z",
+      "created_at": "2026-07-31T09:02:00Z"
+    }
+  ]
+}

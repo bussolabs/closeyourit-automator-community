@@ -1,0 +1,6 @@
+{
+  "code": "CYRA-296",
+  "state": "blocked",
+  "tag": null,
+  "reason": "merge impossibile: main è già in checkout nel clone di riferimento e quel clone è read-only sotto sandbox"
+}

@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://closeyour.it/contracts/agent-queue/v1/schema.json",
+  "title": "CloseYourIt agent ticket queue contract v1 (host-first)",
+  "oneOf": [
+    { "$ref": "#/$defs/claim_request" },
+    { "$ref": "#/$defs/deferral_request" }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "error_code": { "type": "string", "pattern": "^R[0-9]{3}-[A-Z]+-[0-9]{3}$" },
+    "execution_phase": {
+      "enum": ["triage", "planner", "autopilot", "closer_staging", "closer_production"]
+    },
+    "defer_reason": {
+      "enum": ["temporary_failure", "preflight_blocked", "needs_clarification"]
+    },
+    "phase_profiles": {
+      "type": "object",
+      "required": ["triage", "planner", "autopilot", "closer_staging", "closer_production"],
+      "properties": {
+        "triage": { "$ref": "#/$defs/sha256" },
+        "planner": { "$ref": "#/$defs/sha256" },
+        "autopilot": { "$ref": "#/$defs/sha256" },
+        "closer_staging": { "$ref": "#/$defs/sha256" },
+        "closer_production": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "claim_request": {
+      "type": "object",
+      "required": ["selection_token", "host_id", "run_id", "ttl_seconds"],
+      "properties": {
+        "selection_token": { "type": "string", "minLength": 1 },
+        "host_id": { "$ref": "#/$defs/uuid" },
+        "run_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 2592000 }
+      },
+      "additionalProperties": true
+    },
+    "deferral_request": {
+      "type": "object",
+      "required": ["selection_token", "host_id", "reason"],
+      "properties": {
+        "selection_token": { "type": "string", "minLength": 1 },
+        "host_id": { "$ref": "#/$defs/uuid" },
+        "reason": { "$ref": "#/$defs/defer_reason" }
+      },
+      "additionalProperties": true
+    },
+    "lease": {
+      "type": "object",
+      "required": ["ticket", "host_id", "run_id", "execution_phase", "profile_digest", "expires_at", "attempt_id"],
+      "properties": {
+        "ticket": { "type": "string", "minLength": 1 },
+        "host_id": { "$ref": "#/$defs/uuid" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "agent": { "type": ["string", "null"] },
+        "execution_phase": { "$ref": "#/$defs/execution_phase" },
+        "profile_digest": { "$ref": "#/$defs/sha256" },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "attempt_id": { "$ref": "#/$defs/uuid" }
+      },
+      "additionalProperties": true
+    },
+    "claim_response": {
+      "type": "object",
+      "required": ["data"],
+      "properties": { "data": { "$ref": "#/$defs/lease" } },
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/error_code" },
+        "message": { "type": "string", "minLength": 1 },
+        "details": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "error_envelope": {
+      "type": "object",
+      "required": ["error"],
+      "properties": { "error": { "$ref": "#/$defs/error" } },
+      "additionalProperties": true
+    },
+    "holder": {
+      "type": "object",
+      "required": ["ticket", "host_id", "run_id"],
+      "properties": {
+        "ticket": { "type": "string", "minLength": 1 },
+        "host_id": { "$ref": "#/$defs/uuid" },
+        "run_id": { "type": ["string", "null"] },
+        "agent": { "type": ["string", "null"] },
+        "execution_phase": { "type": ["string", "null"] },
+        "expires_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": true
+    },
+    "held_error_envelope": {
+      "type": "object",
+      "required": ["data", "error"],
+      "properties": {
+        "data": { "$ref": "#/$defs/holder" },
+        "error": { "$ref": "#/$defs/error" }
+      },
+      "additionalProperties": true
+    },
+    "candidate_project": {
+      "type": "object",
+      "required": ["id", "key"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "key": { "type": "string", "minLength": 1 },
+        "repo": { "type": ["string", "null"] },
+        "default_branch": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "candidate_workflow": {
+      "type": "object",
+      "required": ["id", "phase", "execution_phase"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "phase": { "type": "string", "minLength": 1 },
+        "execution_phase": { "$ref": "#/$defs/execution_phase" },
+        "snapshot_version": { "type": ["integer", "null"] },
+        "snapshot_digest": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["id", "code", "title", "kind", "project", "workflow", "estimated_cost", "selection_token"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "code": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "kind": { "type": "string", "minLength": 1 },
+        "project": { "$ref": "#/$defs/candidate_project" },
+        "workflow": { "$ref": "#/$defs/candidate_workflow" },
+        "estimated_cost": { "type": ["string", "null"] },
+        "selection_token": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "next_candidate_response": {
+      "type": "object",
+      "required": ["data"],
+      "properties": { "data": { "$ref": "#/$defs/candidate" } },
+      "additionalProperties": true
+    },
+    "next_empty_response": {
+      "type": "object",
+      "required": ["data"],
+      "properties": { "data": { "type": "null" } },
+      "additionalProperties": true
+    },
+    "deferral_response_data": {
+      "type": "object",
+      "required": ["id", "host_id", "execution_phase", "reason", "retry_at", "created_at", "ticket", "replayed"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "agent_id": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "host_id": { "$ref": "#/$defs/uuid" },
+        "execution_phase": { "$ref": "#/$defs/execution_phase" },
+        "reason": { "$ref": "#/$defs/defer_reason" },
+        "retry_at": { "$ref": "#/$defs/timestamp" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "ticket": { "type": "string", "minLength": 1 },
+        "replayed": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "deferral_response": {
+      "type": "object",
+      "required": ["data"],
+      "properties": { "data": { "$ref": "#/$defs/deferral_response_data" } },
+      "additionalProperties": true
+    },
+    "selection_payload": {
+      "type": "object",
+      "required": ["version", "organization_id", "host_id", "execution_phase", "profile_digest", "project_id", "ticket_id", "estimated_cost", "candidate_version", "repository_fingerprint"],
+      "properties": {
+        "version": { "const": 3 },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "host_id": { "$ref": "#/$defs/uuid" },
+        "execution_phase": { "$ref": "#/$defs/execution_phase" },
+        "profile_digest": { "$ref": "#/$defs/sha256" },
+        "project_id": { "$ref": "#/$defs/uuid" },
+        "ticket_id": { "$ref": "#/$defs/uuid" },
+        "estimated_cost": { "type": ["string", "null"] },
+        "candidate_version": { "$ref": "#/$defs/sha256" },
+        "repository_fingerprint": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,12 @@
+[
+  { "id": "host-bearer-next", "channel": "next", "credential": "host_bearer", "endpoint": "/api/v1/ticket_queue", "status": 200 },
+  { "id": "host-bearer-claim", "channel": "claim", "credential": "host_bearer", "endpoint": "/api/v1/ticket_queue/claims", "status": 201 },
+  { "id": "host-bearer-deferral", "channel": "deferral", "credential": "host_bearer", "endpoint": "/api/v1/ticket_queue/deferrals", "status": 201 },
+  { "id": "no-credential", "channel": "claim", "credential": "none", "endpoint": "/api/v1/ticket_queue/claims", "status": 401, "code": "R401-AGENT-001" },
+  { "id": "org-token-rejected", "channel": "next", "credential": "org_bearer", "endpoint": "/api/v1/ticket_queue", "status": 401, "code": "R401-AGENT-001" },
+  { "id": "host-mismatch-claim", "channel": "claim", "credential": "host_bearer", "body": "host_id_mismatch", "endpoint": "/api/v1/ticket_queue/claims", "status": 403, "code": "R403-LEASE-001" },
+  { "id": "host-mismatch-deferral", "channel": "deferral", "credential": "host_bearer", "body": "host_id_mismatch", "endpoint": "/api/v1/ticket_queue/deferrals", "status": 403, "code": "R403-QUEUE-001" },
+  { "id": "foreign-selection-claim", "channel": "claim", "credential": "host_bearer", "body": "foreign_selection_token", "endpoint": "/api/v1/ticket_queue/claims", "status": 404, "code": "R404-QUEUE-001" },
+  { "id": "foreign-selection-deferral", "channel": "deferral", "credential": "host_bearer", "body": "foreign_selection_token", "endpoint": "/api/v1/ticket_queue/deferrals", "status": 404, "code": "R404-QUEUE-001" },
+  { "id": "foreign-project-next", "channel": "next", "credential": "host_bearer", "query": "foreign_project_key", "endpoint": "/api/v1/ticket_queue", "status": 404, "code": "R404-AGENT-002" }
+]

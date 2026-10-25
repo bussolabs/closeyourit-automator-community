@@ -1,0 +1,16 @@
+{
+  "code": "CYAU-97",
+  "technical_analysis": "Rinominare le colonne del modello Plan e allineare Deliver ai contratti reali delle skill.",
+  "scenarios": [
+    {
+      "given": "un piano approvato dal CTO",
+      "when": "l'autopilot consegna il risultato",
+      "then": "il server porta il ticket in review",
+      "expected": "status In Review e autopilot_completed_at valorizzato"
+    }
+  ],
+  "definition_of_done": ["Test verdi", "Contract vendored e verificato"],
+  "mixed_parts": null,
+  "notes": ["Sistema dormiente: nessun dato Plan reale in produzione"],
+  "state": "submitted-for-approval"
+}

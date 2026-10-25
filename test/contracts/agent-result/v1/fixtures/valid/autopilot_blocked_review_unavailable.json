@@ -1,0 +1,8 @@
+{
+  "code": "CYRA-225",
+  "state": "blocked",
+  "gate": { "passed": null, "note": "no quality-gate.yml found; checks could not be executed" },
+  "review": { "verdict": "unavailable" },
+  "cycles": 0,
+  "reason": "Cross-review non ottenibile in questa sessione: il verdetto lo produce il runner a valle."
+}

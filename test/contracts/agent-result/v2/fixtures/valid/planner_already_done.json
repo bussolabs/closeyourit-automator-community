@@ -1,0 +1,19 @@
+{
+  "contract_version": 2,
+  "code": "CYRA-675",
+  "state": "already-done",
+  "already_done": {
+    "summary": "Il ticket chiede il rilevamento dei duplicati alla creazione, e il gate esiste già nel ramo principale con la pagina di confronto.",
+    "sources": [
+      {
+        "path": "app/services/ticketing/resolve_duplicate.rb",
+        "line": 4,
+        "reason": "È il gate dei duplicati alla creazione che il ticket chiedeva di scrivere."
+      },
+      {
+        "path": "app/views/member/tickets/comparison.html.erb",
+        "reason": "La pagina di confronto richiesta dal ticket è già in pagina."
+      }
+    ]
+  }
+}

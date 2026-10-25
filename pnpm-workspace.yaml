@@ -1,0 +1,75 @@
+# pnpm 11 ignores native postinstalls by default (ERR_PNPM_IGNORED_BUILDS) → approve them here.
+# esbuild: vitest's transform engine (downloads the native binary via postinstall).
+allowBuilds:
+  esbuild: true
+
+# Security override: brace-expansion is vulnerable to CVE-2026-69152 (GHSA-rgw5-rvv9-x895,
+# high, CWE-400/770): DoS via unbounded intermediate arrays that bypasses the mitigation of
+# CVE-2026-14257. Transitive dependency via minimatch, present in the lockfile in two distinct
+# branches, both affected: the 2.x branch (via minimatch@5.1.9/9.0.9), already held at 2.1.2 after
+# CVE-2026-13149 (GHSA-3jxr-9vmj-r5cp, CYAU-143), forced to the fixed 2.1.4 (See CYAU-145);
+# 2.1.4 is in turn exposed to CVE-2026-102276 (GHSA-6j4f-fj2g-mc7p, high, CWE-400/674):
+# DoS via unbounded recursion in parseCommaParts → stack exhaustion; forced to the fixed
+# 2.1.5 (See CYAU-211); the 5.x branch (brace-expansion@5.0.7 via minimatch@10.2.5), forced to the fixed 5.0.9 (See CYAU-147);
+# 5.0.9 is exposed to the same CVE-2026-102276 (GHSA-6j4f-fj2g-mc7p): forced to the fixed
+# 5.0.10 (See CYAU-213). They remained exposed to other advisories of the same library (high up to
+# 2.1.6 and 5.0.11, moderate up to 2.1.7 and 5.0.12): both branches forced to the latest fixed one
+# (See CYAU-257).
+#
+# fast-uri < 3.1.5 is vulnerable to host confusion via backslash authority introducer
+# (CVE-2026-18446, GHSA-7p8r-x3mc-p8w7, high). Transitive dependency via ajv; forced to
+# 3.1.5. See CYAU-148. That fix was not enough: 3.1.5 remains exposed to four
+# advisories of the same family — host confusion via IDN canonicalization skipped on
+# scheme-relative references and variants (CVE-2026-75931/75899/75975/76172, GHSA-5jgf-p345-68v8
+# and twins, high, CWE-436). Fixed from 3.1.6; 3.1.7 is forced, the latest of the branch that ajv
+# accepts (`^3.0.1`) — 4.x would fall outside the range. See CYAU-194/195/196/197.
+#
+# nanoid < 3.3.16 is vulnerable to an infinite loop with a negative size in the non-secure generators
+# (CVE-2026-67214, GHSA-28wg-ghj8-5hjv, high, CWE-835), already forced to 3.3.16 (See CYAU-149);
+# 3.3.16 is in turn exposed to CVE-2026-67213 (GHSA-2v37-7h3g-55p8, high, CWE-835): same
+# infinite loop with size zero, already forced to 3.3.17 (See CYAU-150). The advisory then widened
+# the range and 3.3.17 turns out to be affected too: the backport on the 3.x branch is 3.3.18 (dist-tag
+# `legacy`), which according to OSV closes both GHSA-2v37-7h3g-55p8 (fixed < 3.3.18) and
+# GHSA-28wg-ghj8-5hjv (fixed < 3.3.16). The 5.x branch would close the same two only from 5.1.16;
+# postcss declares `nanoid: ^3.3.11`, so we stay on 3.x and avoid the major jump.
+# Transitive dependency via postcss (vite/vitest): test toolchain, never in the published
+# package. See CYAU-165.
+#
+# postcss < 8.5.18 is vulnerable to path traversal in the auto-loading of the previous
+# source map (sourceMappingURL) → arbitrary .map file disclosure (GHSA-r28c-9q8g-f849,
+# high, CWE-22), already forced to 8.5.18 (See CYAU-151); that fix was incomplete and
+# 8.5.18 remains exposed to CVE-2026-69153 (GHSA-fxqj-rqcc-2cmp, moderate, CWE-22/200):
+# with `from` unset the attacker-controlled sourceMappingURL still reads
+# an arbitrary .map. Transitive dependency via vite/vitest; forces the fixed version 8.5.23
+# (the only one in the lockfile). See CYAU-164.
+#
+# vite < 6.4.3 is vulnerable to a server.fs.deny bypass on alternative Windows paths
+# (CVE-2026-53571, GHSA-fx2h-pf6j-xcff, high, CWE-200/22): files outside the dev server
+# allowlist can be read. Transitive dependency via vitest (test toolchain),
+# the only one in the lockfile (5.4.21); forces the fixed version 6.4.3, the major jump
+# also upgrades esbuild 0.21.5 -> 0.25.x (used only by vite). See CYAU-152.
+#
+# source-map-js < 1.2.2 is vulnerable to an event-loop DoS via unvalidated section offsets
+# in indexed source maps (CVE-2026-93749, GHSA-68fv-2mgg-jv7q, high, CWE-1284).
+# Transitive dependency via postcss (vite/vitest) and magicast (@vitest/coverage-v8): test
+# toolchain, never in the published package. Forces the fixed 1.2.2, a patch compatible with the
+# caret ranges already declared by the dependents. See CYAU-229.
+#
+# tinypool < 2.1.1 is vulnerable to prototype pollution: a gadget in the worker options
+# leads to remote code execution (CVE-2026-104848, GHSA-5gmw-xhrv-c9v3, critical, CWE-1321).
+# Transitive dependency via vitest (the test worker pool), the only one in the lockfile
+# (1.1.1): test toolchain, never in the published package. Forces the fixed 2.1.1; vitest 3.x
+# declares `tinypool: ^1.1.1`, the major jump is verified by the full suite. See CYAU-230.
+# That fix is not enough: 2.1.1 remains exposed to CVE-2026-104849 (GHSA-85c8-ppgw-ccpr,
+# critical, CWE-1321/94): the `filename` option of `pool.run()` read from a polluted
+# Object.prototype makes it load an attacker's worker (RCE). Forces the fixed 2.1.2, a patch of the
+# same 2.1.x series. See CYAU-231.
+overrides:
+  "brace-expansion@<2.1.7": "2.1.7"
+  "brace-expansion@>=5.0.0 <5.0.12": "5.0.12"
+  "fast-uri@<3.1.7": "3.1.7"
+  "nanoid@<3.3.18": "3.3.18"
+  "postcss@<8.5.23": "8.5.23"
+  "source-map-js@<1.2.2": "1.2.2"
+  "tinypool@<2.1.2": "2.1.2"
+  "vite@<6.4.3": "6.4.3"

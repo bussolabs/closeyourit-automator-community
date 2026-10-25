@@ -1,0 +1,6 @@
+{
+  "code": "CYRA-231",
+  "state": "blocked",
+  "causa": "boh",
+  "reason": "Una causa fuori dall'elenco non deve passare: senza l'elenco, lo zod dell'host la lascerebbe attraversare intatta e il server la accetterebbe."
+}

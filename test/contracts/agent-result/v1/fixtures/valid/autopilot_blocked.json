@@ -1,0 +1,7 @@
+{
+  "code": "CYAU-97",
+  "state": "blocked",
+  "gate": { "passed": false },
+  "cycles": 2,
+  "reason": "Test di integrazione rossi non risolvibili automaticamente"
+}

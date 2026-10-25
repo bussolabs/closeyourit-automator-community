@@ -1,0 +1,19 @@
+version: 1
+runner:
+  - mise
+  - exec
+  - --
+timeout: 900
+checks:
+  - stage: lint
+    run: pnpm lint
+    required: true
+    description: ESLint static analysis
+  - stage: full
+    run: pnpm vitest run --coverage --minWorkers=4 --maxWorkers=4
+    required: true
+    description: Full suite con branch coverage
+  - stage: full
+    run: pnpm build
+    required: true
+    description: Build distributiva

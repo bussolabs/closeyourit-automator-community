@@ -1,0 +1,26 @@
+{
+  "code": "CYAU-97",
+  "state": "delivered",
+  "gate": {
+    "passed": true
+  },
+  "review": {
+    "verdict": "approved"
+  },
+  "cycles": 1,
+  "delivery": {
+    "prUrl": "https://github.com/bussolabs/closeyourit-rails/pull/123",
+    "cyiStatus": "in_review",
+    "autoMerged": false
+  },
+  "security_findings": [
+    {
+      "title": "Uno script legge ~/.git-credentials",
+      "detail": "bin/setup copia le credenziali git in un file di appoggio senza cancellarlo.",
+      "severity": "high"
+    },
+    {
+      "title": "Chiave d'accesso scritta dentro un indirizzo"
+    }
+  ]
+}

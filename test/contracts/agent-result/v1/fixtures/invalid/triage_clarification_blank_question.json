@@ -1,0 +1,10 @@
+{
+  "code": "CYAU-97",
+  "category": "backend",
+  "capabilities": ["backend"],
+  "risk": "medium",
+  "requires_human_approval": true,
+  "reasons": ["domanda vuota"],
+  "state": "needs-clarification",
+  "questions": [""]
+}

@@ -1,0 +1,67 @@
+# Esempio di playbook per closeyourit-automator.
+# Ogni azione: schedule (cron "0 8 * * *" o shorthand "every 15m" / "every day at 8am") + type
+# (claude | shell | codex) + run. I `defaults` vengono mergiati (shallow) in ogni azione — l'azione vince.
+# Copialo dove vuoi e puntalo con `automator install --playbook <path>` (o AUTOMATOR_PLAYBOOK).
+version: 1
+
+defaults:
+  cwd: ../closeyourit-rails
+  timeout: 300
+  # Sufficiente per azioni generiche. Ticket e skill devono sovrascriverlo con `strong`:
+  # containment: strong
+  containment: process-group
+
+actions:
+  # 1) Triage dei ticket non assegnati: sessione Claude headless (può invocare skill/subagenti).
+  triage:
+    description: "Triage dei ticket aperti/non assegnati del progetto"
+    schedule: "every 15m"
+    type: claude
+    run: "/closeyourit-ticket rivedi i ticket aperti non assegnati e proponi priorità"
+    permission_mode: acceptEdits
+    allowed_tools: [Read, Grep, Glob, "Bash(cyi:*)"]
+    timeout: 600
+
+  # 2) Report giornaliero: comando shell deterministico (nessun LLM nel loop).
+  report:
+    description: "Digest giornaliero errori/analytics"
+    schedule: "every day at 8am"
+    type: shell
+    run: "git status --short"
+
+  # 3) Audit settimanale del repo: Claude in sola lettura (permission_mode plan blocca le scritture).
+  audit:
+    description: "Audit architetturale del backend"
+    schedule: "0 3 * * 1"
+    type: claude
+    run: "/rails-audit check"
+    permission_mode: plan
+    allowed_tools: [Read, Grep, Glob, "Bash(cyi:*)"]
+    timeout: 1800
+
+  # 4) Watchdog: ping leggero ogni minuto (oltre all'heartbeat automatico del daemon).
+  watchdog:
+    description: "Controllo liveness dei monitor uptime"
+    schedule: "every 1m"
+    type: shell
+    run: "git status --short"
+
+  # 5) Fix headless con Codex: `codex exec` non-interattivo. La sicurezza è la sandbox nativa di Codex —
+  #    `workspace-write` confina le scritture alla directory di lavoro autorizzata (cwd). Esito via exit code.
+  #    Modalità sandbox esposte: read-only (default sicuro) | workspace-write. (danger-full-access non è ammessa.)
+  codexfix:
+    description: "Applica fix minori proposti dall'agente Codex nel workspace"
+    schedule: "0 4 * * 1"
+    type: codex
+    run: "Sistema i lint e i test rossi toccando solo i file necessari"
+    sandbox: workspace-write
+    model: gpt-5-codex
+    timeout: 1800
+    # Per rendere questa azione ticket-scoped (preflight reale prima del runtime), dichiarare esplicitamente:
+    # containment: strong
+    # ticket:
+    #   project: CYAU
+    #   code: CYAU-34
+    #   repository: closeyourit/closeyourit-automator
+    #   needs_decision: false
+    #   estimated_cost: 0
