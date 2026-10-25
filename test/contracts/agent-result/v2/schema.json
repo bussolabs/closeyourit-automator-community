@@ -1,0 +1,1247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://closeyour.it/contracts/agent-result/v2/schema.json",
+  "title": "CloseYourIt agent delivery result contract v2 (decision packets)",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/delivery_envelope"
+    }
+  ],
+  "$defs": {
+    "ticket_code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime": {
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "reviewer_runtime": {
+      "description": "The engine that reviewed the work. OpenCode only reviews (CYAU-228), so it is never a runtime.",
+      "enum": [
+        "claude",
+        "codex",
+        "opencode"
+      ]
+    },
+    "contract_version": {
+      "const": 2
+    },
+    "source_reference": {
+      "type": "object",
+      "required": [
+        "path",
+        "reason"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
+    "plan_work_item": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "description",
+        "files",
+        "dependencies"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^WI-[1-9][0-9]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/source_reference"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^WI-[1-9][0-9]*$"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "plan_risk": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "impact",
+        "mitigation"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^R-[1-9][0-9]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "impact": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "mitigation": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
+    "structured_plan": {
+      "type": "object",
+      "required": [
+        "summary",
+        "work_items",
+        "rationale",
+        "risks",
+        "open_points",
+        "sources"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "work_items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/plan_work_item"
+          }
+        },
+        "rationale": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/plan_risk"
+          }
+        },
+        "open_points": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/source_reference"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "acceptance_scenario": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "given",
+        "when",
+        "then",
+        "expected"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^SC-[1-9][0-9]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "given": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "when": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "then": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "expected": { "type": "string", "minLength": 1, "pattern": "\\S" }
+      },
+      "additionalProperties": false
+    },
+    "done_criterion": {
+      "type": "object",
+      "required": [
+        "id",
+        "text"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^DOD-[1-9][0-9]*$"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
+    "work_report": {
+      "type": "object",
+      "required": [
+        "summary",
+        "commit",
+        "changed_files",
+        "tests",
+        "risks",
+        "deviations",
+        "acceptance_evidence"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "changed_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "summary"
+            ],
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "summary": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "tests": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "command",
+              "status",
+              "summary"
+            ],
+            "properties": {
+              "command": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "status": { "enum": [ "passed", "failed", "not_run" ] },
+              "summary": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/plan_risk"
+          }
+        },
+        "deviations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "title",
+              "reason",
+              "impact"
+            ],
+            "properties": {
+              "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "reason": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "impact": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "acceptance_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "criterion_id",
+              "status",
+              "evidence",
+              "source"
+            ],
+            "properties": {
+              "criterion_id": { "type": "string", "pattern": "^DOD-[1-9][0-9]*$" },
+              "status": { "enum": [ "verified", "partial", "missing" ] },
+              "evidence": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "source": { "enum": [ "reported", "attested" ] }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "failure": {
+      "type": "object",
+      "required": [
+        "category",
+        "summary",
+        "retryable",
+        "human_action"
+      ],
+      "properties": {
+        "category": {
+          "enum": [
+            "authentication",
+            "authorization",
+            "configuration",
+            "security",
+            "dependency",
+            "network",
+            "quality_gate",
+            "merge_conflict",
+            "invalid_plan",
+            "tooling",
+            "unknown"
+          ]
+        },
+        "summary": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "retryable": { "type": "boolean" },
+        "human_action": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "technical_detail": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "review_finding": {
+      "type": "object",
+      "required": [
+        "severity",
+        "aspect",
+        "title",
+        "detail"
+      ],
+      "properties": {
+        "severity": { "enum": [ "blocker", "major", "minor", "info" ] },
+        "aspect": {
+          "type": [ "string", "null" ],
+          "enum": [ "requirements", "diff", "tests", "risks", null ]
+        },
+        "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "detail": { "type": [ "string", "null" ] }
+      },
+      "additionalProperties": false
+    },
+    "review_envelope": {
+      "type": "object",
+      "required": [
+        "status",
+        "summary"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "accepted",
+            "changes_requested",
+            "unavailable"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/review_finding"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "security_finding": {
+      "description": "Un'anomalia di sicurezza notata dall'agente MENTRE lavorava il ticket. Non e' il risultato di una scansione: e' cio' che si e' visto passando. `title` e' obbligatorio e non puo' essere fatto di soli spazi, perche' una voce senza titolo occuperebbe il riquadro rosso senza dire niente. `severity` resta una stringa libera di proposito: un valore fuori da un elenco chiuso farebbe rifiutare l'INTERA consegna, e chi legge la scarta da se'.",
+      "type": "object",
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "decision_card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headline",
+        "points",
+        "risk_level"
+      ],
+      "description": "Scheda per chi decide dalla coda: una frase su cosa succede se approva, da 1 a 3 punti brevi (4 sui bug: il primo dice cosa succede oggi), un livello di rischio. Italiano semplice, senza path, nomi di classe o sigle.",
+      "properties": {
+        "headline": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "\\S" },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "text"
+            ],
+            "properties": {
+              "label": { "type": "string", "minLength": 1, "maxLength": 40, "pattern": "\\S" },
+              "text": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "\\S" }
+            }
+          }
+        },
+        "risk_level": {
+          "enum": [
+            "none",
+            "low",
+            "high"
+          ]
+        },
+        "risk": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 160
+        }
+      }
+    },
+    "clarification_question": {
+      "description": "Una domanda di chiarimento: il solo testo, oppure il testo con 2-4 risposte proposte, al massimo una consigliata. Solo la consigliata può portare `reason`, una riga sul perché (CYRA-1033).",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "body",
+            "options"
+          ],
+          "properties": {
+            "body": { "type": "string", "minLength": 1, "maxLength": 180, "pattern": "\\S" },
+            "options": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "label"
+                ],
+                "properties": {
+                  "label": { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "\\S" },
+                  "recommended": { "type": "boolean" },
+                  "reason": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^\\n]*\\S[^\\n]*$" }
+                },
+                "if": { "required": ["reason"] },
+                "then": { "required": ["recommended"], "properties": { "recommended": { "const": true } } }
+              },
+              "maxContains": 1,
+              "minContains": 0,
+              "contains": {
+                "type": "object",
+                "required": [
+                  "recommended"
+                ],
+                "properties": {
+                  "recommended": { "const": true }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "triage_result": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "code",
+        "category",
+        "capabilities",
+        "risk",
+        "requires_human_approval",
+        "reasons",
+        "state"
+      ],
+      "properties": {
+        "contract_version": {
+          "$ref": "#/$defs/contract_version"
+        },
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "category": {
+          "enum": [
+            "ui",
+            "backend",
+            "testing",
+            "ci",
+            "security",
+            "performance",
+            "architecture",
+            "mixed"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "requires_human_approval": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "enum": [
+            "workable",
+            "needs-clarification",
+            "waiting",
+            "escalated"
+          ]
+        },
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/clarification_question"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "needs-clarification"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "questions"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "planner_result": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "code",
+        "state"
+      ],
+      "properties": {
+        "contract_version": {
+          "$ref": "#/$defs/contract_version"
+        },
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "plan": {
+          "$ref": "#/$defs/structured_plan"
+        },
+        "decision_card": {
+          "$ref": "#/$defs/decision_card"
+        },
+        "decision_brief": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Brief decisionale opzionale per chi approva dalla coda: 3-6 frasi in italiano semplice, senza path, nomi di classe o sigle. Ha senso solo con state=submitted-for-approval; i planner non aggiornati consegnano senza."
+        },
+        "scenarios": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/acceptance_scenario"
+          }
+        },
+        "definition_of_done": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/done_criterion"
+          }
+        },
+        "mixed_parts": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "frontend": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "integration": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "enum": [
+            "submitted-for-approval",
+            "blocked",
+            "already-done"
+          ]
+        },
+        "already_done": {
+          "description": "Il lavoro chiesto dal ticket esiste GIA' nel ramo principale: non c'e' niente da pianificare e il ticket si chiude. Diverso da `already-delivered` dell'autopilot, che dice invece che una sessione precedente aveva gia' aperto la proposta. Le `sources` sono obbligatorie: senza il posto in cui la cosa e' gia' fatta il verdetto non e' verificabile, e chiuderebbe un ticket sulla parola. Vale solo per il ticket INTERO: fatto a meta' non e' gia' fatto, e' un piano piu' corto.",
+          "type": "object",
+          "required": [
+            "summary",
+            "sources"
+          ],
+          "properties": {
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "sources": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/source_reference"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "failure": {
+          "$ref": "#/$defs/failure"
+        },
+        "causa": {
+          "description": "Perche' la macchina si e' fermata. `needs_decision`: serve una persona, e la lavorazione entra subito nella coda delle approvazioni. `unreachable`: non e' riuscita a guardare - un servizio esterno non ha risposto - e la lavorazione resta dov'e, riprova da sola e non aspetta niente da nessuno; solo oltre un tetto di tentativi chiama una persona. Assente vale `needs_decision`: e' il default sicuro, perche' chiamare una persona che non serviva costa un'occhiata, mentre non chiamarla quando serviva ferma la lavorazione per sempre.",
+          "enum": [
+            "needs_decision",
+            "unreachable"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "submitted-for-approval"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "plan",
+              "scenarios",
+              "definition_of_done",
+              "notes"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "failure"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "already-done"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "already_done"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "autopilot_result": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "code",
+        "state",
+        "security_findings"
+      ],
+      "properties": {
+        "decision_card": {
+          "$ref": "#/$defs/decision_card"
+        },
+        "contract_version": {
+          "$ref": "#/$defs/contract_version"
+        },
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "state": {
+          "enum": [
+            "delivered",
+            "blocked",
+            "already-delivered"
+          ]
+        },
+        "gate": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "review": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "enum": [
+                "approved",
+                "changes_requested",
+                "blocked",
+                "unavailable"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "cycles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "reason": {
+          "type": "string"
+        },
+        "work_report": {
+          "$ref": "#/$defs/work_report"
+        },
+        "failure": {
+          "$ref": "#/$defs/failure"
+        },
+        "security_findings": {
+          "description": "Le anomalie di sicurezza notate durante la lavorazione. Nel contratto v2 il campo e' obbligatorio: un elenco VUOTO significa «ho guardato e non ho trovato niente»; il campo ASSENTE rende il result invalido, perche' non permette di sapere se il controllo e' avvenuto.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/security_finding"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "delivered"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "gate",
+              "review",
+              "cycles",
+              "delivery",
+              "work_report"
+            ],
+            "properties": {
+              "gate": {
+                "type": "object",
+                "required": [
+                  "passed"
+                ],
+                "properties": {
+                  "passed": {
+                    "enum": [
+                      true,
+                      null
+                    ]
+                  }
+                }
+              },
+              "review": {
+                "type": "object",
+                "required": [
+                  "verdict"
+                ],
+                "properties": {
+                  "verdict": {
+                    "enum": [
+                      "approved",
+                      "unavailable"
+                    ]
+                  }
+                }
+              },
+              "cycles": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2
+              },
+              "delivery": {
+                "type": "object",
+                "required": [
+                  "prUrl",
+                  "cyiStatus",
+                  "autoMerged"
+                ],
+                "properties": {
+                  "prUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https://[^/?#@\\s]+/(?!\\.\\.?/)[^/?#%\\s]+/(?!\\.\\.?/)[^/?#%\\s]+/pull/[1-9][0-9]*$"
+                  },
+                  "cyiStatus": {
+                    "const": "in_review"
+                  },
+                  "autoMerged": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "failure"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "already-delivered"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "delivery",
+              "reason",
+              "cycles",
+              "work_report"
+            ],
+            "properties": {
+              "delivery": {
+                "type": "object",
+                "required": [
+                  "prUrl",
+                  "cyiStatus"
+                ],
+                "properties": {
+                  "prUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https://[^/?#@\\s]+/(?!\\.\\.?/)[^/?#%\\s]+/(?!\\.\\.?/)[^/?#%\\s]+/pull/[1-9][0-9]*$"
+                  },
+                  "cyiStatus": {
+                    "const": "in_review"
+                  },
+                  "autoMerged": {
+                    "const": false
+                  }
+                }
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "cycles": {
+                "const": 0
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "closer_staging_result": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "code",
+        "state"
+      ],
+      "properties": {
+        "contract_version": {
+          "$ref": "#/$defs/contract_version"
+        },
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "state": {
+          "enum": [
+            "staging-released",
+            "blocked"
+          ]
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^v\\d+\\.\\d+\\.\\d+-beta\\.\\d+$"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "commit": {
+          "description": "La sigla esatta della fotografia di codice su cui l'etichetta e' stata messa: 40 caratteri esadecimali minuscoli, sempre la stessa per la stessa fotografia. Fra il momento in cui il lavoro viene approvato e quello in cui parte il rilascio possono passare ore, e nel frattempo il codice puo' cambiare: senza questa riga nessuno puo' tornare indietro a controllare che cio' che e' uscito sia cio' che era stato guardato, e resta la parola della macchina. Qui NON si verifica che la sigla sia vera — si rende possibile verificarla.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "staging-released"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tag",
+              "commit"
+            ],
+            "properties": {
+              "tag": {
+                "type": "string",
+                "pattern": "^v\\d+\\.\\d+\\.\\d+-beta\\.\\d+$"
+              },
+              "commit": {
+                "description": "La sigla esatta della fotografia di codice su cui l'etichetta e' stata messa: 40 caratteri esadecimali minuscoli, sempre la stessa per la stessa fotografia. Fra il momento in cui il lavoro viene approvato e quello in cui parte il rilascio possono passare ore, e nel frattempo il codice puo' cambiare: senza questa riga nessuno puo' tornare indietro a controllare che cio' che e' uscito sia cio' che era stato guardato, e resta la parola della macchina. Qui NON si verifica che la sigla sia vera — si rende possibile verificarla.",
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "closer_production_result": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "code",
+        "state"
+      ],
+      "properties": {
+        "contract_version": {
+          "$ref": "#/$defs/contract_version"
+        },
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "state": {
+          "enum": [
+            "production-released",
+            "blocked"
+          ]
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^v\\d+\\.\\d+\\.\\d+$"
+        },
+        "awaiting_human_approval": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "commit": {
+          "description": "La sigla esatta della fotografia di codice su cui l'etichetta e' stata messa: 40 caratteri esadecimali minuscoli, sempre la stessa per la stessa fotografia. Fra il momento in cui il lavoro viene approvato e quello in cui parte il rilascio possono passare ore, e nel frattempo il codice puo' cambiare: senza questa riga nessuno puo' tornare indietro a controllare che cio' che e' uscito sia cio' che era stato guardato, e resta la parola della macchina. Qui NON si verifica che la sigla sia vera — si rende possibile verificarla.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "production-released"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tag",
+              "awaiting_human_approval",
+              "commit"
+            ],
+            "properties": {
+              "tag": {
+                "type": "string",
+                "pattern": "^v\\d+\\.\\d+\\.\\d+$"
+              },
+              "awaiting_human_approval": {
+                "const": true
+              },
+              "commit": {
+                "description": "La sigla esatta della fotografia di codice su cui l'etichetta e' stata messa: 40 caratteri esadecimali minuscoli, sempre la stessa per la stessa fotografia. Fra il momento in cui il lavoro viene approvato e quello in cui parte il rilascio possono passare ore, e nel frattempo il codice puo' cambiare: senza questa riga nessuno puo' tornare indietro a controllare che cio' che e' uscito sia cio' che era stato guardato, e resta la parola della macchina. Qui NON si verifica che la sigla sia vera — si rende possibile verificarla.",
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "delivery_envelope": {
+      "type": "object",
+      "required": [
+        "runtime",
+        "reviewer_runtime",
+        "result",
+        "review"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "reviewer_runtime": {
+          "$ref": "#/$defs/reviewer_runtime"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/triage_result"
+            },
+            {
+              "$ref": "#/$defs/planner_result"
+            },
+            {
+              "$ref": "#/$defs/autopilot_result"
+            },
+            {
+              "$ref": "#/$defs/closer_staging_result"
+            },
+            {
+              "$ref": "#/$defs/closer_production_result"
+            }
+          ]
+        },
+        "review": {
+          "$ref": "#/$defs/review_envelope"
+        },
+        "observed": {
+          "description": "Cio' che l'host ha MISURATO sulla propria copia di lavoro al momento della consegna, non cio' che l'agente dichiara a parole. `head_sha` e' la sigla del codice che l'host ha davvero in mano: 40 caratteri esadecimali minuscoli, letta con `git rev-parse HEAD` nel worktree gestito. Serve perche' un indirizzo di proposta che punta al lavoro di un altro ticket, a una versione vecchia, o a un lavoro il cui ultimo invio non e' mai partito, da fuori sono identici: tutti e tre passano. Confrontando questa sigla con quella che il servizio remoto mostra per quell'indirizzo, i tre casi si distinguono. Il contratto fissa solo la FORMA: QUALI fasi devono portarla lo decide il server, che e' l'unico a sapere quale fase e' stata reclamata.",
+          "type": "object",
+          "required": [
+            "head_sha"
+          ],
+          "properties": {
+            "head_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

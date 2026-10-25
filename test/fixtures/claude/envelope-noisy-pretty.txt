@@ -1,0 +1,8 @@
+[warn] plugin dir risolta da realpath
+[info] sessione avviata
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "{\"code\": \"CYRA-199\", \"category\": \"backend\", \"capabilities\": [\"backend\", \"database\"], \"risk\": \"low\", \"requires_human_approval\": false, \"reasons\": [\"Area: backend — segnali: migration, schema\"], \"state\": \"workable\"}"
+}

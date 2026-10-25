@@ -1,0 +1,14 @@
+{
+  "runtime": "claude",
+  "reviewer_runtime": "codex",
+  "result": {
+    "code": "CYAU-97",
+    "category": "backend",
+    "capabilities": ["backend"],
+    "risk": "low",
+    "requires_human_approval": false,
+    "reasons": ["Classificazione chiara"],
+    "state": "workable"
+  },
+  "review": { "status": "accepted", "summary": "Classificazione corretta e giustificata." }
+}

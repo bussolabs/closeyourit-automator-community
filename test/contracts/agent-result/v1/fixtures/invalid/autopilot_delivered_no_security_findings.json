@@ -1,0 +1,12 @@
+{
+  "code": "CYAU-97",
+  "state": "delivered",
+  "gate": { "passed": true },
+  "review": { "verdict": "approved" },
+  "cycles": 1,
+  "delivery": {
+    "prUrl": "https://github.com/bussolabs/closeyourit-rails/pull/123",
+    "cyiStatus": "in_review",
+    "autoMerged": false
+  }
+}

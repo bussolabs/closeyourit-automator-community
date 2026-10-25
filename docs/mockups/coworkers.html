@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coworkers · Anteprima CloseYourIt</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="bg-stone-100 text-zinc-900 font-sans text-sm antialiased">
+  <div class="min-h-dvh p-3.5 flex flex-col gap-3">
+    <div class="flex items-center justify-between gap-3 px-1">
+      <a href="/mockup" class="font-semibold text-base tracking-tight">CloseYourIt</a>
+      <span class="text-xs text-gray-600">Anteprima di Coworkers · controlli non ancora collegati</span>
+    </div>
+    <main class="flex flex-1 flex-col md:flex-row overflow-hidden rounded-lg border border-stone-200 bg-white min-h-[720px]">
+      <aside aria-label="Coworkers" class="flex flex-col w-full md:w-72 shrink-0 border-b md:border-b-0 md:border-r border-stone-200">
+        <header class="p-4 border-b border-stone-200">
+          <div class="flex items-center justify-between gap-3">
+            <h1 class="font-semibold text-[15px]">Coworkers</h1>
+            <button type="button" disabled class="h-[34px] px-3 rounded-md bg-indigo-600 text-white text-xs font-medium disabled:opacity-60">Nuovo Dot</button>
+          </div>
+          <p class="mt-2 text-xs text-gray-600">I tuoi agenti persistenti</p>
+        </header>
+        <div class="p-2">
+          <div aria-current="true" class="flex gap-3 rounded-md border border-indigo-100 bg-indigo-50 p-3">
+            <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white text-indigo-700 border border-indigo-100 font-semibold" aria-hidden="true">D</span>
+            <div class="min-w-0"><h2 class="font-medium text-[13px]">Dot di prova</h2><p class="mt-0.5 text-xs text-gray-600">Ricerca e analisi</p></div>
+          </div>
+        </div>
+        <p class="mt-auto p-4 text-xs leading-5 text-gray-600">Ogni Dot conserva la propria conversazione, le istruzioni e la memoria.</p>
+      </aside>
+      <section class="flex min-w-0 flex-1 flex-col" aria-label="Conversazione con Dot di prova">
+        <header class="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 px-5 py-4">
+          <div><h2 class="font-semibold text-[15px]">Dot di prova</h2><p class="mt-1 text-xs text-gray-600">Ricerca e analisi</p></div>
+          <div class="flex gap-2"><button disabled class="h-[34px] rounded-md border border-stone-200 px-3 text-xs font-medium disabled:opacity-60">Memoria</button><button disabled class="h-[34px] rounded-md border border-stone-200 px-3 text-xs font-medium disabled:opacity-60">Incarichi</button></div>
+        </header>
+        <div class="flex flex-1 flex-col px-5 py-8 md:px-8">
+          <div class="w-full max-w-2xl mx-auto">
+            <h3 class="text-[22px] leading-7 font-semibold tracking-tight">Un posto per lavorare insieme.</h3>
+            <p class="mt-3 max-w-lg text-sm leading-6 text-gray-600">Parla con il tuo Dot, condividi ciò che deve ricordare e affidagli un incarico. La conversazione resta disponibile mentre il lavoro prosegue.</p>
+            <div class="mt-7 border-t border-stone-200 pt-5">
+              <h4 class="font-semibold text-[13px]">Il primo esperimento</h4>
+              <p class="mt-2 max-w-lg text-sm leading-6 text-gray-600">Iniziamo da una ricerca su fonti pubbliche. Potrai controllare il risultato, correggere le istruzioni e riprendere la conversazione in seguito.</p>
+            </div>
+          </div>
+        </div>
+        <div class="border-t border-stone-200 px-5 py-4">
+          <label for="message" class="sr-only">Messaggio al Dot</label>
+          <div class="rounded-lg border border-stone-300 p-3 focus-within:border-indigo-600">
+            <textarea id="message" disabled rows="2" placeholder="Scrivi al tuo Dot…" class="block w-full resize-none border-0 bg-transparent text-sm placeholder:text-gray-600 focus:outline-none"></textarea>
+            <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+              <span class="text-xs text-gray-600">Puoi conversare mentre un incarico è in corso.</span>
+              <button disabled class="h-[34px] rounded-md bg-indigo-600 px-4 text-xs font-medium text-white disabled:opacity-60">Invia</button>
+            </div>
+          </div>
+        </div>
+      </section>
+      <aside aria-label="Incarichi" class="w-full lg:w-72 shrink-0 border-t lg:border-t-0 lg:border-l border-stone-200 bg-stone-50 p-4 hidden lg:block">
+        <div class="flex items-center justify-between gap-2"><h2 class="font-semibold text-[13px]">Incarichi</h2><button disabled class="text-indigo-700 text-xs font-medium disabled:opacity-60">Nuovo incarico</button></div>
+        <p class="mt-5 text-sm leading-6 text-gray-600">Qui ritroverai il lavoro affidato al Dot, i suoi progressi e i risultati.</p>
+        <div class="mt-7 border-t border-stone-200 pt-5"><h3 class="font-semibold text-[13px]">Memoria del Dot</h3><p class="mt-2 text-xs leading-5 text-gray-600">Preferenze e istruzioni salvate nel sistema. Puoi rileggerle e correggerle.</p></div>
+      </aside>
+    </main>
+    <footer class="px-1 text-xs text-gray-600 flex flex-wrap items-center justify-between gap-2">
+      <span class="inline-flex flex-wrap items-center gap-1">Fatto con <svg class="h-3 w-3 text-indigo-600" role="img" aria-label="amore" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/></svg> da <a class="underline underline-offset-2" href="https://www.bussolarialessio.me">Alessio Bussolari</a>, vicino al <a class="underline underline-offset-2" href="https://www.google.com/maps/search/?api=1&amp;query=Via+del+Prete+121%2C+47841+Cattolica+RN%2C+Italia">mare Adriatico</a>.</span>
+      <span>Prototipo locale · nessun collegamento alla produzione</span>
+    </footer>
+  </div>
+</body>
+</html>

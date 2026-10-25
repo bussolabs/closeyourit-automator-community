@@ -1,0 +1,76 @@
+# closeyourit-automator:guardrails-v2
+# Official Codex exec policy: the `forbidden` decision prevails over any local allow.
+# Delivery of the ticket branch happens outside the agent session, through the Automator.
+
+# Sensitive executables are forbidden from the first token, not just for one subcommand: this way intermediate
+# options (`git -c ... push`) do not open a bypass.
+prefix_rule(
+  pattern = [["git", "/bin/git", "/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"]],
+  decision = "forbidden",
+  justification = "Git interno vietato alla sessione agente; checkout e delivery sono gestiti dall'Automator.",
+)
+
+prefix_rule(
+  pattern = [["kamal", "bin/kamal", "/usr/local/bin/kamal", "/opt/homebrew/bin/kamal"]],
+  decision = "forbidden",
+  justification = "Deploy vietato alla sessione agente; usa la pipeline GitHub Actions autorizzata.",
+)
+
+prefix_rule(
+  pattern = ["bundle", "exec", ["kamal", "bin/kamal"]],
+  decision = "forbidden",
+  justification = "Deploy vietato alla sessione agente; usa la pipeline GitHub Actions autorizzata.",
+)
+
+prefix_rule(
+  pattern = [["ssh", "scp", "rsync", "/usr/bin/ssh", "/usr/bin/scp", "/usr/bin/rsync"]],
+  decision = "forbidden",
+  justification = "Accesso rete o credenziali operative vietato dentro la sessione agente.",
+)
+
+prefix_rule(
+  pattern = [["rails", "bin/rails", "rake", "bin/rake"], ["db:drop", "db:reset", "db:purge", "db:schema:load"]],
+  decision = "forbidden",
+  justification = "Operazione database distruttiva vietata; richiede esecuzione umana esplicita.",
+)
+
+prefix_rule(
+  pattern = ["bundle", "exec", ["rails", "bin/rails", "rake", "bin/rake"], ["db:drop", "db:reset", "db:purge", "db:schema:load"]],
+  decision = "forbidden",
+  justification = "Operazione database distruttiva vietata; richiede esecuzione umana esplicita.",
+)
+
+prefix_rule(
+  pattern = [["psql", "mysql", "sqlite3", "/usr/bin/psql", "/usr/bin/mysql", "/usr/bin/sqlite3"]],
+  decision = "forbidden",
+  justification = "Client SQL diretto vietato alla sessione agente; usa test e task applicativi non distruttivi.",
+)
+
+# Generic wrappers: without a recursive shell parser they could hide git/deploy/DB. The session uses the
+# allowed tools directly; a nested shell or `env/command/exec` is not needed.
+prefix_rule(
+  pattern = [["env", "/usr/bin/env", "command", "exec", "sh", "/bin/sh", "bash", "/bin/bash", "zsh", "/bin/zsh", "dash", "/bin/dash"]],
+  decision = "forbidden",
+  justification = "Wrapper shell vietato: può occultare comandi sensibili alla policy.",
+)
+
+prefix_rule(
+  pattern = ["mise", "exec", "--", ["git", "bin/git", "kamal", "bin/kamal", "psql", "mysql", "sqlite3"]],
+  decision = "forbidden",
+  justification = "Comando sensibile dietro mise vietato alla sessione agente.",
+)
+
+prefix_rule(
+  pattern = ["mise", "exec", "--", ["rails", "bin/rails", "rake", "bin/rake"], ["db:drop", "db:reset", "db:purge", "db:schema:load"]],
+  decision = "forbidden",
+  justification = "Operazione database distruttiva dietro mise vietata.",
+)
+
+# CYAU-174 — a ticket's status is decided by ONE place only: the server, when it registers the delivery.
+# There were three hands on the same lever and none knew about the others. Tokens are compared exactly, so
+# `statuses` (the list) is not affected; `show`, `list` and `comment` stay allowed too.
+prefix_rule(
+  pattern = [["cyi", "closeyourit", "/usr/local/bin/cyi", "/opt/homebrew/bin/cyi"], "tickets", ["status", "update", "approve"]],
+  decision = "forbidden",
+  justification = "Lo stato del ticket lo decide il server quando registra la consegna; l'agente non approva il proprio lavoro.",
+)

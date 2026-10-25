@@ -1,0 +1,9 @@
+{
+  "code": "CYAU-97",
+  "category": "backend",
+  "capabilities": ["backend"],
+  "risk": "medium",
+  "requires_human_approval": true,
+  "reasons": ["needs-clarification senza domande"],
+  "state": "needs-clarification"
+}

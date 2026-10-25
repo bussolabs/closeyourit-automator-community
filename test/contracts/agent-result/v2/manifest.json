@@ -1,0 +1,109 @@
+{
+  "fixtures": [
+    {
+      "path": "fixtures/valid/planner.json",
+      "definition": "planner_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_delivered.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_blocked.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/delivery_envelope.json",
+      "definition": "delivery_envelope",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/planner_already_done.json",
+      "definition": "planner_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/planner_legacy_shape.json",
+      "definition": "planner_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/planner_already_done_without_sources.json",
+      "definition": "planner_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_without_evidence.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_blocked_without_failure.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/delivery_envelope_bad_finding.json",
+      "definition": "delivery_envelope",
+      "valid": false
+    },
+    {
+      "path": "fixtures/valid/planner_decision_card.json",
+      "definition": "planner_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/planner_decision_card_bug_today.json",
+      "definition": "planner_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/planner_decision_card_five_points.json",
+      "definition": "planner_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/valid/autopilot_decision_card.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/triage_question_options.json",
+      "definition": "triage_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/triage_two_recommended.json",
+      "definition": "triage_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/valid/triage_question_four_options_reason.json",
+      "definition": "triage_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/triage_five_options.json",
+      "definition": "triage_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/triage_reason_without_recommended.json",
+      "definition": "triage_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/valid/delivery_envelope_opencode_reviewer.json",
+      "definition": "delivery_envelope",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/delivery_envelope_opencode_runtime.json",
+      "definition": "delivery_envelope",
+      "valid": false
+    }
+  ]
+}

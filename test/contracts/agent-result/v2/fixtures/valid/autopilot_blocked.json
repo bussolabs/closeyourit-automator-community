@@ -1,0 +1,19 @@
+{
+  "contract_version": 2,
+  "code": "CYRA-660",
+  "state": "blocked",
+  "failure": {
+    "category": "authentication",
+    "summary": "Git non può autenticarsi sul repository remoto.",
+    "retryable": false,
+    "human_action": "Ripristinare la credenziale GitHub dell'host e ruotare quella esposta.",
+    "technical_detail": "git push non riceve credenziali dal credential helper"
+  },
+  "security_findings": [
+    {
+      "title": "Token esposto durante la diagnosi",
+      "detail": "La credenziale deve essere ruotata.",
+      "severity": "high"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "version": 3,
+  "organization_id": "11111111-1111-4111-8111-111111111111",
+  "host_id": "22222222-2222-4222-8222-222222222222",
+  "execution_phase": "triage",
+  "profile_digest": "8ec11d059e1b6fe97afc3d987ba4d2e5741f010e0d865a6fd1754244f44a4065",
+  "project_id": "33333333-3333-4333-8333-333333333333",
+  "ticket_id": "44444444-4444-4444-8444-444444444444",
+  "estimated_cost": null,
+  "candidate_version": "9ee2410d13a43c467848f49f01ab528fe163b4d74aa9f99d72edbd25c86e2aba",
+  "repository_fingerprint": "95f936bec3ddcf08ef2b305eb6d8a2f4f4c29d9deef6a6eed8c61a497531489b"
+}

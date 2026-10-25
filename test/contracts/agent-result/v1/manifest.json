@@ -1,0 +1,307 @@
+{
+  "contract": "closeyourit-agent-result",
+  "version": 1,
+  "schema": "schema.json",
+  "fixtures": [
+    {
+      "path": "fixtures/invalid/autopilot_already_delivered_no_evidence.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_already_delivered_no_security_findings.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_already_delivered_prurl_percent_encoded.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_already_delivered_prurl_pull_nel_percorso.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_already_delivered_prurl_sito_qualunque.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_blocked_blank_reason.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_blocked_no_reason.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_automerged.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_bad_cycles.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_bad_prurl.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_empty_delivery.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_gate_failed.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_no_security_findings.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_prurl_con_credenziali.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_prurl_numero_con_zeri.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_prurl_numero_zero.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_prurl_senza_owner_repo.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_security_finding_blank_title.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/autopilot_delivered_security_finding_no_title.json",
+      "definition": "autopilot_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_production_bad_tag.json",
+      "definition": "closer_production_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_production_commit_malformed.json",
+      "definition": "closer_production_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_production_not_awaiting.json",
+      "definition": "closer_production_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_production_released_no_commit.json",
+      "definition": "closer_production_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_staging_bad_tag.json",
+      "definition": "closer_staging_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_staging_blocked_blank_reason.json",
+      "definition": "closer_staging_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_staging_blocked_no_reason.json",
+      "definition": "closer_staging_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_staging_commit_malformed.json",
+      "definition": "closer_staging_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_staging_released_no_commit.json",
+      "definition": "closer_staging_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_staging_released_no_tag.json",
+      "definition": "closer_staging_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/closer_staging_released_null_tag.json",
+      "definition": "closer_staging_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/delivery_envelope_observed_abbreviated.json",
+      "definition": "delivery_envelope",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/delivery_envelope_observed_extra_key.json",
+      "definition": "delivery_envelope",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/delivery_envelope_same_runtime.json",
+      "definition": "delivery_envelope",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/planner_blocked_blank_reason.json",
+      "definition": "planner_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/planner_blocked_causa_sconosciuta.json",
+      "definition": "planner_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/planner_blocked_no_reason.json",
+      "definition": "planner_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/planner_missing_analysis.json",
+      "definition": "planner_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/triage_bad_state.json",
+      "definition": "triage_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/triage_clarification_blank_question.json",
+      "definition": "triage_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/triage_clarification_no_questions.json",
+      "definition": "triage_result",
+      "valid": false
+    },
+    {
+      "path": "fixtures/valid/autopilot_already_delivered.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_blocked.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_blocked_review_unavailable.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_delivered.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_delivered_gate_null.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_delivered_prurl_ghes.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_delivered_review_unavailable.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_delivered_security_findings.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_delivered_security_findings_empty.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/autopilot_delivered_unverified.json",
+      "definition": "autopilot_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/closer_production.json",
+      "definition": "closer_production_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/closer_staging.json",
+      "definition": "closer_staging_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/closer_staging_blocked_no_tag.json",
+      "definition": "closer_staging_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/delivery_envelope.json",
+      "definition": "delivery_envelope",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/delivery_envelope_observed.json",
+      "definition": "delivery_envelope",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/planner.json",
+      "definition": "planner_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/planner_blocked.json",
+      "definition": "planner_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/planner_blocked_unreachable.json",
+      "definition": "planner_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/triage_clarification.json",
+      "definition": "triage_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/triage_workable.json",
+      "definition": "triage_result",
+      "valid": true
+    }
+  ]
+}

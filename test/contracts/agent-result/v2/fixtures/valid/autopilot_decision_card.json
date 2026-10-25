@@ -1,0 +1,60 @@
+{
+  "contract_version": 2,
+  "code": "CYRA-660",
+  "state": "delivered",
+  "gate": {
+    "passed": true
+  },
+  "review": {
+    "verdict": "unavailable"
+  },
+  "cycles": 1,
+  "delivery": {
+    "prUrl": "https://github.com/bussolabs/closeyourit-rails/pull/123",
+    "cyiStatus": "in_review",
+    "autoMerged": false
+  },
+  "work_report": {
+    "summary": "Il pacchetto decisionale è disponibile nelle due pagine.",
+    "commit": "3f2a91c0d4e6b8079a1c5f3d2e7b4a6c8d0f1e29",
+    "changed_files": [
+      {
+        "path": "app/views/member/tickets/_plan_body.html.erb",
+        "summary": "Mostra il piano strutturato con scenari in frase."
+      }
+    ],
+    "tests": [
+      {
+        "command": "bundle exec rspec spec/requests/member/tickets/automation_tab_spec.rb",
+        "status": "passed",
+        "summary": "Gli scenari v1 e v2 restano leggibili."
+      }
+    ],
+    "risks": [],
+    "deviations": [],
+    "acceptance_evidence": [
+      {
+        "criterion_id": "DOD-1",
+        "status": "verified",
+        "evidence": "La request spec confronta pagina e download.",
+        "source": "reported"
+      }
+    ]
+  },
+  "security_findings": [],
+  "decision_card": {
+    "headline": "Il resoconto dei costi ora si divide anche per progetto.",
+    "points": [
+      {
+        "label": "Cosa è stato fatto",
+        "text": "Una colonna per progetto nel resoconto settimanale."
+      },
+      {
+        "label": "Come è stato provato",
+        "text": "Test sul resoconto con due progetti."
+      }
+    ],
+    "risk_level": "none",
+    "risk": null
+  }
+}

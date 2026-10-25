@@ -1,0 +1,16 @@
+{
+  "contract": "closeyourit-agent-clarification",
+  "version": 1,
+  "schema": "schema.json",
+  "fixtures": [
+    { "path": "fixtures/valid/ready_no_rounds.json", "definition": "clarification_state", "valid": true },
+    { "path": "fixtures/valid/waiting_first_round.json", "definition": "clarification_state", "valid": true },
+    { "path": "fixtures/valid/ready_after_reply.json", "definition": "clarification_state", "valid": true },
+    { "path": "fixtures/valid/escalated.json", "definition": "clarification_state", "valid": true },
+    { "path": "fixtures/invalid/unknown_state.json", "definition": "clarification_state", "valid": false },
+    { "path": "fixtures/invalid/waiting_without_rounds.json", "definition": "clarification_state", "valid": false },
+    { "path": "fixtures/invalid/round_without_questions.json", "definition": "clarification_state", "valid": false },
+    { "path": "fixtures/invalid/round_with_four_questions.json", "definition": "clarification_state", "valid": false },
+    { "path": "fixtures/invalid/cycle_zero.json", "definition": "clarification_state", "valid": false }
+  ]
+}

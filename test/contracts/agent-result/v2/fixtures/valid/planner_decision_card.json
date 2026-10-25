@@ -1,0 +1,79 @@
+{
+  "contract_version": 2,
+  "code": "CYRA-660",
+  "state": "submitted-for-approval",
+  "plan": {
+    "summary": "Rendere piano, consegna e revisione leggibili nello stesso pacchetto.",
+    "work_items": [
+      {
+        "id": "WI-1",
+        "title": "Conservare il piano strutturato",
+        "description": "Salvare il dato canonico e generare da lì la resa per le persone.",
+        "files": [
+          {
+            "path": "app/models/agents/plan.rb",
+            "line": 1,
+            "reason": "Il modello possiede il piano approvabile."
+          }
+        ],
+        "dependencies": []
+      }
+    ],
+    "rationale": [
+      "Una sola sorgente evita differenze tra pagina e Markdown."
+    ],
+    "risks": [
+      {
+        "id": "R-1",
+        "title": "Piani storici",
+        "impact": "I record v1 non hanno il nuovo contenuto.",
+        "mitigation": "Leggere v1 e v2 durante tutto il rollout."
+      }
+    ],
+    "open_points": [],
+    "sources": [
+      {
+        "path": "app/views/member/tickets/_plan_body.html.erb",
+        "reason": "È la resa condivisa fra ticket e approvazioni."
+      }
+    ]
+  },
+  "decision_brief": "Chi approva legge in poche frasi cosa cambia e perché conviene. Il piano rende il risultato leggibile senza aprire il codice, con i rischi detti in chiaro. Il documento tecnico completo resta disponibile nella scheda a tutta pagina.",
+  "scenarios": [
+    {
+      "id": "SC-1",
+      "title": "Piano leggibile",
+      "given": "un piano prodotto automaticamente",
+      "when": "lo apro dal ticket",
+      "then": "vedo una frase ordinata e leggibile",
+      "expected": "posso scaricare lo stesso contenuto in Markdown"
+    }
+  ],
+  "definition_of_done": [
+    {
+      "id": "DOD-1",
+      "text": "La pagina e il Markdown derivano dagli stessi dati"
+    }
+  ],
+  "mixed_parts": null,
+  "notes": [],
+  "decision_card": {
+    "headline": "La guida spiegherà come avere il resoconto settimanale dei costi.",
+    "points": [
+      {
+        "label": "Cosa cambia",
+        "text": "Solo la guida: una sezione nuova."
+      },
+      {
+        "label": "Perché",
+        "text": "Oggi il resoconto lo conosce solo chi ha letto il codice."
+      },
+      {
+        "label": "Per chi usa l'app",
+        "text": "Nessuna differenza."
+      }
+    ],
+    "risk_level": "low",
+    "risk": "Il comando potrebbe cambiare nome prima del rilascio."
+  }
+}

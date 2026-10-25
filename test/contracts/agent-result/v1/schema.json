@@ -1,0 +1,793 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://closeyour.it/contracts/agent-result/v1/schema.json",
+  "title": "CloseYourIt agent delivery result contract v1 (skill-mode)",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/delivery_envelope"
+    }
+  ],
+  "$defs": {
+    "ticket_code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime": {
+      "enum": [
+        "claude",
+        "codex"
+      ]
+    },
+    "review_envelope": {
+      "type": "object",
+      "required": [
+        "status",
+        "summary"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "accepted",
+            "changes_requested",
+            "unavailable"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "security_finding": {
+      "description": "Un'anomalia di sicurezza notata dall'agente MENTRE lavorava il ticket. Non e' il risultato di una scansione: e' cio' che si e' visto passando. `title` e' obbligatorio e non puo' essere fatto di soli spazi, perche' una voce senza titolo occuperebbe il riquadro rosso senza dire niente. `severity` resta una stringa libera di proposito: un valore fuori da un elenco chiuso farebbe rifiutare l'INTERA consegna, e chi legge la scarta da se'.",
+      "type": "object",
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "triage_result": {
+      "type": "object",
+      "required": [
+        "code",
+        "category",
+        "capabilities",
+        "risk",
+        "requires_human_approval",
+        "reasons",
+        "state"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "category": {
+          "enum": [
+            "ui",
+            "backend",
+            "testing",
+            "ci",
+            "security",
+            "performance",
+            "architecture",
+            "mixed"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "requires_human_approval": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "enum": [
+            "workable",
+            "needs-clarification",
+            "waiting",
+            "escalated"
+          ]
+        },
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "needs-clarification"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "questions"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "planner_result": {
+      "type": "object",
+      "required": [
+        "code",
+        "state"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "technical_analysis": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "given",
+              "when",
+              "then",
+              "expected"
+            ],
+            "properties": {
+              "given": {
+                "type": "string"
+              },
+              "when": {
+                "type": "string"
+              },
+              "then": {
+                "type": "string"
+              },
+              "expected": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "definition_of_done": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mixed_parts": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "frontend": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "integration": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "enum": [
+            "submitted-for-approval",
+            "blocked"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "causa": {
+          "description": "Perche' la macchina si e' fermata. `needs_decision`: serve una persona, e la lavorazione entra subito nella coda delle approvazioni. `unreachable`: non e' riuscita a guardare - un servizio esterno non ha risposto - e la lavorazione resta dov'e, riprova da sola e non aspetta niente da nessuno; solo oltre un tetto di tentativi chiama una persona. Assente vale `needs_decision`: e' il default sicuro, perche' chiamare una persona che non serviva costa un'occhiata, mentre non chiamarla quando serviva ferma la lavorazione per sempre.",
+          "enum": [
+            "needs_decision",
+            "unreachable"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "submitted-for-approval"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "technical_analysis",
+              "scenarios",
+              "definition_of_done",
+              "notes"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "autopilot_result": {
+      "type": "object",
+      "required": [
+        "code",
+        "state"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "state": {
+          "enum": [
+            "delivered",
+            "blocked",
+            "already-delivered"
+          ]
+        },
+        "gate": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "review": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "enum": [
+                "approved",
+                "changes_requested",
+                "blocked",
+                "unavailable"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "cycles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "reason": {
+          "type": "string"
+        },
+        "security_findings": {
+          "description": "Le anomalie di sicurezza notate durante la lavorazione. OBBLIGATORIA su delivered e already-delivered (CYRA-674: trenta giorni di campo facoltativo = zero dichiarazioni su 1457 consegne): un elenco VUOTO significa «ho guardato e non ho trovato niente», che e' una risposta; il campo ASSENTE rende la consegna invalida, perche' non permette di sapere se il controllo e' avvenuto. Su blocked resta facoltativa: chi si ferma prima di lavorare non ha niente da dichiarare.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/security_finding"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "delivered"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "gate",
+              "review",
+              "cycles",
+              "delivery",
+              "security_findings"
+            ],
+            "properties": {
+              "gate": {
+                "type": "object",
+                "required": [
+                  "passed"
+                ],
+                "properties": {
+                  "passed": {
+                    "enum": [
+                      true,
+                      null
+                    ]
+                  }
+                }
+              },
+              "review": {
+                "type": "object",
+                "required": [
+                  "verdict"
+                ],
+                "properties": {
+                  "verdict": {
+                    "enum": [
+                      "approved",
+                      "unavailable"
+                    ]
+                  }
+                }
+              },
+              "cycles": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2
+              },
+              "delivery": {
+                "type": "object",
+                "required": [
+                  "prUrl",
+                  "cyiStatus",
+                  "autoMerged"
+                ],
+                "properties": {
+                  "prUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https://[^/?#@\\s]+/(?!\\.\\.?/)[^/?#%\\s]+/(?!\\.\\.?/)[^/?#%\\s]+/pull/[1-9][0-9]*$"
+                  },
+                  "cyiStatus": {
+                    "const": "in_review"
+                  },
+                  "autoMerged": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "already-delivered"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "delivery",
+              "reason",
+              "cycles",
+              "security_findings"
+            ],
+            "properties": {
+              "delivery": {
+                "type": "object",
+                "required": [
+                  "prUrl",
+                  "cyiStatus"
+                ],
+                "properties": {
+                  "prUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https://[^/?#@\\s]+/(?!\\.\\.?/)[^/?#%\\s]+/(?!\\.\\.?/)[^/?#%\\s]+/pull/[1-9][0-9]*$"
+                  },
+                  "cyiStatus": {
+                    "const": "in_review"
+                  },
+                  "autoMerged": {
+                    "const": false
+                  }
+                }
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "cycles": {
+                "const": 0
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "closer_staging_result": {
+      "type": "object",
+      "required": [
+        "code",
+        "state"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "state": {
+          "enum": [
+            "staging-released",
+            "blocked"
+          ]
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^v\\d+\\.\\d+\\.\\d+-beta\\.\\d+$"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "plain_reason": {
+          "description": "Il motivo del blocco detto a chi decide: una o due frasi in italiano semplice, senza sigle di commit, nomi di file o di comandi. Facoltativo: `reason` resta il testo tecnico per chi indaga, e quando questo campo manca la scheda mostra `reason`. Nessun limite di lunghezza di proposito: un testo troppo lungo non deve far rifiutare il rapporto e perdere il motivo (CYRA-1082).",
+          "type": "string"
+        },
+        "commit": {
+          "description": "La sigla esatta della fotografia di codice su cui l'etichetta e' stata messa: 40 caratteri esadecimali minuscoli, sempre la stessa per la stessa fotografia. Fra il momento in cui il lavoro viene approvato e quello in cui parte il rilascio possono passare ore, e nel frattempo il codice puo' cambiare: senza questa riga nessuno puo' tornare indietro a controllare che cio' che e' uscito sia cio' che era stato guardato, e resta la parola della macchina. Qui NON si verifica che la sigla sia vera — si rende possibile verificarla.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "staging-released"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tag",
+              "commit"
+            ],
+            "properties": {
+              "tag": {
+                "type": "string",
+                "pattern": "^v\\d+\\.\\d+\\.\\d+-beta\\.\\d+$"
+              },
+              "commit": {
+                "description": "La sigla esatta della fotografia di codice su cui l'etichetta e' stata messa: 40 caratteri esadecimali minuscoli, sempre la stessa per la stessa fotografia. Fra il momento in cui il lavoro viene approvato e quello in cui parte il rilascio possono passare ore, e nel frattempo il codice puo' cambiare: senza questa riga nessuno puo' tornare indietro a controllare che cio' che e' uscito sia cio' che era stato guardato, e resta la parola della macchina. Qui NON si verifica che la sigla sia vera — si rende possibile verificarla.",
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "closer_production_result": {
+      "type": "object",
+      "required": [
+        "code",
+        "state"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ticket_code"
+        },
+        "state": {
+          "enum": [
+            "production-released",
+            "blocked"
+          ]
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^v\\d+\\.\\d+\\.\\d+$"
+        },
+        "awaiting_human_approval": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "plain_reason": {
+          "description": "Il motivo del blocco detto a chi decide: una o due frasi in italiano semplice, senza sigle di commit, nomi di file o di comandi. Facoltativo: `reason` resta il testo tecnico per chi indaga, e quando questo campo manca la scheda mostra `reason`. Nessun limite di lunghezza di proposito: un testo troppo lungo non deve far rifiutare il rapporto e perdere il motivo (CYRA-1082).",
+          "type": "string"
+        },
+        "commit": {
+          "description": "La sigla esatta della fotografia di codice su cui l'etichetta e' stata messa: 40 caratteri esadecimali minuscoli, sempre la stessa per la stessa fotografia. Fra il momento in cui il lavoro viene approvato e quello in cui parte il rilascio possono passare ore, e nel frattempo il codice puo' cambiare: senza questa riga nessuno puo' tornare indietro a controllare che cio' che e' uscito sia cio' che era stato guardato, e resta la parola della macchina. Qui NON si verifica che la sigla sia vera — si rende possibile verificarla.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "production-released"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tag",
+              "awaiting_human_approval",
+              "commit"
+            ],
+            "properties": {
+              "tag": {
+                "type": "string",
+                "pattern": "^v\\d+\\.\\d+\\.\\d+$"
+              },
+              "awaiting_human_approval": {
+                "const": true
+              },
+              "commit": {
+                "description": "La sigla esatta della fotografia di codice su cui l'etichetta e' stata messa: 40 caratteri esadecimali minuscoli, sempre la stessa per la stessa fotografia. Fra il momento in cui il lavoro viene approvato e quello in cui parte il rilascio possono passare ore, e nel frattempo il codice puo' cambiare: senza questa riga nessuno puo' tornare indietro a controllare che cio' che e' uscito sia cio' che era stato guardato, e resta la parola della macchina. Qui NON si verifica che la sigla sia vera — si rende possibile verificarla.",
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "delivery_envelope": {
+      "type": "object",
+      "required": [
+        "runtime",
+        "reviewer_runtime",
+        "result",
+        "review"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "reviewer_runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/triage_result"
+            },
+            {
+              "$ref": "#/$defs/planner_result"
+            },
+            {
+              "$ref": "#/$defs/autopilot_result"
+            },
+            {
+              "$ref": "#/$defs/closer_staging_result"
+            },
+            {
+              "$ref": "#/$defs/closer_production_result"
+            }
+          ]
+        },
+        "review": {
+          "$ref": "#/$defs/review_envelope"
+        },
+        "observed": {
+          "description": "Cio' che l'host ha MISURATO sulla propria copia di lavoro al momento della consegna, non cio' che l'agente dichiara a parole. `head_sha` e' la sigla del codice che l'host ha davvero in mano: 40 caratteri esadecimali minuscoli, letta con `git rev-parse HEAD` nel worktree gestito. Serve perche' un indirizzo di proposta che punta al lavoro di un altro ticket, a una versione vecchia, o a un lavoro il cui ultimo invio non e' mai partito, da fuori sono identici: tutti e tre passano. Confrontando questa sigla con quella che il servizio remoto mostra per quell'indirizzo, i tre casi si distinguono. Il contratto fissa solo la FORMA: QUALI fasi devono portarla lo decide il server, che e' l'unico a sapere quale fase e' stata reclamata.",
+          "type": "object",
+          "required": [
+            "head_sha"
+          ],
+          "properties": {
+            "head_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "runtime"
+            ],
+            "properties": {
+              "runtime": {
+                "const": "claude"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reviewer_runtime": {
+                "const": "codex"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "runtime"
+            ],
+            "properties": {
+              "runtime": {
+                "const": "codex"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reviewer_runtime": {
+                "const": "claude"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

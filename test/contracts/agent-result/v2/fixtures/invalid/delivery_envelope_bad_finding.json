@@ -1,0 +1,28 @@
+{
+  "runtime": "claude",
+  "reviewer_runtime": "codex",
+  "result": {
+    "contract_version": 2,
+    "code": "CYRA-660",
+    "state": "blocked",
+    "failure": {
+      "category": "invalid_plan",
+      "summary": "Il piano non è applicabile.",
+      "retryable": false,
+      "human_action": "Correggere il piano."
+    },
+    "security_findings": []
+  },
+  "review": {
+    "status": "changes_requested",
+    "summary": "Manca una prova.",
+    "findings": [
+      {
+        "severity": "grave",
+        "aspect": "tests",
+        "title": "Manca un test",
+        "detail": null
+      }
+    ]
+  }
+}

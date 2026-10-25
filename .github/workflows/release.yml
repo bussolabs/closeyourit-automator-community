@@ -1,0 +1,379 @@
+# Distribuzione dell'Automator (CYAU-33): builda, TESTA e impacchetta un artifact verificato (checksum sha256) e
+# pubblica il manifest del canale come asset della release GitHub. Il canale si deriva dal tag: `v1.4.0` → stable,
+# `v1.4.0-beta.1` (con prerelease) → beta. Il comando `automator update` legge i manifest dall'asset stabile
+# dalla release-tag `automator-channels`, scegliendo la generazione append-only creata più di recente,
+# indipendente da `latest` (che esclude le prerelease), scarica l'artifact
+# elencato, ne verifica il checksum e lo attiva atomicamente. Solo una build con test verdi viene pubblicata.
+#
+# Sicurezza: il nome del tag è input controllabile da chi pusha → è VALIDATO come semver (charset ristretto) nello
+# step `meta` e da lì in poi ogni valore passa nei `run:` SOLO via `env:` referenziato come "$VAR" (mai
+# interpolazione `${{ }}` diretta dentro lo script shell) → nessuna command injection.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: automator-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      channel: ${{ steps.meta.outputs.channel }}
+      sha256: ${{ steps.immutable.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup mise (node + pnpm dalla mise.toml del repo)
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          # 8 runner condividono la cartella di mise: estrarre la cache riscrive binari in uso (ETXTBSY, CYAU-210)
+          cache: false
+
+      - name: Installa le dipendenze
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Il test reale CYAU-41 crea una scope systemd e prova un discendente fuggito via setsid. Un semplice
+      # ubuntu runner senza user manager renderebbe il test silenziosamente skipped: avvia quindi esplicitamente
+      # la sessione utente e rende il prerequisito obbligatorio nel gate release.
+      - name: Abilita systemd user manager per il test containment strong
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$uid.service"
+          for _attempt in $(seq 1 20); do
+            [ -S "/run/user/$uid/bus" ] && break
+            sleep 0.25
+          done
+          test -S "/run/user/$uid/bus"
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          systemctl --user show --property=Version --value
+
+      - name: Packages the Secret Service and confinement tests need on a GitHub-hosted runner
+        run: sudo apt-get update -q && sudo apt-get install -y -q gnome-keyring libsecret-tools bubblewrap
+
+      - name: Verifica prerequisiti host Linux
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test -r /sys/fs/cgroup/cgroup.controllers
+          command -v bwrap >/dev/null
+          test -x /usr/bin/dbus-daemon
+          test -x /usr/bin/gnome-keyring-daemon
+          test -x /usr/bin/secret-tool
+
+      # Gate: un artifact è pubblicabile SOLO se i test passano → «installa una versione verificata» (Scenario 1).
+      - name: Test con Secret Service isolato
+        env:
+          AUTOMATOR_REQUIRE_STRONG_CONTAINMENT_TEST: '1'
+          # Stessa ragione della riga sopra, per il write-confinement (CYAU-123): senza bubblewrap
+          # usabile i test reali del recinto SKIPPANO, e si pubblicherebbe una release il cui
+          # confinamento delle scritture non e' mai stato verificato.
+          AUTOMATOR_REQUIRE_BWRAP_PROBE: '1'
+        run: bash scripts/test-secret-service.sh
+
+      - name: Determina e VALIDA versione e canale dal tag
+        id: meta
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          # Difesa all'ingresso: accetta solo tag semver (charset ristretto, nessun metacarattere shell) → i valori
+          # a valle sono sicuri da usare nei nomi file/URL. Un tag ostile fa fallire il workflow qui.
+          if ! node scripts/release-package.mjs validate --version "$version"; then
+            echo "::error::tag non semver, pubblicazione rifiutata: $tag" >&2
+            exit 1
+          fi
+          if printf '%s' "$version" | grep -q '-'; then channel=beta; else channel=stable; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Impacchetta l'artifact (bin + dist + assets + dipendenze di produzione)
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Resolve the real binaries once, inside the checkout where mise.toml is trusted. A bare `node` that falls
+          # through to the mise shim fails with "No version is set for shim: node" (CYAU-262).
+          NODE="$(mise which node)"
+          PNPM="$(mise which pnpm)"
+          echo "node=$NODE pnpm=$PNPM resolved-by-path=$(command -v node)"
+          stage_name="automator-$VERSION"
+          # Lo stage deve stare fuori dal checkout: altrimenti Node può risolvere le dipendenze dal node_modules
+          # del repository e il preflight passa anche quando l'archivio non contiene le dipendenze di produzione.
+          stage="$RUNNER_TEMP/$stage_name"
+          rm -rf "$stage" && mkdir -p "$stage"
+          # Il layout estratto deve essere ESEGUIBILE con `node <stage>/bin/run.js` → include le prod deps.
+          # `pnpm-workspace.yaml` va copiato con gli altri: da pnpm 10 è lì che vivono `overrides` e
+          # `allowBuilds`, e il lockfile li registra. Senza il file, l'install nello stage vede zero override
+          # contro un lockfile che ne dichiara quattro → ERR_PNPM_LOCKFILE_CONFIG_MISMATCH e nessuna release
+          # (successo finché nessun override esisteva; i primi arrivati sono stati quelli di sicurezza).
+          cp -R bin dist assets package.json pnpm-lock.yaml pnpm-workspace.yaml "$stage"/
+          # Incorpora il tag solo nella copia staged: il checkout resta immutato e il package pubblicato non conserva 0.0.1.
+          "$NODE" scripts/release-package.mjs stamp --package "$stage/package.json" --version "$VERSION"
+          [ -f oclif.manifest.json ] && cp oclif.manifest.json "$stage"/ || true
+          [ -f playbook.example.yml ] && cp playbook.example.yml "$stage"/ || true
+          # Niente `--ignore-workspace`: ignorerebbe di nuovo gli override appena copiati. Lo scopo di quel flag
+          # era impedire a pnpm di risalire a un workspace esterno allo stage — ora ci pensa il
+          # `pnpm-workspace.yaml` dello stage, che è la root da cui pnpm smette di risalire.
+          ( cd "$stage" && "$PNPM" install --prod --frozen-lockfile --ignore-scripts )
+          # Gate pre-pubblicazione: metadata e output reale del binario devono coincidere col tag/manifest.
+          "$NODE" scripts/release-package.mjs verify \
+            --package "$stage/package.json" --version "$VERSION" --cli "$stage/bin/run.js"
+          # Archive riproducibile: un rerun dello stesso tag rigenera gli stessi byte e può completare in sicurezza
+          # una pubblicazione parziale. Singola dir di primo livello → estrazione con `--strip-components=1`.
+          ( cd "$RUNNER_TEMP" && tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner -cf - "$stage_name" ) \
+            | gzip -n > "$stage_name.tgz"
+
+      - name: Riusa l'artifact immutabile già pubblicato e calcola il checksum autorevole
+        id: immutable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -eu
+          artifact="automator-$VERSION.tgz"
+          rm -f immutable-release-error immutable-assets.json "published-$artifact"
+          if release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .id 2>immutable-release-error); then
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > immutable-assets.json
+            existing_url=$(jq -r --arg name "$artifact" \
+              'add | map(select(.name == $name)) | first | .url // empty' immutable-assets.json)
+            if [ -n "$existing_url" ]; then
+              # Il primo artifact pubblicato è autorevole: un retry lo riusa byte per byte, anche se nel frattempo
+              # è cambiata la versione degli strumenti di compressione del runner.
+              gh api -H 'Accept: application/octet-stream' "$existing_url" > "published-$artifact"
+              mv "published-$artifact" "$artifact"
+            fi
+          elif grep -Fq 'Not Found (HTTP 404)' immutable-release-error; then
+            : # prima pubblicazione della release versionata
+          else
+            cat immutable-release-error >&2
+            exit 1
+          fi
+          sha=$(shasum -a 256 "$artifact" | awk '{print $1}')
+          printf '%s  %s\n' "$sha" "$artifact" > "$artifact.sha256"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Prepara il candidato autorevole per i gate e la pubblicazione
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -eu
+          mkdir release-candidate
+          mv "automator-$VERSION.tgz" "automator-$VERSION.tgz.sha256" release-candidate/
+
+      - name: Conserva il candidato tra i job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate
+          path: release-candidate/
+          if-no-files-found: error
+          retention-days: 1
+
+  release-smoke:
+    name: smoke linux
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup mise (node + pnpm dalla mise.toml del repo)
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          # 8 runner condividono la cartella di mise: estrarre la cache riscrive binari in uso (ETXTBSY, CYAU-210)
+          cache: false
+
+      - name: Installa e builda lo smoke runner
+        run: |
+          set -eu
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Scarica lo stesso candidato destinato alla pubblicazione
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: candidate
+
+      - name: Verifica fresh install, upgrade e rollback reale
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+          CHANNEL: ${{ needs.package.outputs.channel }}
+        run: |
+          set -eu
+          node scripts/release-smoke.mjs \
+            --artifact "candidate/automator-$VERSION.tgz" \
+            --version "$VERSION" \
+            --channel "$CHANNEL" \
+            --workspace "$RUNNER_TEMP/release-smoke"
+
+      # Il bootstrap first-contact seleziona esclusivamente il canale stable. Prima di pubblicare una stable,
+      # esegue quindi due installazioni consecutive dello STESSO artifact candidato su HOME Linux pulita:
+      # verifica checksum, candidate preflight, updater reale, launcher e idempotenza end-to-end.
+      - name: Verifica bootstrap reale e idempotente su host pulito
+        if: needs.package.outputs.channel == 'stable'
+        env:
+          AUTOMATOR_BOOTSTRAP_REAL_ARTIFACT: ${{ github.workspace }}/candidate/automator-${{ needs.package.outputs.version }}.tgz
+          AUTOMATOR_BOOTSTRAP_REAL_VERSION: ${{ needs.package.outputs.version }}
+        run: pnpm vitest run test/bootstrap.test.ts -t "artifact release reale"
+
+  publish:
+    needs: [package, release-smoke]
+    # Token contents:write soltanto su VM GitHub-hosted effimera: nessun processo o workspace persistente dei
+    # job che eseguono dipendenze del repository può intercettare il token della pubblicazione.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Scarica il candidato che ha superato entrambi gli smoke test
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: .
+
+      - name: Componi il manifest CUMULATIVO del canale (storico multi-versione + nuova entry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.package.outputs.version }}
+          CHANNEL: ${{ needs.package.outputs.channel }}
+          SHA256: ${{ needs.package.outputs.sha256 }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -eu
+          url="$REPO_URL/releases/download/$GITHUB_REF_NAME/automator-$VERSION.tgz"
+          # Il manifest DEVE essere cumulativo: `automator update` legge le generazioni immutabili del tag stabile
+          # `automator-channels` e
+          # selectTargetRelease / --target-version / --allow-downgrade hanno senso solo con lo storico completo. Una
+          # generazione esatta già pubblicata viene riusata byte per byte; altrimenti parto dall'ultima generazione e
+          # appendo la nuova entry, deduplicando per versione. Le generazioni append-only evitano la finestra distruttiva di
+          # `--clobber`; l'API paginata evita sia il limite delle ultime 100 release sia l'ambiguità stable/beta di
+          # GitHub `latest`. Solo il 404 esplicito significa «prima pubblicazione»: rete/API/rate-limit falliscono chiuso.
+          generation="$CHANNEL-$VERSION.json"
+          rm -f channel-release-error channel-assets.json previous.json existing-generation.json "$generation"
+          if release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/automator-channels" --jq .id 2>channel-release-error); then
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > channel-assets.json
+            existing_generation_url=$(jq -r --arg name "$generation" \
+              'add | map(select(.name == $name)) | first | .url // empty' channel-assets.json)
+            if [ -n "$existing_generation_url" ]; then
+              # Late rerun: la generazione esatta è immutabile e autorevole. Riusa i suoi byte dopo che lo script
+              # ha verificato che l'entry corrente coincida per versione, canale, URL e checksum.
+              gh api -H 'Accept: application/octet-stream' "$existing_generation_url" > existing-generation.json
+            else
+              previous_url=$(jq -r --arg prefix "$CHANNEL-" \
+                'add | map(select(.name | startswith($prefix)) | select(.name | endswith(".json"))) | sort_by([.created_at, .id]) | last | .url // empty' \
+                channel-assets.json)
+            fi
+            if [ -n "${previous_url:-}" ]; then
+              gh api -H 'Accept: application/octet-stream' "$previous_url" > previous.json
+            fi
+          elif grep -Fq 'Not Found (HTTP 404)' channel-release-error; then
+            : # il contenitore non esiste ancora: prima pubblicazione
+          else
+            cat channel-release-error >&2
+            exit 1
+          fi
+          manifest_args=(manifest --version "$VERSION" --channel "$CHANNEL" --url "$url" --sha256 "$SHA256" --output "$generation")
+          if [ -f existing-generation.json ]; then
+            manifest_args+=(--existing existing-generation.json)
+          elif [ -f previous.json ]; then
+            manifest_args+=(--previous previous.json)
+          fi
+          node scripts/release-package.mjs "${manifest_args[@]}"
+
+      - name: Pubblica la release e carica artifact + checksum immutabili
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.package.outputs.version }}
+          CHANNEL: ${{ needs.package.outputs.channel }}
+        run: |
+          set -eu
+          prerelease=""
+          [ "$CHANNEL" = "beta" ] && prerelease="--prerelease" || true
+          artifact="automator-$VERSION.tgz"
+          assets=("$artifact" "$artifact.sha256")
+          rm -f version-release-error version-assets.json
+          if release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .id 2>version-release-error); then
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > version-assets.json
+
+            # Prima di qualunque upload verifica TUTTI gli asset già esistenti. Un rerun dello stesso tag con byte
+            # diversi fallisce senza mutare la release: il manifest canonico non può così restare agganciato a uno
+            # SHA precedente mentre l'URL serve un artifact sostituito.
+            for asset in "${assets[@]}"; do
+              existing_url=$(jq -r --arg name "$asset" 'add | map(select(.name == $name)) | first | .url // empty' version-assets.json)
+              if [ -n "$existing_url" ]; then
+                gh api -H 'Accept: application/octet-stream' "$existing_url" > "existing-$asset"
+                if ! cmp -s "$asset" "existing-$asset"; then
+                  echo "::error::asset $asset già presente con contenuto differente" >&2
+                  exit 1
+                fi
+              fi
+            done
+
+            # Recupero idempotente da una pubblicazione parziale: carica soltanto gli asset assenti, mai --clobber.
+            for asset in "${assets[@]}"; do
+              existing_url=$(jq -r --arg name "$asset" 'add | map(select(.name == $name)) | first | .url // empty' version-assets.json)
+              if [ -z "$existing_url" ]; then
+                gh release upload "$GITHUB_REF_NAME" "$asset"
+              fi
+            done
+          elif grep -Fq 'Not Found (HTTP 404)' version-release-error; then
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --title "$GITHUB_REF_NAME" --generate-notes $prerelease
+          else
+            cat version-release-error >&2
+            exit 1
+          fi
+
+      - name: Pubblica il manifest sull'endpoint stabile dei canali
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.package.outputs.channel }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -eu
+          generation="$CHANNEL-$VERSION.json"
+          rm -f channel-release-error channel-upload-error channel-assets.json existing-generation.json
+          if release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/automator-channels" --jq .id 2>channel-release-error); then
+            if gh release upload automator-channels "$generation" 2>channel-upload-error; then
+              exit 0
+            fi
+
+            # Rerun idempotente: un nome già esistente è accettato soltanto se i byte coincidono. Ogni altro errore
+            # di upload resta un errore; non cancelliamo mai l'asset precedente.
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > channel-assets.json
+            existing_url=$(jq -r --arg name "$generation" 'add | map(select(.name == $name)) | first | .url // empty' channel-assets.json)
+            if [ -z "$existing_url" ]; then
+              cat channel-upload-error >&2
+              exit 1
+            fi
+            gh api -H 'Accept: application/octet-stream' "$existing_url" > existing-generation.json
+            if ! cmp -s existing-generation.json "$generation"; then
+              echo "::error::generazione $generation già presente con contenuto differente" >&2
+              exit 1
+            fi
+          elif grep -Fq 'Not Found (HTTP 404)' channel-release-error; then
+            gh release create automator-channels "$generation" \
+              --title "Automator release channels" \
+              --notes "Manifest cumulativi stable/beta per automator update." \
+              --prerelease --latest=false
+          else
+            cat channel-release-error >&2
+            exit 1
+          fi

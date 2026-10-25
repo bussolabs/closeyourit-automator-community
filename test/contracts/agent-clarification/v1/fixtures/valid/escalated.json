@@ -1,0 +1,21 @@
+{
+  "state": "escalated",
+  "cycles": 2,
+  "has_reply": false,
+  "rounds": [
+    {
+      "cycle": 1,
+      "questions": ["Quale comportamento ti aspetti al logout?"],
+      "response": "1. Non lo so",
+      "answered_at": "2026-07-31T09:12:00Z",
+      "created_at": "2026-07-31T09:02:00Z"
+    },
+    {
+      "cycle": 2,
+      "questions": ["Chi decide fra le due strade?"],
+      "response": null,
+      "answered_at": null,
+      "created_at": "2026-07-31T10:30:00Z"
+    }
+  ]
+}

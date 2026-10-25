@@ -1,0 +1,162 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  # Permette di lanciare a mano la prova reale del recinto (job `confinement-linux`) su un branch,
+  # senza aspettare il merge.
+  workflow_dispatch:
+    inputs:
+      coworkers_pilot:
+        description: Install and test the isolated Coworkers pilot on AX41
+        type: boolean
+        default: false
+      coworkers_coordinator:
+        description: Install the Puckies coordinator without activating it
+        type: boolean
+        default: false
+      coworkers_activate:
+        description: Activate the installed coordinator after operator authentication
+        type: boolean
+        default: false
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.coworkers_pilot || inputs.coworkers_coordinator || false }}
+  cancel-in-progress: ${{ !inputs.coworkers_pilot && !inputs.coworkers_coordinator }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # Il repository e' privato. I fork restano esclusi per non eseguire codice esterno sui runner
+    # persistenti condivisi; push, dispatch e PR interne usano la flotta Hetzner dell'organizzazione.
+    if: ${{ !inputs.coworkers_pilot && !inputs.coworkers_coordinator && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          # 8 runner condividono la cartella di mise: estrarre la cache riscrive binari in uso (ETXTBSY, CYAU-210)
+          cache: false
+
+      - name: Installa dipendenze
+        run: pnpm install --frozen-lockfile
+
+      - name: Test isolated Puckies runtime
+        run: |
+          node --test prototypes/coworkers/*.test.mjs
+          python3 -m unittest discover -s prototypes/coworkers/pilot -p 'test_*.py'
+
+      - name: Type-check
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      # Gli stessi prerequisiti usati dal gate release rendono eseguibili i test reali di systemd
+      # anche nella CI ordinaria sul runner headless.
+      - name: Abilita systemd user manager per i test reali
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$uid.service"
+          for _attempt in $(seq 1 20); do
+            [ -S "/run/user/$uid/bus" ] && break
+            sleep 0.25
+          done
+          test -S "/run/user/$uid/bus"
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          systemctl --user show --property=Version --value
+
+      - name: Packages the Secret Service and confinement tests need on a GitHub-hosted runner
+        run: sudo apt-get update -q && sudo apt-get install -y -q gnome-keyring libsecret-tools bubblewrap
+
+      - name: Verifica prerequisiti host Linux
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test -r /sys/fs/cgroup/cgroup.controllers
+          test -x /usr/bin/dbus-daemon
+          test -x /usr/bin/gnome-keyring-daemon
+          test -x /usr/bin/secret-tool
+
+      # La sonda obbligatoria di bubblewrap resta separata nel job `confinement-linux`, dove
+      # AUTOMATOR_REQUIRE_BWRAP_PROBE=1 trasforma uno skip in un fallimento.
+      - name: Test con coverage e Secret Service isolato
+        run: bash scripts/test-secret-service.sh
+
+  # La sonda write-confinement di Linux (CYAU-123) va provata dove il kernel la lascia girare.
+  # Girarla solo su GitHub-hosted significherebbe skipparla sempre: la CI direbbe verde senza aver
+  # mai verificato il recinto, che e' l'illusione esatta che quel modulo esiste per impedire.
+  #
+  # La sonda host-specifica gira su push o dispatch; sulle PR interne basta la suite ordinaria e la
+  # prova col kernel scatta al merge, prima di qualsiasi rilascio.
+  coworkers-pilot:
+    if: github.event_name == 'workflow_dispatch' && (inputs.coworkers_pilot || inputs.coworkers_coordinator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: coworkers-pilot
+    concurrency:
+      group: coworkers-ax41-pilot
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Setup coordinator test runtime
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d
+        with:
+          cache: false
+      - name: Validate pilot controller
+        run: |
+          node --test prototypes/coworkers/*.test.mjs
+          python3 -m unittest discover -s prototypes/coworkers/pilot -p 'test_*.py'
+          bash -n prototypes/coworkers/pilot/install.sh prototypes/coworkers/pilot/guest-setup.sh prototypes/coworkers/pilot/deploy-ci.sh prototypes/coworkers/coordinator/install.sh prototypes/coworkers/coordinator/deploy-ci.sh
+      - name: Obtain short-lived SSH certificate
+        uses: bussolabs/ci-templates/.github/actions/ssh-ca@308f111c84bf2928cc01e064a2821291c1666291
+        with:
+          audience: api://ca.bussolabs
+          provisioner: github-actions
+      - name: Verify the pilot host identity
+        run: |
+          echo '65.108.123.43 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEZdYxXMOjmV1wtl8XklpRgVsoRwAsrqlIJGuPK3S3k9' > "$RUNNER_TEMP/coworkers-known-hosts"
+          ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$RUNNER_TEMP/coworkers-known-hosts" -o ConnectTimeout=10 root@65.108.123.43 'test -c /dev/kvm && test "$(uname -m)" = x86_64'
+      - name: Provision and run real VM checks
+        if: inputs.coworkers_pilot
+        run: bash prototypes/coworkers/pilot/deploy-ci.sh
+      - name: Install coordinator without activation
+        if: inputs.coworkers_coordinator
+        env:
+          COWORKERS_CLI_TOKEN: ${{ secrets.COWORKERS_CLI_TOKEN }}
+        run: bash prototypes/coworkers/coordinator/deploy-ci.sh
+      - name: Activate authenticated coordinator
+        if: inputs.coworkers_coordinator && inputs.coworkers_activate
+        run: |
+          ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$RUNNER_TEMP/coworkers-known-hosts" -o ConnectTimeout=10 root@65.108.123.43 \
+            'test -s /etc/coworkers/cli.env && for env in staging production; do systemctl enable coworkers-coordinator@$env.service && systemctl restart coworkers-coordinator@$env.service; done && sleep 15 && systemctl is-active --quiet coworkers-coordinator@staging.service coworkers-coordinator@production.service'
+      - name: Retain the pilot evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coworkers-pilot-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/coworkers-pilot-evidence.json
+            ${{ runner.temp }}/coworkers-coordinator-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Release the ephemeral SSH agent
+        if: always()
+        run: |
+          if [ -n "${SSH_AGENT_PID:-}" ]; then ssh-agent -k; fi

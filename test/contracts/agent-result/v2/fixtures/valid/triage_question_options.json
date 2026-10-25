@@ -1,0 +1,27 @@
+{
+  "contract_version": 2,
+  "code": "CYRA-660",
+  "category": "backend",
+  "capabilities": [],
+  "risk": "low",
+  "requires_human_approval": false,
+  "reasons": [
+    "Manca una scelta sul canale."
+  ],
+  "state": "needs-clarification",
+  "questions": [
+    "La settimana parte da lunedì?",
+    {
+      "body": "Il resoconto va spedito per email o solo mostrato?",
+      "options": [
+        {
+          "label": "Solo mostrato",
+          "recommended": true
+        },
+        {
+          "label": "Email ogni lunedì"
+        }
+      ]
+    }
+  ]
+}

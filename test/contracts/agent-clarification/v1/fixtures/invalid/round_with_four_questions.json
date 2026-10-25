@@ -1,0 +1,14 @@
+{
+  "state": "waiting",
+  "cycles": 1,
+  "has_reply": false,
+  "rounds": [
+    {
+      "cycle": 1,
+      "questions": ["Una?", "Due?", "Tre?", "Quattro?"],
+      "response": null,
+      "answered_at": null,
+      "created_at": "2026-07-31T09:02:00Z"
+    }
+  ]
+}

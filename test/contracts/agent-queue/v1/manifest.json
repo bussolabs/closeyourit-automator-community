@@ -1,0 +1,23 @@
+{
+  "contract": "closeyourit-agent-queue",
+  "version": 1,
+  "schema": "schema.json",
+  "fixtures": [
+    { "path": "fixtures/valid/claim_request.json", "definition": "claim_request", "valid": true },
+    { "path": "fixtures/valid/claim_response_acquired.json", "definition": "claim_response", "valid": true },
+    { "path": "fixtures/valid/claim_response_stale.json", "definition": "error_envelope", "valid": true },
+    { "path": "fixtures/valid/claim_response_held.json", "definition": "held_error_envelope", "valid": true },
+    { "path": "fixtures/valid/claim_response_ttl_mismatch.json", "definition": "error_envelope", "valid": true },
+    { "path": "fixtures/valid/ticket_queue_candidate.json", "definition": "next_candidate_response", "valid": true },
+    { "path": "fixtures/valid/ticket_queue_empty.json", "definition": "next_empty_response", "valid": true },
+    { "path": "fixtures/valid/deferral_request.json", "definition": "deferral_request", "valid": true },
+    { "path": "fixtures/valid/deferral_response.json", "definition": "deferral_response", "valid": true },
+    { "path": "fixtures/valid/selection_payload.json", "definition": "selection_payload", "valid": true },
+    { "path": "fixtures/valid/phase_profiles.json", "definition": "phase_profiles", "valid": true },
+    { "path": "fixtures/invalid/claim_request_bad_ttl.json", "definition": "claim_request", "valid": false },
+    { "path": "fixtures/invalid/claim_request_missing_token.json", "definition": "claim_request", "valid": false },
+    { "path": "fixtures/invalid/deferral_request_bad_reason.json", "definition": "deferral_request", "valid": false }
+  ],
+  "http_cases": "fixtures/http/cases.json",
+  "auth_cases": "fixtures/http/auth-cases.json"
+}

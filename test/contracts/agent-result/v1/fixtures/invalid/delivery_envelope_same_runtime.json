@@ -1,0 +1,14 @@
+{
+  "runtime": "claude",
+  "reviewer_runtime": "claude",
+  "result": {
+    "code": "CYAU-97",
+    "category": "backend",
+    "capabilities": ["backend"],
+    "risk": "low",
+    "requires_human_approval": false,
+    "reasons": ["reviewer non incrociato"],
+    "state": "workable"
+  },
+  "review": { "status": "accepted", "summary": "envelope con reviewer non incrociato" }
+}

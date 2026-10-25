@@ -1,0 +1,12 @@
+{
+  "data": {
+    "ticket": "CYAU-1",
+    "host_id": "22222222-2222-4222-8222-222222222222",
+    "run_id": "run-42",
+    "agent": "ticket-worker",
+    "execution_phase": "triage",
+    "profile_digest": "8ec11d059e1b6fe97afc3d987ba4d2e5741f010e0d865a6fd1754244f44a4065",
+    "expires_at": "2026-07-14T13:00:00.000Z",
+    "attempt_id": "55555555-5555-4555-8555-555555555555"
+  }
+}

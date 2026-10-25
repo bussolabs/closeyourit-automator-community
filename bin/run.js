@@ -1,0 +1,2 @@
+#!/usr/bin/env node
+require('@oclif/core').execute({dir: __dirname})

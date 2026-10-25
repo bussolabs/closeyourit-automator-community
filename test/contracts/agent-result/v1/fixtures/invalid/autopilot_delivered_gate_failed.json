@@ -1,0 +1,8 @@
+{
+  "code": "CYAU-97",
+  "state": "delivered",
+  "gate": { "passed": false },
+  "review": { "verdict": "approved" },
+  "cycles": 1,
+  "delivery": { "prUrl": "https://ex/1", "cyiStatus": "in_review", "autoMerged": false }
+}

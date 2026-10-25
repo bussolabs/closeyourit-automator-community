@@ -1,0 +1,14 @@
+{
+  "data": {
+    "ticket": "CYAU-1",
+    "host_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "run_id": "run-other",
+    "agent": "ticket-worker",
+    "execution_phase": "triage",
+    "expires_at": "2026-07-14T13:00:00.000Z"
+  },
+  "error": {
+    "code": "R409-LEASE-001",
+    "message": "Ticket già detenuto da un'altra lavorazione"
+  }
+}

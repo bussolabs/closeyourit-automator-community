@@ -1,0 +1,15 @@
+{
+  "runtime": "claude",
+  "reviewer_runtime": "codex",
+  "result": {
+    "code": "CYAU-178",
+    "category": "backend",
+    "capabilities": ["backend"],
+    "risk": "low",
+    "requires_human_approval": false,
+    "reasons": ["Classificazione chiara"],
+    "state": "workable"
+  },
+  "review": { "status": "accepted", "summary": "Classificazione corretta." },
+  "observed": { "head_sha": "3f2a91c0d4e6b8079a1c5f3d2e7b4a6c8d0f1e29", "branch": "ticket/CYAU-178" }
+}

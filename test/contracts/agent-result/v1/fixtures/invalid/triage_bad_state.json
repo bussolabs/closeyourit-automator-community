@@ -1,0 +1,9 @@
+{
+  "code": "CYAU-97",
+  "category": "backend",
+  "capabilities": ["backend"],
+  "risk": "low",
+  "requires_human_approval": false,
+  "reasons": ["stato fuori contratto"],
+  "state": "unknown"
+}

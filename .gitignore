@@ -1,0 +1,29 @@
+# Dipendenze / build
+node_modules
+dist
+*.tsbuildinfo
+oclif.manifest.json
+
+# Test / coverage
+coverage
+.nyc_output
+.firecrawl
+
+# Stato runtime dell'automator (mai versionato)
+state.json
+*.log
+
+# Secrets — MAI committare (vivono in ~/.config/closeyourit-automator, 0600)
+.env
+.env.*
+*.token
+secrets.json
+!secrets.example.json
+
+# OS / editor
+.DS_Store
+
+# Disposable Coworkers experiment (local data never enters releases)
+/prototypes/coworkers/.data/
+/.impeccable/review/
+**/.impeccable/hook.cache.json

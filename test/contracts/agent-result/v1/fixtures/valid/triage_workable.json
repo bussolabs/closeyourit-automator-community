@@ -1,0 +1,9 @@
+{
+  "code": "CYAU-97",
+  "category": "backend",
+  "capabilities": ["backend", "testing"],
+  "risk": "low",
+  "requires_human_approval": false,
+  "reasons": ["Il servizio esiste ed è modificabile"],
+  "state": "workable"
+}
