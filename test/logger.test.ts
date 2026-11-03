@@ -218,6 +218,16 @@ describe('prune — retention at the X-1 / X / X+1 boundaries', () => {
     expect(fs.existsSync(path.join(logDir, 'a-20260703T000001.log'))).toBe(true)
   })
 
+  // CYAU-282 — the live event queues next to the logs follow the same retention.
+  it('deletes old live event queues too', () => {
+    const logDir = subdir()
+    fs.mkdirSync(logDir, {recursive: true})
+    fs.writeFileSync(path.join(logDir, 'q-CYAU-1-20260701T000000.live.jsonl'), 'x')
+    fs.writeFileSync(path.join(logDir, 'q-CYAU-1-20260709T000000.live.jsonl'), 'x')
+    expect(prune(logDir, 7, new Date('2026-07-10T00:00:00.000Z'))).toBe(1)
+    expect(fs.readdirSync(logDir)).toEqual(['q-CYAU-1-20260709T000000.live.jsonl'])
+  })
+
   it('directory inesistente → 0', () => {
     expect(prune(path.join(dir, 'mai'), 7, new Date('2026-07-10T00:00:00.000Z'))).toBe(0)
   })

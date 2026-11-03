@@ -33,6 +33,12 @@ Per ritirare una vecchia installazione Apple, segui la [procedura di dismissione
   valuta quali azioni sono "due" e le esegue in sequenza. systemd lo tiene vivo (`Restart=always`).
 - Lo **stato** (ultima esecuzione per azione) vive fuori dal repo in `~/.local/state/closeyourit-automator/`;
   i **log per-azione** in `.../logs/`.
+- Il **consiglio** gira a ogni giro, dopo il supporter e prima dei ticket: al massimo una fetta di un
+  progetto, quando CloseYourIt ne ha una pronta. Quattro sessioni in sola lettura (Claude e Codex
+  propongono, poi ognuno vota le proposte dell'altro); il server decide cosa diventa ticket. Tiene il
+  lock del ciclo, così l'aggiornamento automatico non lo interrompe; se il lock è occupato salta il giro.
+  Un suo errore non ferma i ticket, ma una fetta lenta li ritarda fino a circa un'ora (quattro sessioni
+  da 15 minuti). Un server senza consiglio (204 o 404) non produce niente.
 - Gli **orari cron sono in UTC** (prevedibile sui server).
 
 ## Setup
@@ -117,6 +123,12 @@ al primo progetto da cui riceve il battito. Se il progetto non è visibile al se
 entro 15 secondi, il servizio parte comunque, scrive nel registro `heartbeat: not configured — <motivo>` e ritenta al
 prossimo avvio; lo stesso avviso compare in `automator tick`.
 
+Un **blocco** del servizio si vede sul pannello (CYAU-289): un sorvegliante in un thread separato riceve un segnale
+dal ciclo ogni 10 secondi. Se il segnale manca da 5 minuti scrive il blocco in `hang.json` nello state dir e, per al
+massimo 30 minuti, manda un battito ridotto con `hang.state = hung`; oltre, la macchina appare ferma come prima. Alla
+ripresa, o al riavvio dopo un'uccisione, il battito successivo porta una volta sola durata e ripresa. `automator doctor`
+mostra l'ultimo blocco registrato (`Last hang: …`, campo `lastHang` in `--json`) fino al riavvio successivo.
+
 ### 4. Playbook
 
 Parti da `playbook.example.yml`. Ogni azione ha `schedule` + `type` (`claude`|`codex`|`shell`) + `run`.
@@ -135,6 +147,12 @@ actions:
     allowed_tools: [Read, Grep, Edit, Write]
     containment: process-group  # default per azioni generiche; `strong` richiede systemd/cgroup v2 verificabile
 ```
+
+Sui progetti dove il server ha acceso il supporter, a ogni giro il demone apre una sessione in sola lettura nel
+checkout del progetto: risponde a un giro di domande di chiarimento, poi giudica un piano in attesa di
+approvazione. Di partenza sui piani è solo una prova: il giudizio viene registrato e confrontato con quello della
+persona, e nessun piano viene approvato finché una persona non accende l'approvazione vera sul progetto. Se la
+sessione fallisce, il piano resta alla persona e il giro continua.
 
 Per un worker che deve iniziare uno specifico ticket, dichiara il target esplicito su un runtime agente
 (`claude` o `codex`, non `shell`). Prima di avviare il runtime, daemon e tick recuperano il dettaglio completo,
@@ -226,6 +244,7 @@ separato, interrotto alla scadenza). L'avviso non blocca la macchina.
 | `link [dir...] [--dry-run]` | Rileva i checkout dai remote Git e collega i progetti con corrispondenza univoca alla mappa host |
 | `skill sync` | Sincronizza il bundle skill pinnato dal server e promuove `skills/current`; avvisa se il pin è fermo a una versione già superata dai tag pubblicati |
 | `logs [action] [-n N]` | Log per-azione |
+| `canary --sandbox-project K --decoy-project K --decoy-ticket T` | Canarino notturno: segue un ticket del Sandbox fino allo staging e approva solo dopo la prova dei permessi sull'esca. Procedura in [docs/canary.md](docs/canary.md) |
 
 Ogni comando supporta `--json`.
 
@@ -290,6 +309,14 @@ Ogni comando supporta `--json`.
   candidato viene differito lato server. Un avanzamento di fase azzera il conteggio; la spesa storica resta e
   si legge con `automator activity`. Il contatore è host-scoped: con più host sullo stesso progetto la soglia
   vale per macchina, finché la coda non espone un contatore server-side.
+- Un **limite di quota** di Claude o Codex è una pausa, non un fallimento (CYAU-275). L'ora di ripresa si legge
+  dall'errore (30 minuti se manca) e la macchina mette in pausa quel motore in `<stateDir>/quota-pause.json`
+  fino al reset; il tentativo contato alla presa in carico viene restituito, fino a 3 pause consecutive sulla
+  stessa fase, poi conta come ogni fallimento. Prima di chiedere lavoro la macchina controlla la pausa e la
+  quota rimasta (Claude dal servizio d'uso del suo login, Codex da `codex app-server`): sotto il 10% in una
+  finestra non chiede lavoro fino al reset. Se la lettura della quota non riesce, si lavora comunque. Il battito
+  manda la quota in `agent_quota`; il server la ignora finché non la conosce, e l'attempt resta chiuso come
+  interrotto finché il server non accetta uno stato «in pausa fino a».
 - Mentre il quality gate gira, la cartella di lavoro è dichiarata **in uso**: `closeyourit-busy.json` viene scritto
   nella directory amministrativa Git della cartella (`.git/` in un checkout, il gitdir puntato in un worktree
   collegato) con pid, ora d'inizio e ticket, e rimosso alla fine — anche se la verifica fallisce, va in timeout o

@@ -1,8 +1,9 @@
+import {spawnSync} from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {saveSecrets} from '../src/lib/config'
+import {loadSecrets, saveSecrets} from '../src/lib/config'
 import type {StageOutcome} from '../src/lib/oneclick'
 import {runCaptured, runExpectingExit} from './helpers/command'
 
@@ -119,6 +120,23 @@ describe('oneclick command — wiring reale', () => {
     expect(stdout).toContain('pronta')
     // The real resumable state was persisted.
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, 'oneclick.json'), 'utf8')).completed).toHaveLength(8)
+  })
+
+  it('fresh host with an empty map: the workspace stage links the replicated checkouts into the host map', async () => {
+    // A checkout already under the workspace root, its origin on GitHub: replication finds it, linking maps it.
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-1click-ws-'))
+    const checkout = path.join(ws, 'apps', 'demo')
+    fs.mkdirSync(checkout, {recursive: true})
+    spawnSync('git', ['init', '-q', checkout])
+    spawnSync('git', ['-C', checkout, 'remote', 'add', 'origin', 'https://github.com/acme/demo.git'])
+    saveSecrets({claudeToken: 'tok', sync: {orgToken: 'cyi_a_x'}, host: {id: 'h1', token: 'cyi_ah_s'}, workspaceRoot: ws})
+    stubManifestFetch([{project_key: 'DEMO', path: 'apps/demo', repo: 'acme/demo', default_branch: 'main'}])
+
+    const {result} = await runCaptured(testCommand([]), [])
+
+    expect((result as {completed: string[]}).completed).toContain('workspace')
+    expect(fs.realpathSync(loadSecrets().hosts?.DEMO?.cwd ?? '')).toBe(fs.realpathSync(checkout))
+    fs.rmSync(ws, {recursive: true, force: true})
   })
 
   it('incomplete toolchain (required CLI missing) → exit 3, stops before update/install', async () => {

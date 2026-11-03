@@ -4,6 +4,7 @@ import {type SandboxModeT} from './schema'
 import {type AgentRunResult} from './agent-result'
 import {parseWorkspaceManifest, type WorkspaceManifest} from './workspace-manifest'
 import {parseSkillsManifest, type SkillsManifest} from './skills-manifest'
+import {type LiveRecord} from './live-spool'
 import {isExecutionPhase, type ExecutionPhase} from './phase-profile'
 import {isReviewMode, type ReviewFinding, type ReviewMode} from './review'
 import {isReviewerId, isRuntimeId, type ReviewerId, type RuntimeId} from './route'
@@ -111,6 +112,8 @@ export interface ClaimedTicketCandidate {
     frozen_plan_version?: unknown
     /** CYAU-236 — blocking findings of the latest attempt of the ready phase that the review rejected. */
     rework?: unknown
+    /** CYAU-300 — this round resolves a code conflict with main left by the previous one. */
+    conflict_resolution?: unknown
   }
 }
 
@@ -241,6 +244,8 @@ export interface Lease {
   reviewer_model?: string
   /** CYRA-921 — which engine does this machine's work, frozen on the attempt at claim. Missing = the phase default. */
   work_engine?: WorkEngine
+  /** CYRA-1133 — the model the council chose for this ticket. Missing = the model this machine pins. */
+  work_model?: string
   /**
    * CYRA-621 — the version number to publish, and for the final version also the exact
    * point in the code. The SERVER decided them before the phase started.
@@ -322,6 +327,12 @@ export interface DeliveredAttemptState {
   phase?: string
   reviewStatus?: string
 }
+
+/** `rejected` covers every answer the same batch would get again (auth, attempt over, bad shape): resending is useless. */
+export type LiveEventsSendResult =
+  | {outcome: 'ok'; acceptedThrough: number; includeCode: boolean}
+  | {outcome: 'rejected'; status: number; code?: string}
+  | {outcome: 'unavailable'; status?: number}
 
 export type AttemptDeliveryResult =
   | {outcome: 'ok'; status: number; attempt?: DeliveredAttemptState}
@@ -433,6 +444,8 @@ export interface AutomatorClient {
    * did not arrive — a single `false` made the two the same silence.
    */
   deliverAttempt(attemptId: string, payload: AttemptDelivery): Promise<AttemptDeliveryResult>
+  /** CYAU-282 — the agent's steps while the attempt runs, in numbered batches the app stores once. */
+  sendLiveEvents(attemptId: string, records: LiveRecord[]): Promise<LiveEventsSendResult>
 }
 
 /** Real client with detailed auth outcomes; the other methods stay best-effort for the non-recovery call sites. */
@@ -467,6 +480,7 @@ function parseLease(body: unknown): Lease | null {
   if (typeof d.reviewer_model === 'string' && d.reviewer_model.trim()) lease.reviewer_model = d.reviewer_model.trim()
   // CYRA-921 — same rule: an unknown engine is dropped, never guessed.
   if (d.work_engine === 'claude' || d.work_engine === 'codex') lease.work_engine = d.work_engine
+  if (typeof d.work_model === 'string' && d.work_model.trim()) lease.work_model = d.work_model.trim()
   // CYRA-621 — checked shape: a number that is not a number is not passed to the session as if
   // it were, and an abbreviated identifier identifies nothing.
   const release = d.release as {version?: unknown; sha?: unknown} | null | undefined
@@ -747,6 +761,31 @@ export function makeClient(cfg: SyncConfig, fetchFn: FetchFn = globalThis.fetch,
         if (res.status >= 500) return {outcome: 'unavailable', status: res.status}
         const code = errorCode(await res.json().catch(() => null))
         return code ? {outcome: 'rejected', status: res.status, code} : {outcome: 'rejected', status: res.status}
+      } catch {
+        return {outcome: 'unavailable'}
+      }
+    },
+
+    async sendLiveEvents(attemptId, records) {
+      if (!opHeaders) return {outcome: 'unavailable'}
+      try {
+        const res = await fetchFn(`${base}/api/v1/agent_attempts/${encodeURIComponent(attemptId)}/live_events`, {
+          method: 'POST', headers: opHeaders, body: JSON.stringify({events: records}), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        })
+        if (res.status >= 500) return {outcome: 'unavailable', status: res.status}
+        if (!res.ok) {
+          const code = errorCode(await res.json().catch(() => null))
+          return code ? {outcome: 'rejected', status: res.status, code} : {outcome: 'rejected', status: res.status}
+        }
+
+        const data = ((await res.json().catch(() => null)) as {data?: Record<string, unknown>} | null)?.data
+        const acceptedThrough = data?.accepted_through
+        const includeCode = data?.include_code
+        if (typeof acceptedThrough !== 'number' || !Number.isInteger(acceptedThrough) || typeof includeCode !== 'boolean') {
+          return {outcome: 'rejected', status: res.status}
+        }
+
+        return {outcome: 'ok', acceptedThrough, includeCode}
       } catch {
         return {outcome: 'unavailable'}
       }

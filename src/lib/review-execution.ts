@@ -203,6 +203,8 @@ export interface ReviewExecutionRequest {
   previousFindings?: string
   /** CYAU-268 — set when this request carries one part of a diff too large for a single review. */
   diffPart?: {index: number; total: number}
+  /** CYAU-293 — machine line counts of the whole change; every part of a split review carries the same ones. */
+  lineStats?: ReviewLineStats
   cwd: string
   timeoutMs: number
   /** Absolute monotonic deadline shared by the orchestrator; timeoutMs stays the fallback for isolated calls. */
@@ -251,6 +253,43 @@ export interface ResolvedReviewDiff {
   diff: string
   diffSha256: string
   snapshotTree: string
+  /** CYAU-293 — counted from the same Git objects as the diff; it stays out of the digest. */
+  lineStats: ReviewLineStats
+}
+
+export interface ReviewLineStats {
+  code: {added: number; removed: number}
+  tests: {added: number; removed: number}
+}
+
+const TEST_DIRECTORY = /(^|\/)(tests?|specs?|__tests__|e2e|integration_test)\//
+const TEST_FILE_NAME = /(\.(test|spec)\.[^/]+|_(test|spec)\.[^/.]+|(^|\/)test_[^/]+\.py)$/
+
+/** CYAU-293 — a file counts as a test when it sits in a usual test directory or has a usual test file name. */
+export function isTestPath(path: string): boolean {
+  return TEST_DIRECTORY.test(path) || TEST_FILE_NAME.test(path)
+}
+
+/**
+ * Sums `git diff --numstat -z` output: `added\tremoved\tpath\0`, or `added\tremoved\t\0from\0to\0` for a rename,
+ * classified by the destination path. A binary file reports `-` and adds no lines.
+ */
+export function parseNumstat(output: Buffer): ReviewLineStats {
+  const stats: ReviewLineStats = {code: {added: 0, removed: 0}, tests: {added: 0, removed: 0}}
+  const fields = output.toString('utf8').split('\0')
+  for (let index = 0; index < fields.length; index += 1) {
+    const match = /^(\d+|-)\t(\d+|-)\t(.*)$/s.exec(fields[index])
+    if (!match) continue
+    let path = match[3]
+    if (path === '') {
+      path = fields[index + 2] ?? ''
+      index += 2
+    }
+    const bucket = isTestPath(path) ? stats.tests : stats.code
+    if (match[1] !== '-') bucket.added += Number(match[1])
+    if (match[2] !== '-') bucket.removed += Number(match[2])
+  }
+  return stats
 }
 
 export interface ResolveReviewDiffOptions {
@@ -470,6 +509,17 @@ export async function resolveReviewDiff(
       '--',
     ], MAX_REVIEW_TOTAL_DIFF_BYTES + 1)
     assertNoGitlinkChanges(diffBytes)
+    const numstat = await snapshotGit([
+      'diff',
+      '--numstat',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--ignore-submodules=none',
+      '-z',
+      baseCommit,
+      snapshotTree,
+      '--',
+    ], MAX_REVIEW_TOTAL_DIFF_BYTES)
     const statusAfter = (await snapshotGit(statusArgs)).toString('latin1')
     const statusEntriesAfter = statusAfter.split('\0')
     if (hasDirtyIgnoreEntries(statusEntriesAfter)) {
@@ -493,6 +543,7 @@ export async function resolveReviewDiff(
       diff: encodeReviewDiff(diffBytes),
       diffSha256: reviewDiffSha256(diffBytes),
       snapshotTree: snapshotTree.toLowerCase(),
+      lineStats: parseNumstat(numstat),
     }
   } catch (error) {
     primaryError = error
@@ -709,10 +760,28 @@ export function buildReviewerInstructions(input: ReviewExecutionRequest): string
     `Attesta esattamente reviewed_snapshot_tree=${input.snapshotTree}.`,
     `Attesta esattamente reviewed_diff_sha256=${input.diffSha256}.`,
     'Usa findings=[] soltanto se la review è stata realmente completata e non esistono rilievi concreti.',
+    ...WEAK_TEST_INSTRUCTIONS,
     ...(input.previousFindings ? PREVIOUS_FINDINGS_INSTRUCTIONS : []),
     ...(input.diffPart ? diffPartInstructions(input.diffPart) : []),
+    ...(input.lineStats ? LINE_STATS_INSTRUCTIONS : []),
   ].join('\n')
 }
+
+/** CYAU-293 — tests that prove nothing: each one sends the work back to the agent. */
+const WEAK_TEST_INSTRUCTIONS = [
+  'Tests not to accept: report each added or changed test that falls in one of these cases as a finding with severity major, which blocks approval:',
+  '1. a test that only checks the fakes or mocks it created, not the code under test;',
+  '2. a rejection or error case whose test never reaches the real rejection path (for example it stubs the check that should refuse);',
+  '3. production code added only to make a test pass (a test-only branch, flag or hook in the shipped code);',
+  '4. a test that waits on the real clock or the real network instead of a fake clock or a local stub.',
+  'Do not report a test that exercises the real behaviour of the code, even if it uses fakes for its boundaries.',
+]
+
+/** CYAU-293 — the line counts are computed by the machine, outside the agent's reach. */
+const LINE_STATS_INSTRUCTIONS = [
+  'The payload has line_stats: added and removed lines of the whole change, split into tests and code by file path. The automator computes it from Git, not the implementer.',
+  'Use it as a signal, not as a verdict: much new code with few or no test lines deserves a closer look for missing tests; a file outside the usual test paths counts as code.',
+]
 
 /**
  * CYAU-237 — how to treat the findings of the previous round. Withdrawing one needs proof in the diff, never a
@@ -753,6 +822,7 @@ export function buildReviewPrompt(input: ReviewExecutionRequest): string {
     // CYAU-237 — only with a previous round: without it the payload is byte-for-byte the one of before.
     ...(input.previousFindings ? {previous_findings: input.previousFindings} : {}),
     ...(input.diffPart ? {diff_part: input.diffPart} : {}),
+    ...(input.lineStats ? {line_stats: input.lineStats} : {}),
     diff: input.diff,
   })
   return `UNTRUSTED_REVIEW_INPUT_JSON=${reviewInput}`

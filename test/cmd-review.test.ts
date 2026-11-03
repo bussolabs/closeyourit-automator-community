@@ -61,6 +61,7 @@ beforeEach(() => {
     snapshotTree: 'b'.repeat(40),
     diff,
     diffSha256: reviewDiffSha256(diff),
+    lineStats: {code: {added: 1, removed: 0}, tests: {added: 0, removed: 0}},
   })
   reviewExecution.execute.mockReset().mockImplementation(async (input: {
     baseCommit: string
@@ -112,6 +113,15 @@ describe('review command — selection separate from execution', () => {
 })
 
 describe('review command — real execution mandatory before the verdict', () => {
+  // CYAU-293 — the manual review copies the snapshot field by field: the line counts must reach the reviewer too.
+  it('passes the machine line counts of the snapshot to the reviewer', async () => {
+    await runCaptured(Review, [...baseArgs, '--json'])
+
+    expect(reviewExecution.execute).toHaveBeenCalledWith(expect.objectContaining({
+      lineStats: {code: {added: 1, removed: 0}, tests: {added: 0, removed: 0}},
+    }))
+  })
+
   it('reviewer already known as unavailable blocks before acquiring the Git snapshot', async () => {
     const {stdout} = await runExpectingExit(
       Review,

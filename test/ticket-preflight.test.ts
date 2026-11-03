@@ -430,6 +430,40 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
       skill: {command: '/closeyourit-skills:autopilot', args: 'CYAU-34', plugin_dir: resolvedPluginDir},
     })
     expect(ticketCycle.prepare).toHaveBeenCalledWith(expect.objectContaining({runtime: 'codex'}))
+    expect(result.action).not.toHaveProperty('model')
+  })
+
+  // CYRA-1133 — the council's model reaches the action.
+  it('queue-driven passes the model the council chose to the session', async () => {
+    const lease = {renewEveryMs: 1000, renew: vi.fn(async () => true), release: vi.fn(async () => undefined)}
+    const ticketCycle = fakeTicketCycle('/managed/worktrees/CYAU/CYAU-34')
+    ticketCycle.prepare.mockImplementation(async ({runId}: {runId: string}) => ({
+      runId, authorizedCwd: '/managed/worktrees/CYAU/CYAU-34', branch: 'ticket/CYAU-34',
+      beforeRuntime: vi.fn(async () => undefined), afterRuntime: vi.fn(async () => undefined), block: vi.fn(async () => undefined),
+    }))
+    const preflight = buildTicketPreflight({
+      probe: probe(), guidance, now: () => instant,
+      queue: {getTicketQueue: vi.fn(async () => ({outcome: 'candidate' as const, candidate: queueCandidate}))},
+      authorizeCwd: () => '/repo', attestRepository: () => true,
+      lease: {acquire: vi.fn(async () => ({
+        outcome: 'acquired' as const, runId: 'run-1', lease, attemptId: 'attempt-1',
+        deliverAttempt: vi.fn(async () => true), ...hostFirstLease('autopilot'), workEngine: 'codex' as const, workModel: 'gpt-6-astra',
+      }))},
+      ticketCycle,
+      reserveLimits: async (policy, snapshot, cost) =>
+        ({decision: evaluateLimits(policy, {...snapshot, pending_runs: 1, pending_cost: cost}, 'dispatch'), usage: null}),
+      skills: {pluginDir: presentPluginDir, enabled: true},
+      attestConfinement: () => ({attested: true}),
+    })
+
+    const result = await preflight('worker', claudeAction, queueContext)
+
+    expect(result).toMatchObject({outcome: 'admit', state: 'ready'})
+    expect(result.action).toMatchObject({
+      type: 'codex', sandbox: 'workspace-write', model: 'gpt-6-astra', cwd: '/managed/worktrees/CYAU/CYAU-34',
+      skill: {command: '/closeyourit-skills:autopilot', args: 'CYAU-34', plugin_dir: resolvedPluginDir},
+    })
+    expect(ticketCycle.prepare).toHaveBeenCalledWith(expect.objectContaining({runtime: 'codex'}))
   })
 
   // ── skill-mode (C.3): the claude action runs the plugin skill instead of the inline prompt ────────────────
@@ -549,6 +583,22 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
     expect(run).toContain('Given un handle / When lo cambio / Then cambia ovunque / Expected un solo punto')
     // The TICKET content stays out: the skill reads it by itself via cyi (host-first unchanged).
     expect(run).not.toContain('Ticket dalla coda')
+  })
+
+  // CYAU-300 — the round that resolves a code conflict with main: the order is trusted (it comes from the server),
+  // next to the approved plan, and tells the skill to merge in resolve mode.
+  it('skill-mode: a resolution round tells the skill to resolve the conflict with main', async () => {
+    const result = await autopilotPreflight(approvedPlan, {conflict_resolution: true})('worker', claudeAction, queueContext)
+    expect(result.outcome).toBe('admit')
+    const run = result.action?.run ?? ''
+    expect(run).toContain('# Risoluzione di un conflitto con main')
+    expect(run).toContain('sync-main.sh --resolve')
+    expect(run).toContain('# Piano approvato dal CTO')
+  })
+
+  it('skill-mode: an ordinary round says nothing about resolving', async () => {
+    const run = (await autopilotPreflight(approvedPlan)('worker', claudeAction, queueContext)).action?.run ?? ''
+    expect(run).not.toContain('Risoluzione di un conflitto')
   })
 
   // CYRA-877: a v2 plan carries its Definition of Done as {id, text}; printed as-is the agent read
@@ -2225,6 +2275,7 @@ describe('makeQueueClaimer — CYAU-169', () => {
     runId: () => 'run-fisso', skills: {pluginDir: '.'}, attestConfinement: () => ({attested: true}),
     checkBundlePin: async () => ({aligned: true, detail: ''}),
     checkRuntimes: async () => ({ready: true as const}),
+    checkQuota: async () => ({ready: true as const}),
   }
 
   // CYAU-170 — the proof that the gate sits BEFORE the take-over, not after. Asking afterwards would not
@@ -2263,6 +2314,29 @@ describe('makeQueueClaimer — CYAU-169', () => {
 
       expect(esito).toEqual({outcome: 'unready', detail: 'codex: autenticazione scaduta o revocata'})
       expect(chiamate).toEqual([])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  // CYAU-275 — asking for work with the quota gone burns a ticket on a session that cannot finish.
+  it('a machine paused for quota does not ask for work, and says until when', async () => {
+    const chiamate: string[] = []
+    const checkRuntimes = vi.fn(async () => ({ready: true as const}))
+    vi.stubGlobal('fetch', vi.fn(async () => { chiamate.push('claim'); return {ok: true, status: 200, json: async () => ({data: null})} as unknown as Response }))
+    try {
+      const claimer = makeQueueClaimer(secrets, {
+        ...ready,
+        checkRuntimes,
+        checkQuota: async () => ({ready: false as const, detail: 'claude quota exhausted: paused until 2026-11-03T14:00:00.000Z'}),
+      })
+
+      const esito = await claimer!(target)
+
+      expect(esito).toEqual({outcome: 'unready', detail: 'claude quota exhausted: paused until 2026-11-03T14:00:00.000Z'})
+      expect(chiamate).toEqual([])
+      // The runtime probe is itself a paid request: with the quota gone it would only fail.
+      expect(checkRuntimes).not.toHaveBeenCalled()
     } finally {
       vi.unstubAllGlobals()
     }
@@ -2593,5 +2667,16 @@ describe('ticket state and attempt counter — CYAU-155', () => {
     result.ticketAttempt?.recordSessionCost(JSON.stringify({is_error: false, total_cost_usd: 0.42}))
 
     expect(readTicketAttempts('CYAU', 'CYAU-34', dir).record).toMatchObject({cost: 0.42, total_cost: 0.42})
+  })
+
+  // CYAU-275 — the attempt counted at the claim is given back when the session stopped on the quota.
+  it('a session stopped on the quota gives back the attempt counted at the claim', async () => {
+    const dir = attemptsDir()
+    const result = await queuePreflight(triageCandidate, {attempts: {dir}})('worker', claudeAction, queueTarget)
+    expect(readTicketAttempts('CYAU', 'CYAU-34', dir).record?.attempts).toBe(1)
+
+    result.ticketAttempt?.settleQuotaPause?.(true)
+
+    expect(readTicketAttempts('CYAU', 'CYAU-34', dir).record).toMatchObject({attempts: 0, total_attempts: 1, quota_pauses: 1})
   })
 })

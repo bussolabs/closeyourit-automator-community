@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest'
-import {buildCapabilities as buildCapabilitiesRaw, collectRuntimes, combineBeats, heartbeatMissingReason, makeHeartbeat as makeHeartbeatRaw, sendHeartbeat, type HostCapabilities} from '../src/lib/heartbeat'
+import {buildCapabilities as buildCapabilitiesRaw, collectRuntimes, combineBeats, heartbeatMissingReason, makeHeartbeat as makeHeartbeatRaw, sendHangBeat, sendHeartbeat, type HostCapabilities} from '../src/lib/heartbeat'
 import {type HostActivity, IDLE_ACTIVITY} from '../src/lib/activity'
 import {type HeartbeatConfig} from '../src/lib/config'
 import {type ProbeResult} from '../src/lib/deps'
@@ -212,6 +212,20 @@ describe('makeHeartbeat', () => {
     expect(body.status).toBe('ok')
     expect(body.automator_version).toBe('0.0.1')
     expect(body.repositories).toEqual(['CYAU'])
+  })
+
+  // CYAU-275 — the beat carries the remaining quota of both engines; unknown is null, never zero.
+  it('sends the remaining quota and the pause of each engine', async () => {
+    const {fn, calls} = fakeFetch()
+    const quota = [
+      {runtime: 'claude' as const, remaining_percent: 42, resets_at: '2026-11-03T15:00:00.000Z', paused_until: null},
+      {runtime: 'codex' as const, remaining_percent: null, resets_at: null, paused_until: '2026-11-03T12:00:00.000Z'},
+    ]
+    const hb = makeHeartbeat({heartbeat: cfg, host: {id: 'h1', token: 'cyi_ah_host'}}, {
+      version: '0.0.1', runtimes: [], fetchFn: fn, activity: () => IDLE_ACTIVITY, agentQuota: () => quota,
+    })
+    await hb!(true)
+    expect(JSON.parse(calls[0].opts.body as string).agent_quota).toEqual(quota)
   })
 
   // CYAU-247 — a rejected beat used to vanish: the host looked alive locally and offline on the panel.
@@ -450,5 +464,48 @@ describe('heartbeatMissingReason', () => {
     const line = heartbeatMissingReason({host}, "project CYAU is not visible to this machine's service account")
     expect(line).toContain("not configured — project CYAU is not visible to this machine's service account")
     expect(line).not.toContain('cyi_')
+  })
+})
+
+// CYAU-289 — the beat carries the last hang: state, duration and resume, once.
+describe('makeHeartbeat — hang', () => {
+  const secrets = {heartbeat: cfg, host: {id: 'h1', token: 'cyi_ah_host'}}
+  const resumed = {state: 'resumed' as const, started_at: '2026-11-03T10:00:00.000Z', duration_seconds: 360, resumed_at: '2026-11-03T10:06:00.000Z'}
+
+  it('attaches the hang to the beat when there is one, and omits the field otherwise', async () => {
+    const {fn, calls} = fakeFetch()
+    const reports = [resumed, null]
+    const hb = makeHeartbeat(secrets, {version: '0.0.1', runtimes: [], fetchFn: fn, activity: () => IDLE_ACTIVITY, hang: () => reports.shift() ?? null})
+    await hb!(true)
+    await hb!(true)
+    expect(JSON.parse(calls[0].opts.body as string).hang).toEqual(resumed)
+    expect(JSON.parse(calls[1].opts.body as string)).not.toHaveProperty('hang')
+  })
+
+  it('a hang reader that throws does not stop the beat', async () => {
+    const {fn, calls} = fakeFetch()
+    const hb = makeHeartbeat(secrets, {
+      version: '0.0.1', runtimes: [], fetchFn: fn, activity: () => IDLE_ACTIVITY,
+      hang: () => {
+        throw new Error('corrupt marker')
+      },
+    })
+    await hb!(true)
+    expect(calls).toHaveLength(1)
+    expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('hang')
+  })
+})
+
+describe('sendHangBeat', () => {
+  it('sends a reduced fail beat with host id, version and the hang, keeping the monitor fields', async () => {
+    const {fn, calls} = fakeFetch()
+    const hang = {state: 'hung' as const, started_at: '2026-11-03T10:00:00.000Z', duration_seconds: 360}
+    await sendHangBeat({heartbeat: cfg, hostToken: 'cyi_ah_host', hostId: 'h1', version: '0.0.1'}, hang, fn)
+    const body = JSON.parse(calls[0].opts.body as string)
+    expect(body).toEqual({
+      status: 'fail', environment: 'production', expected_interval_minutes: 2, grace_minutes: 1,
+      host_id: 'h1', automator_version: '0.0.1', hang,
+    })
+    expect(calls[0].opts.body as string).not.toContain('cyi_ah_host')
   })
 })

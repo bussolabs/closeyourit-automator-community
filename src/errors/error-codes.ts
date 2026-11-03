@@ -271,6 +271,17 @@ export const ErrorCodes = {
     // (like publish on the duplicate search). Exit 1.
     searchFailed: 'C502-DEDUP-004',
   },
+  Canary: {
+    // Invalid canary input (CYAU-205): missing or malformed token in the environment, unsafe project
+    // key or ticket code, decoy on the Sandbox project itself, non-positive deadline or poll. Exit 2.
+    invalidInput: 'C400-CANARY-001',
+    // The night stopped before staging: creation, read, decoy, boundary probe, approval or deadline.
+    // The message names the stage and the reason. Exit 1.
+    stopped: 'C504-CANARY-002',
+    // The decoy approval was ACCEPTED: the collaudo account has powers outside the Sandbox. The key
+    // must be revoked. Dedicated exit 4, so the job can tell it from an ordinary stop.
+    boundaryBreach: 'C403-CANARY-003',
+  },
   Limits: {
     // Invalid limits gate input (CYAU-32): --mode outside dispatch|continue, numeric values
     // (running/runs-today/cost-today/runtime-seconds/cost/runs) negative or non-numeric, illegal --policy JSON

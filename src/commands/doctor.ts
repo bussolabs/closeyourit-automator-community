@@ -18,6 +18,7 @@ import {orgOpenrouterKey} from '../lib/org-openrouter-credential'
 import {checkPrivateServer, privateServerMessage} from '../lib/private-server'
 import {resolveReviewerRuntime} from '../lib/review-execution'
 import {adoptServiceGuardrailEnv, serviceManager} from '../lib/service'
+import {readLastHang, type HangReport} from '../lib/hang-watchdog'
 
 export default class Doctor extends BaseCommand {
   static description = 'Verifica CLI e runtime agente (claude/codex) prima di avviare il servizio'
@@ -50,6 +51,8 @@ export default class Doctor extends BaseCommand {
     const claudeReviewProblem = claudeReview && claudeReviewCredentialProblem(claudeReview)
     // CYAU-238 — with Codex at work, a server on a private network must be written as its IPv4 address. Never blocking.
     const privateServer = await checkPrivateServer()
+    // CYAU-289 — the last hang the watchdog recorded, until the next service start replaces it.
+    const lastHang = readLastHang()
 
     if (!this.jsonEnabled()) {
       this.log(
@@ -121,6 +124,10 @@ export default class Doctor extends BaseCommand {
         this.log('')
         this.log(privateServerLine)
       }
+      if (lastHang) {
+        this.log('')
+        this.log(describeHang(lastHang))
+      }
       if (claudeReview) {
         this.log('')
         this.log(claudeReviewProblem ? `✗ Claude cannot review: ${claudeReviewProblem}` : claudeReviewSignIn(claudeReview))
@@ -166,10 +173,18 @@ export default class Doctor extends BaseCommand {
       ok: true, deps, runtimes, hostChecks, crossReviewAvailable,
       ...(liveProbe ? {liveProbe} : {}),
       ...(privateServer.kind === 'none' ? {} : {privateServer}),
+      ...(lastHang ? {lastHang} : {}),
       // Status and source only: the token itself never reaches the output.
       ...(claudeReview ? {claudeReview: {status: claudeReview.status, source: claudeReview.source}} : {}),
     }
   }
+}
+
+function describeHang(hang: HangReport): string {
+  const lasted = `lasted ${Math.round(hang.duration_seconds / 60)} min`
+  if (hang.state === 'resumed') return `Last hang: started ${hang.started_at}, ${lasted}, resumed ${hang.resumed_at}.`
+  if (hang.state === 'hung') return `⚠ Last hang: started ${hang.started_at}, ${lasted} so far, not resumed yet.`
+  return `Last hang: started ${hang.started_at}, ${lasted}, ended with a service restart.`
 }
 
 function claudeReviewSignIn(credential: ClaudeReviewCredential): string {

@@ -171,6 +171,7 @@ export default class Review extends BaseCommand {
           diff,
           diffSha256,
           snapshotTree,
+          lineStats: snapshot.lineStats,
           requirements,
           testEvidence,
           riskAssessment,

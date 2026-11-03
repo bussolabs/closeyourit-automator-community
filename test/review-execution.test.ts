@@ -12,6 +12,7 @@ import {
   executeChunkedCrossReview,
   executeCrossReview,
   parseReviewerOutput,
+  parseNumstat,
   parseReviewerReport,
   resolveReviewDiff,
   resolveReviewerRuntime,
@@ -239,6 +240,27 @@ describe('buildReviewPrompt', () => {
     expect(instructions).toContain('.github/workflows')
     expect(instructions).toContain('non è un rilievo bloccante')
   })
+
+  // CYAU-293 — a test that proves nothing must send the work back, so the list sits in the trusted channel.
+  it('lists the tests not to accept and makes each one a blocking major finding', () => {
+    const instructions = buildReviewerInstructions(request)
+    expect(instructions).toContain('only checks the fakes or mocks it created')
+    expect(instructions).toContain('never reaches the real rejection path')
+    expect(instructions).toContain('production code added only to make a test pass')
+    expect(instructions).toContain('waits on the real clock or the real network')
+    expect(instructions).toContain('severity major')
+    expect(instructions).toContain('Do not report a test that exercises the real behaviour')
+    expect(buildReviewPrompt(request)).not.toContain('severity major')
+  })
+
+  it('carries the machine line counts in the payload and explains them in the trusted instructions', () => {
+    const lineStats = {code: {added: 40, removed: 2}, tests: {added: 60, removed: 0}}
+    const prompt = buildReviewPrompt({...request, lineStats})
+    const payload = JSON.parse(prompt.slice('UNTRUSTED_REVIEW_INPUT_JSON='.length))
+    expect(payload.line_stats).toEqual(lineStats)
+    expect(buildReviewerInstructions({...request, lineStats})).toContain('line_stats')
+    expect(buildReviewPrompt(request)).not.toContain('line_stats')
+  })
 })
 
 // CYAU-237 — on a new attempt the reviewer rereads its own previous findings next to the implementer's answer.
@@ -315,6 +337,19 @@ describe('chunked review of a large diff (CYAU-268)', () => {
     expect(run.calls).toHaveLength(0)
     expect(result).toMatchObject({status: 'failed', attestation: null})
     expect(result.detail).toContain('single file')
+  })
+
+  it('gives every part the line counts of the whole change', async () => {
+    const parts = splitReviewDiff(big, 800)!
+    const lineStats = {code: {added: 40, removed: 0}, tests: {added: 60, removed: 0}}
+    const run = makeSpawn(parts.map((part) => ({code: 0, stdout: partReport(part)})))
+
+    const result = await executeChunkedCrossReview({...request, diff: big, lineStats},
+      {spawn: run.spawn, fs: fakeReviewFs()}, 800)
+
+    expect(result.status).toBe('completed')
+    expect(run.calls).toHaveLength(parts.length)
+    for (const call of run.calls) expect(call.input).toContain('"line_stats":' + JSON.stringify(lineStats))
   })
 
   it('reviews a small diff exactly as before, in one session and without a part marker', async () => {
@@ -575,7 +610,7 @@ describe('resolveReviewDiff', () => {
       expect(resolved.snapshotTree).toMatch(/^[0-9a-f]{40}$/)
       expect(resolved.diff).toContain('-export const a = 1')
       expect(resolved.diff).toContain('+export const a = 3')
-      const diffCalls = probeCalls.filter((args) => args.includes('diff'))
+      const diffCalls = probeCalls.filter((args) => args.includes('diff') && args.includes('--patch'))
       expect(diffCalls).toHaveLength(1)
       expect(diffCalls[0]).toEqual(expect.arrayContaining(['--raw', '--patch', '--binary', '-z']))
       expect(new Set(probeDeadlines)).toEqual(new Set([31_000]))
@@ -618,6 +653,70 @@ describe('resolveReviewDiff', () => {
         expect(part.startsWith(header + 'diff --git ')).toBe(true)
       }
       expect(header + parts.map((part) => part.slice(header.length)).join('')).toBe(resolved.diff)
+    } finally {
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  }, 30_000)
+
+  // CYAU-293 — the machine counts test and code lines from the same Git objects, so the agent cannot fake them.
+  it('counts added and removed lines split into tests and code, renames and binaries included', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-stats-'))
+    try {
+      const git = (args: string[]): string => {
+        const result = spawnSync('git', ['-C', repo, ...args], {encoding: 'utf8'})
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout.trim()
+      }
+      git(['init', '-q', '-b', 'main'])
+      fs.mkdirSync(path.join(repo, 'src'))
+      fs.mkdirSync(path.join(repo, 'test'))
+      fs.writeFileSync(path.join(repo, 'src/a.ts'), 'one\ntwo\nthree\n')
+      fs.writeFileSync(path.join(repo, 'src/old_name.ts'), 'stable line\n'.repeat(20))
+      fs.writeFileSync(path.join(repo, 'test/a.test.ts'), 'old test\n')
+      git(['add', '.'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      const base = git(['rev-parse', 'HEAD'])
+      fs.writeFileSync(path.join(repo, 'src/a.ts'), 'one\nTWO\nthree\nfour\n')
+      fs.writeFileSync(path.join(repo, 'test/a.test.ts'), 'new test\nmore\nand more\n')
+      fs.mkdirSync(path.join(repo, 'spec'))
+      fs.writeFileSync(path.join(repo, 'spec/model_spec.rb'), 'it\nworks\n')
+      fs.writeFileSync(path.join(repo, 'src/widget_test.go'), 'go test\n')
+      git(['mv', 'src/old_name.ts', 'test/helper.test.ts'])
+      fs.writeFileSync(path.join(repo, 'logo.bin'), Buffer.from([0, 1, 2, 255, 0, 10, 13, 92]))
+      git(['add', '.'])
+
+      const resolved = await resolveReviewDiff(base, repo)
+
+      // code: src/a.ts +2 -1; tests: a.test.ts +3 -1, model_spec.rb +2, widget_test.go +1, pure rename 0; binary 0.
+      expect(resolved.lineStats).toEqual({code: {added: 2, removed: 1}, tests: {added: 6, removed: 1}})
+    } finally {
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  }, 30_000)
+
+  it('classifies a renamed file by its new path', () => {
+    const numstat = Buffer.from('3\t1\t\0src/helper.ts\0test/helper.test.ts\0' + '-\t-\tlogo.png\0' + '2\t0\tsrc/a.ts\0')
+    expect(parseNumstat(numstat)).toEqual({code: {added: 2, removed: 0}, tests: {added: 3, removed: 1}})
+  })
+
+  it('counts zero test lines for a change that only touches code', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-stats-code-'))
+    try {
+      const git = (args: string[]): string => {
+        const result = spawnSync('git', ['-C', repo, ...args], {encoding: 'utf8'})
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout.trim()
+      }
+      git(['init', '-q', '-b', 'main'])
+      fs.writeFileSync(path.join(repo, 'a.ts'), 'a\n')
+      git(['add', '.'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      const base = git(['rev-parse', 'HEAD'])
+      fs.writeFileSync(path.join(repo, 'a.ts'), 'b\nc\n')
+
+      const resolved = await resolveReviewDiff(base, repo)
+
+      expect(resolved.lineStats).toEqual({code: {added: 2, removed: 1}, tests: {added: 0, removed: 0}})
     } finally {
       fs.rmSync(repo, {recursive: true, force: true})
     }

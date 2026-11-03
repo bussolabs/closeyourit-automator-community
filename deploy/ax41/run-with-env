@@ -1,0 +1,48 @@
+#!/usr/bin/python3 -I
+"""Guest launcher (CYAU-302): load the session environment, delete it, exec the agent.
+
+The host pushes `KEY=value\\0...` into a 0600 file on a tmpfs; secrets never ride an argv.
+"""
+import errno
+import os
+import shutil
+import sys
+import tempfile
+
+
+def exec_agent(command, argv, env, execve=os.execve):
+    path = shutil.which(command, path=env.get('PATH')) or command
+    try:
+        execve(path, argv, env)
+    except OSError as error:
+        # The read-only toolchain share falls back to 9p, which cannot exec a large single-file binary
+        # (claude): start a private copy on the guest's own disk instead.
+        if error.errno != errno.EFAULT:
+            raise
+        copy = os.path.join(tempfile.mkdtemp(prefix='agent-bin-'), os.path.basename(path))
+        shutil.copyfile(os.path.realpath(path), copy)
+        os.chmod(copy, 0o700)
+        execve(copy, argv, env)
+
+
+def main() -> None:
+    if len(sys.argv) < 3:
+        sys.exit('usage: run-with-env <env-file> <command> [args...]')
+    env_file, argv = sys.argv[1], sys.argv[2:]
+    with open(env_file, 'rb') as handle:
+        raw = handle.read()
+    os.unlink(env_file)
+    env = {}
+    for item in raw.split(b'\0'):
+        if not item:
+            continue
+        key, _, value = item.partition(b'=')
+        env[key.decode()] = value.decode()
+    # The toolchain is mounted read-only: gems a session installs land in its own home.
+    env.setdefault('HOME', os.path.expanduser('~'))
+    env.setdefault('BUNDLE_PATH', os.path.join(env['HOME'], '.cache', 'bundle'))
+    exec_agent(argv[0], argv, env)
+
+
+if __name__ == '__main__':
+    main()

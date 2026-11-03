@@ -2,7 +2,8 @@ import {spawnSync} from 'node:child_process'
 import * as path from 'node:path'
 import {Flags} from '@oclif/core'
 import {BaseCommand} from '../base'
-import {hasOperationalHostIdentity, loadSecrets, type Secrets} from '../lib/config'
+import {hasOperationalHostIdentity, loadSecrets, type Secrets, updateSecrets} from '../lib/config'
+import {autoLink, collectRepoTargets, defaultScanFs, readGitHubAliases, scanCheckouts} from '../lib/discover'
 import {makeClient} from '../lib/client'
 import {makeHostRegistrar} from '../lib/host'
 import {claudeAuthenticatedAsync, codexAuthenticatedAsync, cyiAuthenticatedAsync, githubAuthenticatedAsync, probeAllAsync} from '../lib/deps'
@@ -102,9 +103,27 @@ export default class OneClick extends BaseCommand {
   }
 
   /** Fetches the server manifest and replicates the repos under the resolved workspace root (secret override or hint under $HOME). */
-  protected replicate(secrets: Secrets): Promise<ReplicationReport | null> {
+  protected async replicate(secrets: Secrets): Promise<ReplicationReport | null> {
     const client = secrets.sync && hasOperationalHostIdentity(secrets) ? makeClient(secrets.sync, undefined, secrets.host.token) : null
-    return replicateFromManifest({client, workspaceRootOverride: secrets.workspaceRoot})
+    const report = await replicateFromManifest({client, workspaceRootOverride: secrets.workspaceRoot})
+    if (report !== null && client !== null) await this.linkWorkspace(client, report.workspaceRoot)
+    return report
+  }
+
+  /**
+   * Maps the freshly cloned checkouts into the host map, as `automator link <root>` would: without it a fresh
+   * host clones every repository and still claims nothing, because the preflight finds no checkout for the project.
+   */
+  protected async linkWorkspace(client: ReturnType<typeof makeClient>, workspaceRoot: string): Promise<void> {
+    const manifest = await client.getWorkspaceManifest()
+    if (manifest === null) return
+    const targets = collectRepoTargets(manifest)
+    const checkouts = scanCheckouts([workspaceRoot], defaultScanFs(), 4)
+    const githubHosts = readGitHubAliases()
+    updateSecrets((current) => {
+      const result = autoLink({targets, checkouts, hosts: current.hosts ?? {}, githubHosts})
+      return result.changed ? {...current, hosts: result.hosts} : null
+    })
   }
 
   /** Fetches the skill manifest and syncs the pinned bundle under skillsDir() (best-effort, additive). */

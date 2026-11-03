@@ -23,6 +23,7 @@ import {
 import {
   type AttemptDelivery,
   type AttemptDeliveryResult,
+  type LiveEventsSendResult,
   type ClaimedTicketCandidate,
   type Lease,
   type QueueDeferralReason,
@@ -37,8 +38,12 @@ import {type PreflightStop} from './heartbeat'
 import {skillsModeEnabled} from './paths'
 import {describeRuntimeFailure} from './runtime-failure'
 import {agentRuntimeReadiness} from './runtime-probe'
+import {noteQuotaFailure} from './agent-quota'
 import {redactSecrets} from './secret-redaction'
 import {type ReviewMode} from './review'
+import {liveEventsFromClaude} from './live-events'
+import {openLiveSender, type LiveSender} from './live-sender'
+import {openLiveSpool, type LiveRecord} from './live-spool'
 
 // runOnce(): a single iteration, shared by `tick` (one-shot) and `daemon` (loop).
 // Takes the lock (skip if already held), seeds the baselines, runs the due actions in sequence,
@@ -124,6 +129,8 @@ export interface ActionPreflightDecision {
  */
 export interface TicketAttemptSink {
   recordSessionCost(stdout: string): void
+  /** CYAU-275: once the session is over — `true` when it stopped on a quota limit, which gives the attempt back. */
+  settleQuotaPause?(quotaHit: boolean): void
 }
 
 export interface WorkflowDelivery {
@@ -144,6 +151,8 @@ export interface WorkflowDelivery {
   /** CYAU-228 — the OpenRouter model OpenCode reviews with. */
   reviewerModel?: string
   deliver(payload: AttemptDelivery): Promise<AttemptDeliveryResult>
+  /** CYAU-282 — sends the session's live steps to the attempt while it runs. */
+  sendLiveEvents?(records: LiveRecord[]): Promise<LiveEventsSendResult>
   /** Authoritative CI gate run after the parse and before spending the cross-review. */
   verify?(result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowDeliveryVerification>
   /** Promotes the draft PR only after green CI and cross-review, re-attesting the SHA. */
@@ -906,9 +915,25 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       let result!: RunResult
       let agentResult!: AgentRunResult
       let deliveryRecord: DeliveryRecord | undefined
+      let liveSender: LiveSender | undefined
       try {
         let retryPrompt = recoveredRetryPrompt ?? ticketRun?.retryPrompt
         const originalRun = effectiveAction.run
+        // CYAU-282 — a ticket's Claude session narrates its steps into a local queue, one per run so the
+        // numbering continues across retries, and the sender passes the same lines to the app. The code view is
+        // off until the app says the project turned it on: only names and counts are recorded before that.
+        const sessionCwd = ticketRun?.authorizedCwd ?? opts.authorizedCwds?.[name]
+        const liveSpool = claimedTicket && sessionCwd && effectiveAction.type === 'claude'
+          ? openLiveSpool(opts.logDir, logName, opts.now)
+          : undefined
+        const sendLiveEvents = workflowDelivery?.sendLiveEvents
+        liveSender = liveSpool && sendLiveEvents ? openLiveSender({send: (records) => sendLiveEvents(records)}) : undefined
+        const onStreamEvent = liveSpool && sessionCwd
+          ? (event: Record<string, unknown>) => {
+            const written = liveSpool.append(liveEventsFromClaude(event, {cwd: sessionCwd, includeCode: liveSender?.includeCode ?? false}))
+            liveSender?.push(written)
+          }
+          : undefined
         while (true) {
           const attemptAction = retryPrompt
             ? {...effectiveAction, run: composeRetryRun(retryPrompt, originalRun)}
@@ -927,8 +952,11 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             secrets: githubToken ? {...opts.secrets, githubToken} : opts.secrets,
             clock: opts.clock,
             signal: opts.signal,
-            authorizedCwd: ticketRun?.authorizedCwd ?? opts.authorizedCwds?.[name],
+            authorizedCwd: sessionCwd,
+            ...(onStreamEvent ? {onStreamEvent} : {}),
           }, executionLease, async (raw, lifecycleSignal, leaseLost) => {
+            // The app takes steps only while the attempt runs: the last ones leave before the delivery closes it.
+            await liveSender?.drain()
             result = raw
             agentResult = normalizeAgentResult({
               runtime: runtime.id,
@@ -1118,11 +1146,10 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                 chargeSession(reviewed.stdout)
                 const review = reviewed.status === 'success' ? parseWorkflowReview(reviewed.stdout, workflowDelivery.executionPhase) : null
                 if (!review) {
-                  reviewDetail = describeRuntimeFailure(
-                    reviewerAction.type === 'codex' ? 'codex' : 'claude',
-                    reviewed.status === 'success' ? '' : readLogTail(reviewed.logPath),
-                    reviewed.errorCode,
-                  )
+                  const reviewerLog = reviewed.status === 'success' ? '' : readLogTail(reviewed.logPath)
+                  reviewDetail = describeRuntimeFailure(reviewerAction.type, reviewerLog, reviewed.errorCode)
+                  // CYAU-275 — the reviewer's quota is the machine's too: pause it until the reset.
+                  noteQuotaFailure(reviewerAction.type, reviewerLog, opts.now)
                 }
                 // The host declares `depth` on EVERY delivery: a report that does not say how it was
                 // reviewed is a report missing the part that matters, and the server no longer accepts it.
@@ -1240,8 +1267,21 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         if (ticketRun) await ticketRun.block().catch(() => undefined)
         throw error
       } finally {
+        await liveSender?.close().catch(() => undefined)
         // The terminal checkpoint (or the fail-closed blocked attempt) always precedes the ownership release.
         if (executionLease) await executionLease.release().catch(() => undefined)
+      }
+      // CYAU-275 — a session stopped on the quota is a pause, not a failed attempt: the engine waits for the
+      // reset (the claim gate reads it) and the attempt counted at the claim is given back, up to its cap.
+      // The server is not told yet: the attempt closes as interrupted, like every undelivered failure.
+      const quotaResetAt = execution.result.status !== 'success' && effectiveAction.type !== 'shell'
+        ? noteQuotaFailure(effectiveAction.type, `${execution.result.stdout}\n${readLogTail(execution.result.logPath)}`, opts.now)
+        : null
+      if (quotaResetAt) agentRuntimeReadiness.invalidate()
+      try {
+        ticketAttempt?.settleQuotaPause?.(quotaResetAt !== null)
+      } catch {
+        // The attempt simply stays counted: the stricter outcome.
       }
       updateAction(state, name, {
         last_run: nowIso,

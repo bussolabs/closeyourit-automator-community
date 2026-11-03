@@ -11,6 +11,11 @@ export interface ContainmentCommand {
   cmd: string
   args: string[]
   cwd: string
+  /**
+   * On `prepare`: the session environment, for a backend that must carry it across a boundary (VM).
+   * On a prepared command: when set, the wrapper is spawned with exactly this environment.
+   */
+  env?: NodeJS.ProcessEnv
 }
 
 export interface StrongContainmentHandle {

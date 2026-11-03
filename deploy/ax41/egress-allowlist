@@ -1,0 +1,15 @@
+^github\.com$
+^api\.github\.com$
+^codeload\.github\.com$
+^objects\.githubusercontent\.com$
+^raw\.githubusercontent\.com$
+^rubygems\.org$
+^index\.rubygems\.org$
+^registry\.npmjs\.org$
+^(.+\.)?closeyour\.it$
+^api\.anthropic\.com$
+^claude\.ai$
+^console\.anthropic\.com$
+^api\.openai\.com$
+^auth\.openai\.com$
+^chatgpt\.com$

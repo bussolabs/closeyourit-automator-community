@@ -641,4 +641,126 @@ describe('runOnce — atomic queue take-over (CYAU-169)', () => {
       {name: 'q', detail: expect.stringContaining('canale coda non disponibile')},
     ])
   })
+
+  // CYAU-282 — a ticket's Claude session narrates its steps into a local queue next to its log.
+  it('a claimed Claude ticket session records its live events in a local queue', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const contexts: Array<{onStreamEvent?: (event: Record<string, unknown>) => void}> = []
+    const runtime: AgentRuntime = {
+      id: 'fake',
+      healthCheck: async () => ({available: true}),
+      execute: (_name, _action, context) => {
+        contexts.push(context)
+        context.onStreamEvent?.({type: 'assistant', message: {content: [{type: 'tool_use', id: 't', name: 'Read', input: {file_path: path.join(dir, 'app.rb')}}]}})
+        return {result: Promise.resolve(ok()), cancel: () => undefined}
+      },
+    }
+    const {claimQueue} = claimSource(['CYAU-7'])
+
+    await runOnce({
+      playbook: PlaybookSchema.parse({version: 1, actions: {q: {schedule: 'every 1m', type: 'claude', run: 'work'}}}),
+      playbookDir: dir, now, ...p, runtime, skillsMode: true, flowMaxParallel: 1,
+      ticketQueues: {q: target}, claimQueue, preflight: claimAwarePreflight([]), authorizedCwds: {q: dir},
+    })
+
+    expect(contexts[0].onStreamEvent).toBeTypeOf('function')
+    const spool = fs.readdirSync(p.logDir).find((file) => file.endsWith('.live.jsonl'))
+    expect(spool).toMatch(/^q-CYAU-7-.*\.live\.jsonl$/)
+    const [line] = fs.readFileSync(path.join(p.logDir, spool!), 'utf8').trim().split('\n').map((text) => JSON.parse(text))
+    expect(line).toMatchObject({seq: 1, event: {kind: 'file_read', path: 'app.rb'}})
+  })
+
+  it('sends the live steps to the attempt, the last ones before the delivery closes it', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const order: string[] = []
+    const sent: unknown[][] = []
+    const runtime: AgentRuntime = {
+      id: 'fake',
+      healthCheck: async () => ({available: true}),
+      execute: (_name, _action, context) => {
+        context.onStreamEvent?.({type: 'assistant', message: {content: [{type: 'tool_use', id: 't', name: 'Read', input: {file_path: path.join(dir, 'app.rb')}}]}})
+        return {result: Promise.resolve(ok()), cancel: () => undefined}
+      },
+    }
+    const {claimQueue} = claimSource(['CYAU-9'])
+    const workflowDelivery = {
+      executionPhase: 'triage' as const,
+      attemptId: 'at1',
+      ticketCode: 'CYAU-9',
+      deliver: vi.fn(async () => {
+        order.push('deliver')
+        return {outcome: 'ok' as const, status: 200}
+      }),
+      sendLiveEvents: vi.fn(async (records: unknown[]) => {
+        order.push('send')
+        sent.push(records)
+        return {outcome: 'ok' as const, acceptedThrough: records.length, includeCode: false}
+      }),
+    }
+
+    await runOnce({
+      playbook: PlaybookSchema.parse({version: 1, actions: {q: {schedule: 'every 1m', type: 'claude', run: 'work'}}}),
+      playbookDir: dir, now, ...p, runtime, skillsMode: true, flowMaxParallel: 1,
+      ticketQueues: {q: target}, claimQueue, authorizedCwds: {q: dir},
+      preflight: async () => ({outcome: 'admit' as const, state: 'ready' as const, reason: 'ok', audit: [], workflowDelivery}),
+    })
+
+    expect(sent.flat()).toEqual([expect.objectContaining({seq: 1, event: {kind: 'file_read', path: 'app.rb'}})])
+    expect(order.indexOf('send')).toBeLessThan(order.indexOf('deliver'))
+  })
+
+  it('a session whose live sending fails still delivers', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const runtime: AgentRuntime = {
+      id: 'fake',
+      healthCheck: async () => ({available: true}),
+      execute: (_name, _action, context) => {
+        context.onStreamEvent?.({type: 'assistant', message: {content: [{type: 'tool_use', id: 't', name: 'Read', input: {file_path: path.join(dir, 'app.rb')}}]}})
+        return {result: Promise.resolve(ok()), cancel: () => undefined}
+      },
+    }
+    const {claimQueue} = claimSource(['CYAU-10'])
+    const deliver = vi.fn(async () => ({outcome: 'ok' as const, status: 200}))
+    const workflowDelivery = {
+      executionPhase: 'triage' as const, attemptId: 'at2', ticketCode: 'CYAU-10', deliver,
+      sendLiveEvents: vi.fn(async () => {
+        throw new Error('network down')
+      }),
+    }
+
+    await runOnce({
+      playbook: PlaybookSchema.parse({version: 1, actions: {q: {schedule: 'every 1m', type: 'claude', run: 'work'}}}),
+      playbookDir: dir, now, ...p, runtime, skillsMode: true, flowMaxParallel: 1,
+      ticketQueues: {q: target}, claimQueue, authorizedCwds: {q: dir},
+      preflight: async () => ({outcome: 'admit' as const, state: 'ready' as const, reason: 'ok', audit: [], workflowDelivery}),
+    })
+
+    expect(deliver).toHaveBeenCalledTimes(1)
+  })
+
+  it('a shell queue action gets no live narration', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const contexts: Array<{onStreamEvent?: unknown}> = []
+    const runtime: AgentRuntime = {
+      id: 'fake',
+      healthCheck: async () => ({available: true}),
+      execute: (_name, _action, context) => {
+        contexts.push(context)
+        return {result: Promise.resolve(ok()), cancel: () => undefined}
+      },
+    }
+    const {claimQueue} = claimSource(['CYAU-8'])
+
+    await runOnce({
+      playbook: playbookWith(['q']), playbookDir: dir, now, ...p, runtime, skillsMode: true, flowMaxParallel: 1,
+      ticketQueues: {q: target}, claimQueue, preflight: claimAwarePreflight([]), authorizedCwds: {q: dir},
+    })
+
+    expect(contexts[0].onStreamEvent).toBeUndefined()
+    expect(fs.existsSync(p.logDir) ? fs.readdirSync(p.logDir).filter((file) => file.endsWith('.live.jsonl')) : []).toEqual([])
+  })
 })

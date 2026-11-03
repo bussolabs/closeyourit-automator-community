@@ -9,12 +9,14 @@ import {
   type AutomatorClient,
   type ClaimedTicketCandidate,
   type Lease,
+  type LiveEventsSendResult,
   makeClient,
   type PlanDone,
   type QueueDeferralReason,
   type TicketQueueCandidate,
   type WorkEngine,
 } from './client'
+import {type LiveRecord} from './live-spool'
 import {type ReviewMode} from './review'
 import {type ReviewerId, type RuntimeId} from './route'
 import {readClarificationState} from './clarification'
@@ -53,7 +55,9 @@ import {
   recordTicketAttempt,
   resetTicketAttempts,
   restartedByPerson,
+  settleQuotaPause,
 } from './ticket-attempts'
+import {agentQuotaGate, type QuotaReadiness} from './agent-quota'
 import {composeSkillInvocation, phaseToStep} from './flow-engine'
 import {createWriteConfinementAttestor, type WriteConfinementAttestation} from './write-confinement'
 import {type ExecutionPhase, type PhaseProfile, phaseProfile, phaseProfileDigest} from './phase-profile'
@@ -165,6 +169,7 @@ function attestTicketRepository(cwd: string, repository: string): boolean {
 export type TicketLeaseAcquireResult =
   | {outcome: 'acquired'; runId: string; lease: ActionExecutionLease; attemptId?: string;
       deliverAttempt?: (payload: AttemptDelivery) => Promise<AttemptDeliveryResult>;
+      sendLiveEvents?: (records: LiveRecord[]) => Promise<LiveEventsSendResult>;
       // Host-first (CYAU-87): the authoritative phase + the profile fingerprint signed in the post-claim lease, for the
       // DRIFT-CHECK (twin ↔ server) before running the skill.
       executionPhase?: ExecutionPhase; profileDigest?: string;
@@ -179,6 +184,8 @@ export type TicketLeaseAcquireResult =
       reviewerModel?: string;
       // CYRA-921: which engine does the work, frozen on the attempt at claim.
       workEngine?: WorkEngine;
+      // CYRA-1133: the model the council chose for this ticket (absent = the machine's pinned model).
+      workModel?: string;
       // CYRA-621: the version number (and the code point for the final one) decided by the server
       // before the phase starts. The machine executes it, does not choose it.
       release?: {version: string; sha?: string}}
@@ -218,7 +225,7 @@ interface TicketLeaseStore {
 }
 
 export interface TicketLeaseProviderOptions {
-  client?: Pick<AutomatorClient, 'acquireLease' | 'claimTicketQueue' | 'renewLease' | 'releaseLease' | 'deliverAttempt'>
+  client?: Pick<AutomatorClient, 'acquireLease' | 'claimTicketQueue' | 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'sendLiveEvents'>
   store?: TicketLeaseStore
   now?: () => Date
   runId?: () => string
@@ -320,6 +327,7 @@ function composeEnrichedAction(
   profile: PhaseProfile | null,
   release?: {version: string; sha?: string},
   workEngine?: WorkEngine,
+  workModel?: string,
 ): Action {
   // Host-first (CYAU-87): in skill-mode the executable action is composed from the PHASE PROFILE (runtime + sandbox/
   // permission_mode/allowed_tools), NOT from the action materialized from the catalog. The skill is already validated and pinned
@@ -333,7 +341,7 @@ function composeEnrichedAction(
   const fidato = [result.ticket?.approvedPlan, release && composeRelease(release), result.ticket?.reworkFindings]
     .filter(Boolean).join('\n\n') || undefined
   if (validatedSkill && profile) {
-    return bindReleaseAuthority(composeQueueSkillAction(action, validatedSkill, profile, fidato, workEngine), release)
+    return bindReleaseAuthority(composeQueueSkillAction(action, validatedSkill, profile, fidato, workEngine, workModel), release)
   }
   return enrichTicketAction(action, result)
 }
@@ -355,6 +363,7 @@ function composeQueueSkillAction(
   profile: PhaseProfile,
   approvedPlan?: string,
   workEngine?: WorkEngine,
+  workModel?: string,
 ): Action {
   if (profile.runtime !== 'claude') {
     throw new Error(`fase host-first con runtime non-claude non supportata (PIVOT CYAU-87): ${profile.runtime}`)
@@ -371,6 +380,7 @@ function composeQueueSkillAction(
     // assigns ONLY after approval. It travels on the already existing skill preamble channel (the same as the
     // retry findings, which stay after the plan when both are present).
     run: composeSkillRun(action.run, approvedPlan),
+    ...(workModel ? {model: workModel} : {}),
     ...(action.description !== undefined ? {description: action.description} : {}),
     ...(action.cwd !== undefined ? {cwd: action.cwd} : {}),
     // Host-first (CYAU-90): the execution timeout is the TTL of the claimed PHASE (profile.ttl), NOT that
@@ -617,6 +627,16 @@ export function composeReworkFindings(raw: unknown, phase: string | undefined): 
   ].join('\n\n')
 }
 
+/**
+ * CYAU-300 — the server marks the round that resolves a code conflict with main the previous round stopped on. The
+ * order is trusted (it comes from the server, not from the ticket) and travels with the approved plan.
+ */
+const CONFLICT_RESOLUTION_SECTION = [
+  '# Risoluzione di un conflitto con main',
+  'Il giro precedente si è fermato su un conflitto di codice con main. Questo giro serve solo a risolverlo: porta dentro main con `sync-main.sh --resolve`, cambia soltanto i file in conflitto tenendo l\'intento di entrambe le parti, poi gate, commit e consegna.',
+  'Non rifare il lavoro del ticket. Se le due parti non possono stare insieme, fermati come `blocked` con `merge_conflict` e spiega cosa chiede ciascuna: decide una persona.',
+].join('\n\n')
+
 /** A v1 plan lists its Definition of Done as strings, a v2 plan as {id, text} (CYRA-877). */
 function doneLine(entry: PlanDone): string {
   return typeof entry === 'string' ? entry : `${entry.id}: ${entry.text}`
@@ -674,7 +694,8 @@ function queueCandidateToTicket(candidate: ClaimedTicketCandidate, cwd: string):
   // to work without a limit — that is, a check that declares a guarantee and verifies a weaker one.
   const planSection = currentPlan && text(currentPlan.approved_at) ? composeApprovedPlan(currentPlan) : undefined
   const scopeSection = frozenScope ? composeFrozenScope(frozenScope) : undefined
-  const approvedPlan = [planSection, scopeSection].filter(Boolean).join('\n\n') || undefined
+  const resolveSection = candidate.workflow?.conflict_resolution === true ? CONFLICT_RESOLUTION_SECTION : undefined
+  const approvedPlan = [resolveSection, planSection, scopeSection].filter(Boolean).join('\n\n') || undefined
   const automationContext = currentPlan && !approvedPlan ? [
     `Piano precedente v${currentPlan.version}: ${currentPlan.technical_analysis}`,
     ...currentPlan.scenarios.map((scenario, index) => `${index + 1}. Given ${scenario.given} / When ${scenario.when} / Then ${scenario.then} / Expected ${scenario.expected}`),
@@ -881,7 +902,7 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
     update: (lease) => void saveLeaseIfHeld(lease),
     remove: (lease) => removeLeaseIfHeld(lease.ticket, lease.run_id),
   }
-  const client = (): Pick<AutomatorClient, 'acquireLease' | 'claimTicketQueue' | 'renewLease' | 'releaseLease' | 'deliverAttempt'> | null => {
+  const client = (): Pick<AutomatorClient, 'acquireLease' | 'claimTicketQueue' | 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'sendLiveEvents'> | null => {
     if (options.client) return options.client
     if (!secrets.sync || !hasOperationalHostIdentity(secrets)) return null
     return makeClient(secrets.sync, globalThis.fetch, secrets.host.token)
@@ -894,7 +915,7 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
    * held without knowing how to use it is worse than no lease. Only then are renewal and release built.
    */
   const finalize = async (input: {
-    api: Pick<AutomatorClient, 'renewLease' | 'releaseLease' | 'deliverAttempt'>
+    api: Pick<AutomatorClient, 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'sendLiveEvents'>
     hostId: string
     actionName: string
     ticket: TicketDetail
@@ -963,6 +984,7 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
       ...(remote.reviewer ? {reviewer: remote.reviewer} : {}),
       ...(remote.reviewer_model ? {reviewerModel: remote.reviewer_model} : {}),
       ...(remote.work_engine ? {workEngine: remote.work_engine} : {}),
+      ...(remote.work_model ? {workModel: remote.work_model} : {}),
       ...(remote.release ? {release: remote.release} : {}),
       ...(input.withAttempt && remote.attempt_id ? {
         attemptId: remote.attempt_id,
@@ -971,6 +993,10 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
           // Unresolvable channel = a delivery that never started, not a server rejection: `unavailable`
           // (undetermined) is the only honest outcome and is now distinguishable in the log.
           return current ? current.deliverAttempt(remote.attempt_id!, payload) : {outcome: 'unavailable' as const}
+        },
+        sendLiveEvents: async (records: LiveRecord[]) => {
+          const current = client()
+          return current ? current.sendLiveEvents(remote.attempt_id!, records) : {outcome: 'unavailable' as const}
         },
       } : {}),
       lease: {
@@ -1612,6 +1638,7 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               ...(acquired.reviewer ? {reviewer: acquired.reviewer} : {}),
               ...(acquired.reviewerModel ? {reviewerModel: acquired.reviewerModel} : {}),
               deliver: acquired.deliverAttempt,
+              ...(acquired.sendLiveEvents ? {sendLiveEvents: acquired.sendLiveEvents} : {}),
               ...(deliversPr && ticketRun?.verifyWorkflowDelivery ? {
                 verify: ticketRun.verifyWorkflowDelivery.bind(ticketRun),
               } : {}),
@@ -1674,7 +1701,8 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
       }
       const enrichedAction = composeEnrichedAction(action, result as TicketPreflightResult, queueSkill, profile,
                                                    acquired?.outcome === 'acquired' ? acquired.release : undefined,
-                                                   acquired?.outcome === 'acquired' ? acquired.workEngine : undefined)
+                                                   acquired?.outcome === 'acquired' ? acquired.workEngine : undefined,
+                                                   acquired?.outcome === 'acquired' ? acquired.workModel : undefined)
       const attemptIdentity = ticketAttempt
       return {
         ...result,
@@ -1690,6 +1718,10 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               const cost = sessionCostUsd(stdout)
               if (cost === null) return // uninterpretable output: better no datum than a made-up cost
               addTicketAttemptCost({...attemptIdentity, cost, now: now()}, attemptsStore)
+            },
+            // CYAU-275: a session stopped on the quota gives its attempt back, up to the pause cap.
+            settleQuotaPause: (quotaHit: boolean): void => {
+              settleQuotaPause({...attemptIdentity, quotaHit, now: now()}, attemptsStore)
             },
           },
         } : {}),
@@ -1770,6 +1802,8 @@ export function makeQueueClaimer(
     checkBundlePin?: () => Promise<BundlePinCheck>
     /** CYAU-206: real probe of the runtimes, before asking for work. Injectable in tests. */
     checkRuntimes?: () => Promise<RuntimeReadiness>
+    /** CYAU-275: quota pause and remaining quota, before asking for work. Injectable in tests. */
+    checkQuota?: () => Promise<QuotaReadiness>
   } = {},
 ): ((target: TicketQueueTarget) => Promise<QueueClaimOutcome>) | undefined {
   if (!secrets.sync || !hasOperationalHostIdentity(secrets)) return undefined
@@ -1779,6 +1813,7 @@ export function makeQueueClaimer(
   const pluginDir = options.skills?.pluginDir ?? skillsPluginDir()
   const attestConfinement = options.attestConfinement ?? attestConfinementOnce
   const checkRuntimes = options.checkRuntimes ?? agentRuntimeReadiness
+  const checkQuota = options.checkQuota ?? agentQuotaGate
   // The path passed is THE ONE the session runs (`pluginDir`), not an inferred one: with
   // AUTOMATOR_SKILLS_DIR the two diverge, and verifying the second would give the green light looking at
   // a manual different from the one that then runs.
@@ -1813,6 +1848,10 @@ export function makeQueueClaimer(
     if (!confinement.attested) {
       return {ready: false, detail: `write-confinement OS non attestato: ${confinement.detail ?? 'motivo non disponibile'}`}
     }
+    // CYAU-275 — with the quota gone (or nearly) a claimed ticket cannot finish. It goes before the runtime
+    // probe, which is itself a paid request and would only fail.
+    const quota = await checkQuota()
+    if (!quota.ready) return quota
     // CYAU-206 — on 23/09 Codex was disconnected and the machine took tickets for 24 hours: every session
     // was paid for and then rejected because the review did not start.
     return checkRuntimes()

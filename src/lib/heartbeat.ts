@@ -6,7 +6,9 @@ import {skillsDir, skillsModeEnabled, skillsPluginDir} from './paths'
 import {activeBundleIdentity, defaultSkillsGit, type ActiveBundleIdentity} from './skills-manifest'
 import {redactSecrets} from './secret-redaction'
 import {readUpdateFailure, type UpdateFailureStop} from './update-outcome'
+import {type HangBeatTarget, type HangReport} from './hang-watchdog'
 import {detectPlatform} from './service'
+import {agentQuotaReport, type AgentQuotaReport} from './agent-quota'
 
 // Heartbeat to CloseYourIt: POST check_in to a cron monitor. Zero-config server-side (the monitor
 // is born at the first ping); if the daemon dies, the pings stop and CloseYourIt raises the `cron_missed` alert.
@@ -158,7 +160,7 @@ export function buildLastStops(stops: readonly PreflightStop[]): PreflightStop[]
   }))
 }
 
-type BeatPayload = HostCapabilities & Partial<HostActivity> & {last_stops?: PreflightStop[]}
+type BeatPayload = HostCapabilities & Partial<HostActivity> & {last_stops?: PreflightStop[]; agent_quota?: AgentQuotaReport[]; hang?: HangReport}
 
 export async function sendHeartbeat(
   cfg: HeartbeatConfig,
@@ -181,7 +183,7 @@ async function postHeartbeat(
   cfg: HeartbeatConfig,
   hostToken: string | undefined,
   ok: boolean,
-  capabilities: BeatPayload | undefined,
+  capabilities: BeatPayload | ReducedHangPayload | undefined,
   fetchFn: FetchFn,
 ): Promise<string | null> {
   if (!isHostToken(hostToken)) return 'no valid host token'
@@ -210,6 +212,22 @@ async function postHeartbeat(
   return typeof code === 'string' && ERROR_CODE.test(code) ? `HTTP ${res.status} ${code}` : `HTTP ${res.status}`
 }
 
+interface ReducedHangPayload {
+  host_id: string
+  automator_version?: string
+  hang: HangReport
+}
+
+/**
+ * CYAU-289 — the reduced beat the watchdog thread sends while the daemon is hung: monitor fields, host, version and
+ * the hang, nothing else. The server only updates the fields it receives, so the rest of the snapshot stays as the
+ * last full beat left it. `fail` because the machine is alive but not working. Best-effort, never throws.
+ */
+export async function sendHangBeat(target: HangBeatTarget, hang: HangReport, fetchFn: FetchFn = globalThis.fetch): Promise<void> {
+  const payload: ReducedHangPayload = {host_id: target.hostId, ...(target.version ? {automator_version: target.version} : {}), hang}
+  await postHeartbeat(target.heartbeat, target.hostToken, false, payload, fetchFn)
+}
+
 export interface HeartbeatOptions {
   version?: string // automator version (from this.config.version)
   runtimes?: RuntimeHealth[] // injectable in tests; in production: real probe once at construction
@@ -226,8 +244,15 @@ export interface HeartbeatOptions {
    * like the activity: a failure that happened mid-day must appear at once, not at the restart.
    */
   updateFailure?: () => UpdateFailureStop | null
+  /** CYAU-289: the hang to report, handed out once; a reader that throws counts as no hang. */
+  hang?: () => HangReport | null
   /** CYAU-247: where a rejected beat is reported, only when the outcome changes. */
   log?: (message: string) => void
+  /**
+   * CYAU-275: remaining quota and pause of each engine, read at every beat. Sent as `agent_quota`: a server that
+   * does not know the field yet drops it, so it costs nothing until the panel shows it.
+   */
+  agentQuota?: () => AgentQuotaReport[]
 }
 
 /**
@@ -271,6 +296,7 @@ export function makeHeartbeat(secrets: Secrets, opts: HeartbeatOptions = {}): ((
   // during the day.
   const bundle = opts.skillsBundle ?? (() => skillsBundleRuntime())
   const updateFailure = opts.updateFailure ?? (() => readUpdateFailure())
+  const agentQuota = opts.agentQuota ?? (() => agentQuotaReport())
   // One line per change of outcome, not per beat: the daemon beats every minute.
   let lastRejection: string | null = null
   const report = (rejection: string | null) => {
@@ -291,7 +317,23 @@ export function makeHeartbeat(secrets: Secrets, opts: HeartbeatOptions = {}): ((
     const collected = failure === null ? stops : [...(stops ?? []), failure]
     const lastStops = collected === undefined ? {} : {last_stops: buildLastStops(collected)}
     const runtimes = [...capabilities.runtimes, bundle()]
-    report(await postHeartbeat(cfg, secrets.host.token, ok, {...capabilities, runtimes, ...activity(), ...lastStops}, opts.fetchFn ?? globalThis.fetch))
+    const quota = (() => {
+      try {
+        return {agent_quota: agentQuota()}
+      } catch {
+        return {} // best-effort: an unreadable quota never holds the beat
+      }
+    })()
+    const hang = readHang(opts.hang)
+    report(await postHeartbeat(cfg, secrets.host.token, ok, {...capabilities, runtimes, ...activity(), ...lastStops, ...quota, ...(hang ? {hang} : {})}, opts.fetchFn ?? globalThis.fetch))
+  }
+}
+
+function readHang(reader: (() => HangReport | null) | undefined): HangReport | null {
+  try {
+    return reader?.() ?? null
+  } catch {
+    return null
   }
 }
 

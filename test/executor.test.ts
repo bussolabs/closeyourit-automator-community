@@ -270,6 +270,36 @@ describe('runAction', () => {
     expect(fs.readFileSync(res.logPath, 'utf8')).toContain('helper nativo assente')
   })
 
+  // CYAU-302 — a VM backend carries the session environment into the guest itself: it receives the
+  // secrets at prepare time, and its wrapper (`incus exec`) is spawned with its own clean environment.
+  it('a backend that carries the environment gets it at prepare and spawns its wrapper without secrets', async () => {
+    const {spawn, calls} = makeSpawn({code: 0, stdout: '{"is_error":false}'})
+    const prepared: Array<NodeJS.ProcessEnv | undefined> = []
+    const clean = {PATH: '/usr/bin:/bin', HOME: '/home/automator'}
+    const strongContainment: StrongContainmentBackend = {
+      available: () => ({available: true}),
+      prepare: (command) => {
+        prepared.push(command.env)
+        return {
+          identity: 'ca-run-fixed',
+          command: {cmd: '/usr/bin/incus', args: ['exec', 'ca-run-fixed', '--', command.cmd], cwd: command.cwd, env: clean},
+          signal: () => true,
+          empty: () => true,
+        }
+      },
+    }
+    const res = await runAction('vm', action({type: 'claude', run: 'ciao', containment: 'strong'}), ctx(spawn, {
+      guardrailsInstalled: () => true,
+      strongContainment,
+      secrets: {githubToken: 'ghs_vm_secret'},
+    }))
+
+    expect(res.status).toBe('success')
+    expect(prepared[0]?.GH_TOKEN).toBe('ghs_vm_secret')
+    expect(calls[0].cmd).toBe('/usr/bin/incus')
+    expect(calls[0].opts.env).toEqual(clean)
+  })
+
   it('strong containment signals the kernel identity with TERM→KILL and approves only after empty', async () => {
     vi.useFakeTimers()
     const signals: NodeJS.Signals[] = []
@@ -1372,5 +1402,78 @@ describe('actionSecretEnv — GitHub token of the ticket (CYAU-248)', () => {
     expect(env.GH_TOKEN).toBeUndefined()
     expect(isManagedSecretEnv('GH_TOKEN')).toBe(true)
     expect(isManagedSecretEnv('GITHUB_TOKEN')).toBe(true)
+  })
+})
+
+// CYAU-282 — Claude's stream-json narration: events go to the caller, stdout keeps only the result line.
+describe('runAction with stream events', () => {
+  const ctx = (spawn: SpawnFn, extra?: Record<string, unknown>) => ({
+    playbookDir: '/pb', logDir: dir, now, spawn,
+    authorizeCwd: (cwd: string) => cwd,
+    resolveExecutable: (cmd: string) => `/trusted/${cmd}`,
+    ...extra,
+  })
+  const report = '```json\n{"summary":"added the scope","changed_files":["app/models/ticket.rb"]}\n```'
+  const resultObject = {type: 'result', subtype: 'success', is_error: false, result: report, total_cost_usd: 0.25}
+  const resultLine = JSON.stringify(resultObject)
+  const stream = [
+    JSON.stringify({type: 'system', subtype: 'init'}),
+    JSON.stringify({type: 'assistant', message: {content: [{type: 'tool_use', id: 't1', name: 'Edit', input: {file_path: '/pb/a.rb'}}]}}),
+    JSON.stringify({type: 'user', tool_use_result: {filePath: '/pb/a.rb', originalFile: 'SECRET_WHOLE_FILE', structuredPatch: []}}),
+    resultLine,
+  ].join('\n') + '\n'
+
+  it('keeps the json output and argv when nobody asks for events', async () => {
+    const {spawn, calls} = makeSpawn({code: 0, stdout: resultLine})
+    await runAction('a', action({type: 'claude', run: 'ciao'}), ctx(spawn))
+    expect(calls[0].args).toEqual(expect.arrayContaining(['--output-format', 'json']))
+    expect(calls[0].args).not.toContain('stream-json')
+    expect(calls[0].args).not.toContain('--verbose')
+  })
+
+  it('streams events to the caller and leaves only the result line in stdout', async () => {
+    const events: Record<string, unknown>[] = []
+    const {spawn, calls} = makeSpawn({code: 0, stdout: stream})
+    const result = await runAction('a', action({type: 'claude', run: 'ciao'}), ctx(spawn, {onStreamEvent: (event: Record<string, unknown>) => events.push(event)}))
+    expect(calls[0].args).toEqual(expect.arrayContaining(['--output-format', 'stream-json', '--verbose']))
+    expect(result.stdout.trim()).toBe(resultLine)
+    expect(events.map((event) => event.type)).toEqual(['system', 'assistant', 'user'])
+    expect(fs.readFileSync(result.logPath, 'utf8')).not.toContain('SECRET_WHOLE_FILE')
+  })
+
+  it('gives the same normalized result as the json output for the same session', async () => {
+    const jsonRun = await runAction('a', action({type: 'claude', run: 'ciao'}), ctx(makeSpawn({code: 0, stdout: JSON.stringify(resultObject)}).spawn))
+    const streamRun = await runAction('a', action({type: 'claude', run: 'ciao'}), ctx(makeSpawn({code: 0, stdout: stream}).spawn, {onStreamEvent: () => undefined}))
+    const normalize = (result: typeof jsonRun) => {
+      const {metadata, ...rest} = normalizeAgentResult({runtime: 'claude', action: 'a', result})
+      return {...rest, reportParsed: metadata.reportParsed}
+    }
+
+    expect(normalize(streamRun)).toEqual(normalize(jsonRun))
+    expect(normalize(streamRun).reportParsed).toBe(true)
+  })
+
+  it('still downgrades a session that ended in error', async () => {
+    const failed = stream.replace('"is_error":false', '"is_error":true')
+    const result = await runAction('a', action({type: 'claude', run: 'ciao'}), ctx(makeSpawn({code: 0, stdout: failed}).spawn, {
+      onStreamEvent: () => undefined,
+      isError: (stdout: string) => JSON.parse(stdout.trim()).is_error === true,
+    }))
+    expect(result.status).toBe('failure')
+  })
+
+  it('a failing event handler never breaks the session', async () => {
+    const result = await runAction('a', action({type: 'claude', run: 'ciao'}), ctx(makeSpawn({code: 0, stdout: stream}).spawn, {
+      onStreamEvent: () => { throw new Error('sink down') },
+    }))
+    expect(result.status).toBe('success')
+    expect(result.stdout.trim()).toBe(resultLine)
+  })
+
+  it('leaves a shell action untouched', async () => {
+    const events: unknown[] = []
+    const result = await runAction('a', action({type: 'shell', run: 'echo'}), ctx(makeSpawn({code: 0, stdout: stream}).spawn, {onStreamEvent: (event: unknown) => events.push(event)}))
+    expect(result.stdout).toBe(stream)
+    expect(events).toEqual([])
   })
 })
