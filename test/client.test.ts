@@ -426,6 +426,16 @@ describe('makeClient#claimNextTicket', () => {
     expect(result.outcome === 'claimed' ? result.lease.work_engine : 'not claimed').toBeUndefined()
   })
 
+  it('keeps the work model the server chose and drops an empty one', async () => {
+    const named = fakeFetch({ok: true, status: 201, json: {data: {...claimed, work_engine: 'codex', work_model: ' gpt-6-astra ', candidate}}})
+    await expect(makeClient(cfg, named.fn, 'cyi_ah_host').claimNextTicket(request))
+      .resolves.toMatchObject({outcome: 'claimed', lease: {work_model: 'gpt-6-astra'}})
+
+    const blank = fakeFetch({ok: true, status: 201, json: {data: {...claimed, work_model: '  ', candidate}}})
+    const result = await makeClient(cfg, blank.fn, 'cyi_ah_host').claimNextTicket(request)
+    expect(result.outcome === 'claimed' ? result.lease.work_model : 'not claimed').toBeUndefined()
+  })
+
   it('null data is "no work", not an error: the queue is drained', async () => {
     const {fn} = fakeFetch({ok: true, status: 200, json: {data: null}})
     await expect(makeClient(cfg, fn, 'cyi_ah_host').claimNextTicket(request)).resolves.toEqual({outcome: 'empty'})
@@ -857,5 +867,43 @@ describe('makeClient#deferTicketQueue — CYAU-101', () => {
       makeClient(cfg, noHost.fn, 'cyi_ah_host').deferTicketQueue({...req, host_id: ''}),
     ).resolves.toBe(false)
     expect(noHost.calls).toHaveLength(0)
+  })
+})
+
+// CYAU-282 — the live steps of an attempt. The answer says how far the app got and whether the project keeps code.
+describe('sendLiveEvents', () => {
+  const records = [{seq: 1, at: '2026-11-02T15:00:00.000Z', event: {kind: 'file_read' as const, path: 'app/a.rb'}}]
+
+  it('POSTs the numbered steps on the attempt and reads the answer', async () => {
+    const {fn, calls} = fakeFetch({ok: true, status: 200, json: {data: {accepted_through: 1, include_code: true}}})
+    await expect(makeClient(cfg, fn, 'cyi_ah_host').sendLiveEvents('at/1', records))
+      .resolves.toEqual({outcome: 'ok', acceptedThrough: 1, includeCode: true})
+    expect(calls[0].url).toBe('https://app.closeyour.it/api/v1/agent_attempts/at%2F1/live_events')
+    expect(calls[0].opts.method).toBe('POST')
+    expect(JSON.parse(String(calls[0].opts.body))).toEqual({events: records})
+  })
+
+  it.each([
+    [401, undefined, {outcome: 'rejected', status: 401}],
+    [409, {error: {code: 'R409-LIVE-002'}}, {outcome: 'rejected', status: 409, code: 'R409-LIVE-002'}],
+    [422, {error: {code: 'R422-LIVE-001'}}, {outcome: 'rejected', status: 422, code: 'R422-LIVE-001'}],
+    [503, undefined, {outcome: 'unavailable', status: 503}],
+  ])('tells a refusal (%i) from an outage', async (status, body, expected) => {
+    const {fn} = fakeFetch({ok: false, status, json: body})
+    await expect(makeClient(cfg, fn, 'cyi_ah_host').sendLiveEvents('at1', records)).resolves.toEqual(expected)
+  })
+
+  it('treats an answer it cannot read as a refusal, so it is not resent forever', async () => {
+    const {fn} = fakeFetch({ok: true, status: 200, json: {data: {accepted_through: 'x'}}})
+    await expect(makeClient(cfg, fn, 'cyi_ah_host').sendLiveEvents('at1', records))
+      .resolves.toEqual({outcome: 'rejected', status: 200})
+  })
+
+  it('is unavailable without a host token and on a network error', async () => {
+    const unused = fakeFetch({ok: true})
+    await expect(makeClient(cfg, unused.fn).sendLiveEvents('at1', records)).resolves.toEqual({outcome: 'unavailable'})
+    expect(unused.calls).toHaveLength(0)
+    const network = vi.fn(async () => { throw new Error('ECONNRESET') })
+    await expect(makeClient(cfg, network, 'cyi_ah_host').sendLiveEvents('at1', records)).resolves.toEqual({outcome: 'unavailable'})
   })
 })

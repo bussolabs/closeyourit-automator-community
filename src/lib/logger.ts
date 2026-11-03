@@ -227,7 +227,8 @@ export function prune(dir: string, keepDays: number, now: Date): number {
   const cutoff = now.getTime() - keepDays * 86_400_000
   let removed = 0
   for (const entry of entries) {
-    const match = /-(\d{8}T\d{6})\.log$/.exec(entry)
+    // Action logs and, next to them, the live event queues (CYAU-282).
+    const match = /-(\d{8}T\d{6})\.(log|live\.jsonl)$/.exec(entry)
     if (!match) continue
     const stamp = parseTimestamp(match[1])
     if (stamp && stamp.getTime() < cutoff) {

@@ -259,6 +259,14 @@ describe('enrollOutcome', () => {
     expect(o.status).toBe('completed')
   })
 
+  it('only the repositories missing → completed: the workspace stage clones and links them', () => {
+    const o = enrollOutcome(enroll({
+      ready: false,
+      steps: [{key: 'repositories', label: 'Repository mappati (host-map)', required: true, status: 'missing'}],
+    }))
+    expect(o.status).toBe('completed')
+  })
+
   it('skill bundle missing TOGETHER with another prerequisite → blocked, and the bundle is not among the blockers', () => {
     const o = enrollOutcome(enroll({
       ready: false,

@@ -54,7 +54,11 @@ vi.mock('../src/lib/linux-host', async (importOriginal) => {
   return {...actual, probeLinuxHost: probes.probeLinuxHost}
 })
 
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import Doctor from '../src/commands/doctor'
+import {previousHangMarkerPath} from '../src/lib/hang-watchdog'
 import {runCaptured, runExpectingExit} from './helpers/command'
 
 // All CLIs present: isolates the runtime tests (no `missing` that would make doctor fail for other reasons).
@@ -381,5 +385,44 @@ describe('doctor — private CloseYourIt server with Codex (CYAU-238)', () => {
       expect(run.result).not.toHaveProperty('privateServer')
     }
     expect(probes.dnsLookup).not.toHaveBeenCalled()
+  })
+})
+
+// CYAU-289 — doctor says the last hang the machine recorded.
+describe('doctor — last hang (CYAU-289)', () => {
+  let stateDir: string
+  beforeEach(() => {
+    vi.clearAllMocks()
+    probes.loadSecrets.mockReturnValue({})
+    probes.probeAllAsync.mockResolvedValue(CLI_OK)
+    probes.probeRuntimes.mockResolvedValue([claudeAvailable, codexAvailable])
+    probes.probeLinuxHost.mockResolvedValue([{id: 'linux', ok: true}])
+    probes.probeAgentRuntimes.mockResolvedValue({ready: true})
+    probes.resolveReviewerRuntime.mockResolvedValue({command: '/usr/bin/x', prefix: [], readPaths: []})
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-doctor-hang-'))
+    vi.stubEnv('AUTOMATOR_STATE_DIR', stateDir)
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    fs.rmSync(stateDir, {recursive: true, force: true})
+  })
+
+  it('shows the last recorded hang with duration and resume', async () => {
+    fs.writeFileSync(previousHangMarkerPath(), JSON.stringify({
+      version: 1, started_at: '2026-11-03T10:00:00.000Z', last_seen_at: '2026-11-03T10:05:50.000Z',
+      resumed_at: '2026-11-03T10:06:00.000Z',
+    }))
+
+    const {result, stdout} = await runCaptured(Doctor, [])
+
+    expect(stdout).toContain('Last hang: started 2026-11-03T10:00:00.000Z, lasted 6 min, resumed 2026-11-03T10:06:00.000Z')
+    expect(result).toMatchObject({ok: true, lastHang: {state: 'resumed', duration_seconds: 360}})
+  })
+
+  it('says nothing about hangs when none is recorded', async () => {
+    const {result, stdout} = await runCaptured(Doctor, [])
+
+    expect(stdout).not.toContain('Last hang')
+    expect(result).not.toHaveProperty('lastHang')
   })
 })

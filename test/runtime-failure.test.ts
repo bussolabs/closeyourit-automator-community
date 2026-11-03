@@ -17,6 +17,13 @@ describe('describeRuntimeFailure', () => {
     expect(describeRuntimeFailure('claude', '"api_error_status":429', 'C001-EXEC-003')).toBe('claude: quota del modello esaurita')
   })
 
+  // CYAU-275 — the reset time is no longer lost: it says when the engine works again.
+  it('keeps the reset time of a usage limit', () => {
+    const out = '{"is_error":true,"result":"Claude AI usage limit reached|1793790000"}'
+    expect(describeRuntimeFailure('claude', out, null, new Date('2026-11-03T10:00:00Z')))
+      .toBe(`claude: quota del modello esaurita, reset ${new Date(1_793_790_000_000).toISOString()}`)
+  })
+
   it('recognizes a model the installed CLI does not support', () => {
     const log = "The 'gpt-6-astra' model requires a newer version of Codex. Please upgrade to the latest app or CLI"
     expect(describeRuntimeFailure('codex', log, null)).toBe('codex: modello non disponibile per questa CLI')

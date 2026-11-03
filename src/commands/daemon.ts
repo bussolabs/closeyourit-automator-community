@@ -3,7 +3,8 @@ import {Flags} from '@oclif/core'
 import {BaseCommand} from '../base'
 import {runDaemon} from '../lib/daemon'
 import {makeSupporterPass} from '../lib/supporter'
-import {loadSecrets, secretCapabilities} from '../lib/config'
+import {makeCouncilPass} from '../lib/council'
+import {hasOperationalHostIdentity, loadSecrets, secretCapabilities} from '../lib/config'
 import {combineBeats, heartbeatMissingReason, makeHeartbeat} from '../lib/heartbeat'
 import {makeHostRegistrar} from '../lib/host'
 import {makeLeaseRenewer} from '../lib/lease'
@@ -18,6 +19,7 @@ import {activeManagedGuardrailPaths} from '../lib/managed-service'
 import {makeGithubTokenFetcher} from '../lib/github-token'
 import {makeQueueClaimer, makeQueueDeferrer, makeTicketPreflight, resolveHostFlowConcurrency} from '../lib/ticket-preflight'
 import {detectPlatform, type OsPlatform} from '../lib/service'
+import {consumeHangMarker, createHangReportQueue, startHangWatchdog} from '../lib/hang-watchdog'
 
 export default class Daemon extends BaseCommand {
   static description = 'Avvia il loop persistente (tenuto vivo dal servizio systemd utente)'
@@ -37,6 +39,9 @@ export default class Daemon extends BaseCommand {
   async run(): Promise<unknown> {
     this.currentPlatform()
     const {flags} = await this.parse(Daemon)
+    // CYAU-289: before anything else, take the hang the previous process left behind (moved aside, read once), so
+    // it reaches exactly one beat even if this start fails later.
+    const hangReports = createHangReportQueue(consumeHangMarker())
     const file = playbookPath(flags.playbook)
     // Legacy upgrade: the previous updater does not know the generation marker of the new release. The first
     // boot adopts/repairs the canonical set on the persisted paths of the managed unit, using its effective Node,
@@ -66,6 +71,15 @@ export default class Daemon extends BaseCommand {
     const openrouterKey = makeOrgOpenrouterKeyReconciler(secrets, {log})
     if (openrouterKey) await openrouterKey(true)
 
+    // CYAU-289: the watchdog thread gets the reduced-beat target in memory; without a heartbeat it only writes the marker.
+    const watchdog = startHangWatchdog({
+      beat: secrets.heartbeat && hasOperationalHostIdentity(secrets)
+        ? {heartbeat: secrets.heartbeat, hostToken: secrets.host.token, hostId: secrets.host.id, version: this.config.version}
+        : undefined,
+      onResumed: () => hangReports.push(consumeHangMarker()),
+      log,
+    })
+
     await runDaemon({
       playbookFile: file,
       stateFile: statePath(),
@@ -78,7 +92,7 @@ export default class Daemon extends BaseCommand {
       // stay its own; if it dies, the beats stop and the server expires them → recovery) + reconciliation of the
       // skill bundle with the server pin (CYAU-129: without it, the bundle only arrived by hand and never updated).
       heartbeat: combineBeats(
-        makeHeartbeat(secrets, {version: this.config.version, log}),
+        makeHeartbeat(secrets, {version: this.config.version, log, hang: () => hangReports.take()}),
         makeLeaseRenewer(secrets),
         makeSkillsReconciler(secrets, {log}),
         claudeCredential,
@@ -86,6 +100,7 @@ export default class Daemon extends BaseCommand {
       ),
       sync: makeSync(secrets, log), // undefined when sync is not configured → local playbook file
       supporter: makeSupporterPass(secrets, {log}), // CYAU-235
+      council: makeCouncilPass(secrets, {log}), // CYAU-273
       preflight: makeTicketPreflight(secrets),
       // CYAU-101: a stop with a candidate in hand puts the ticket on hold server-side, so the project
       // queue advances instead of fetching the same ticket again at every tick.
@@ -99,6 +114,7 @@ export default class Daemon extends BaseCommand {
       // the process (env); the resolver re-reads the policy at every iteration (fresh, fail-closed cache).
       skillsMode: skillsModeEnabled(),
       flowMaxParallel: () => resolveHostFlowConcurrency(secrets, new Date()),
+      watchdog,
       log,
     })
 

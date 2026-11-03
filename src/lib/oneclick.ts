@@ -233,7 +233,9 @@ export function enrollOutcome(result: EnrollResult): StageOutcome {
     // provisioning impossible — enroll would not pass while the bundle is missing, and the bundle would never
     // arrive because the stage that downloads it is never reached. Outside OneClick the step stays blocking,
     // but since CYAU-129 it no longer requires an intervention: the daemon beat reconciles it with the server pin.
-    ...result.steps.filter((s) => s.required && s.status !== 'ok' && s.key !== 'skill-bundle').map((s) => s.label),
+    // Same for the repositories: on a fresh host the map is empty, and the `workspace` stage that clones and links
+    // them comes after this one (CYAU-302, first provisioning of the AX41 stuck here forever).
+    ...result.steps.filter((s) => s.required && s.status !== 'ok' && s.key !== 'skill-bundle' && s.key !== 'repositories').map((s) => s.label),
     ...result.diagnostics.deps.filter((d) => d.required && !d.present).map((d) => `CLI ${d.name}`),
   ]
   if (missing.length === 0) {

@@ -1,0 +1,72 @@
+name: AX41 VM containment
+
+# CYAU-302 — installs the per-session VM containment on the AX41 and proves its isolation.
+# Manual only, from main: the SSH CA issues the AX41-only `automator-vm` principal to exactly this workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "enroll = make the AX41 an automator machine; refresh = enroll again from scratch (new projects); install = VM containment + isolation proof"
+        type: choice
+        options: [enroll, refresh, install, status, login, diag, vm-off, vm-on]
+        required: true
+      ticket:
+        description: "status only: ticket code (e.g. CYRA-1174) whose clarification state the daemon user reads"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: automator-vm
+    concurrency:
+      group: ax41-automator-vm
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Check the scripts
+        run: |
+          bash -n deploy/ax41/install.sh deploy/ax41/guest-setup.sh deploy/ax41/reap.sh deploy/ax41/smoke.sh deploy/ax41/deploy-ci.sh deploy/ax41/enroll.sh deploy/ax41/diag.sh
+          python3 -I -m py_compile deploy/ax41/run-with-env
+      - name: Obtain short-lived SSH certificate
+        uses: bussolabs/ci-templates/.github/actions/ssh-ca@308f111c84bf2928cc01e064a2821291c1666291
+        with:
+          audience: api://ca.bussolabs
+          provisioner: github-actions
+      - name: Verify the AX41 host identity
+        run: |
+          echo '65.108.123.43 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEZdYxXMOjmV1wtl8XklpRgVsoRwAsrqlIJGuPK3S3k9' > "$RUNNER_TEMP/ax41-known-hosts"
+          ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$RUNNER_TEMP/ax41-known-hosts" -o ConnectTimeout=10 root@65.108.123.43 'test -c /dev/kvm && test "$(uname -m)" = x86_64'
+      - name: Enroll the AX41 as an automator machine
+        if: inputs.step == 'enroll' || inputs.step == 'refresh'
+        env:
+          ENROLL_GITHUB_TOKEN: ${{ github.token }}
+          ENROLL_CLOSEYOURIT_TOKEN: ${{ secrets.CLOSEYOURIT_TOKEN }}
+        run: bash deploy/ax41/deploy-ci.sh ${{ inputs.step }}
+      - name: Install and prove isolation
+        if: inputs.step == 'install'
+        run: bash deploy/ax41/deploy-ci.sh install
+      - name: Start the device logins
+        if: inputs.step == 'login'
+        run: bash deploy/ax41/deploy-ci.sh login
+      - name: Diagnose a session VM boot
+        if: inputs.step == 'diag'
+        run: bash deploy/ax41/deploy-ci.sh diag
+      - name: Turn the VM containment off or on
+        if: inputs.step == 'vm-off' || inputs.step == 'vm-on'
+        run: bash deploy/ax41/deploy-ci.sh ${{ inputs.step }}
+      - name: Read the AX41 automator status
+        if: inputs.step == 'status'
+        env:
+          STATUS_TICKET: ${{ inputs.ticket }}
+        run: bash deploy/ax41/deploy-ci.sh status

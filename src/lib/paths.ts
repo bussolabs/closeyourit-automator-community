@@ -151,6 +151,14 @@ export function ticketAttemptsDir(): string {
 }
 
 /**
+ * Machine quota pause (CYAU-275): `quota-pause.json` with, per engine, the time its quota resets. The quota
+ * belongs to the machine's account, not to a ticket, so the pause sits next to the rest of the machine state.
+ */
+export function quotaPausePath(): string {
+  return path.join(stateDir(), 'quota-pause.json')
+}
+
+/**
  * Local cache of the downloaded flow config (CYAU-73): the last flow configuration (phase sequence +
  * per-phase concurrency) known from the server, so the host can keep working with the configured flow even
  * when the server is temporarily unreachable. It is keyed by `hostId` (`automator-config-cache/<sanitized-

@@ -2,12 +2,14 @@ import * as path from 'node:path'
 import {loadPlaybook} from './playbook'
 import {runOnce, type ActionPreflightFn, type RunOnceOptions, type RunOnceResult, type TicketQueueTarget} from './runner'
 import {type SpawnFn} from './executor'
-import {type IsAlive} from './lock'
+import {acquire, type IsAlive, release} from './lock'
+import {redactSecrets} from './secret-redaction'
 import {type Playbook} from './schema'
 import {type SyncFn} from './sync'
 import {AutomatorError} from '../errors/error-codes'
 import {type SecretCapabilities} from './env-capabilities'
 import {type PreflightStop} from './heartbeat'
+import {type HangWatchdogHandle, TICK_INTERVAL_MS} from './hang-watchdog'
 
 // Self-scheduling, cross-OS loop: reloads the playbook at every iteration (changes apply
 // without restart), runs runOnce, then sleeps `intervalMs`. A playbook that became invalid does NOT kill
@@ -102,6 +104,10 @@ export interface DaemonOptions {
   sync?: SyncFn
   /** CYAU-235 — one supporter pass per round, before the work: answers an open question round if there is one. */
   supporter?: (signal: AbortSignal) => Promise<void>
+  /** CYAU-273 — one council pass per round, after the supporter: one project slice if one is due. */
+  council?: (signal: AbortSignal) => Promise<void>
+  /** CYAU-289 — hang watchdog fed from this loop's event loop; stopped on shutdown. */
+  watchdog?: HangWatchdogHandle
   // Injectable for tests / control:
   now?: () => Date
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
@@ -110,6 +116,35 @@ export interface DaemonOptions {
   abortSignal?: AbortSignal // external programmatic stop (besides SIGTERM/SIGINT)
   log?: (message: string) => void
   onIteration?: (result: RunOnceResult) => void
+}
+
+/**
+ * Runs the council pass holding the cycle lock, so the automatic update (which takes the same lock) never
+ * restarts the service in the middle of its sessions. A busy lock skips the pass; nothing it does or throws
+ * reaches the ticket round, and the lock is released before `runOnce` takes it again.
+ */
+async function runCouncilPass(
+  council: (signal: AbortSignal) => Promise<void>,
+  signal: AbortSignal,
+  opts: Pick<DaemonOptions, 'lockFile' | 'label' | 'isAlive'>,
+  log: (message: string) => void,
+): Promise<void> {
+  try {
+    if (!acquire(opts.lockFile, `${opts.label ?? 'automator'}-council`, opts.isAlive)) {
+      log('council: machine busy, skipped this round')
+      return
+    }
+  } catch (error) {
+    log(`council: cycle lock unavailable, skipped this round: ${redactSecrets(error instanceof Error ? error.message : String(error))}`)
+    return
+  }
+  try {
+    await council(signal)
+  } catch (error) {
+    log(`council: error (continuing): ${redactSecrets(error instanceof Error ? error.message : String(error))}`)
+  } finally {
+    release(opts.lockFile)
+  }
 }
 
 export function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -213,6 +248,20 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       })
     : undefined
 
+  // CYAU-289: the tick comes from THIS event loop, so it stops exactly when the loop is stuck. A watchdog error
+  // never reaches the loop.
+  const watchdog = opts.watchdog
+  const tickWatchdog = (): void => {
+    try {
+      watchdog?.tick()
+    } catch {
+      // A broken watchdog is the watchdog's problem, never the daemon's.
+    }
+  }
+  tickWatchdog()
+  const watchdogTimer = watchdog ? setInterval(tickWatchdog, TICK_INTERVAL_MS) : undefined
+  watchdogTimer?.unref()
+
   let iterations = 0
   try {
     while (!controller.signal.aborted) {
@@ -229,8 +278,11 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
           playbook = loadPlaybook(opts.playbookFile)
         }
 
-        // A supporter pass never stops the round: it only proposes answers the server judges.
+        // A supporter pass never stops the round: it only proposes answers and plan verdicts the server judges.
         if (opts.supporter) await opts.supporter(controller.signal)
+
+        // A council pass never stops the round: it only proposes and votes; the server decides.
+        if (opts.council) await runCouncilPass(opts.council, controller.signal, opts, log)
 
         if (playbook) {
           const result = await runOnce({
@@ -281,6 +333,12 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     // would hang on its own sleep and keep the process alive.
     controller.abort()
     await keepalive
+    if (watchdogTimer) clearInterval(watchdogTimer)
+    try {
+      await watchdog?.stop()
+    } catch {
+      // Same as the tick: shutting down goes on regardless.
+    }
     if (register) {
       process.off('SIGTERM', stop)
       process.off('SIGINT', stop)

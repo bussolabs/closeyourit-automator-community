@@ -23,6 +23,9 @@ import {ticketAttemptsDir} from './paths'
 /** Consecutive attempts allowed on the SAME phase before stopping and reporting. */
 export const DEFAULT_MAX_TICKET_ATTEMPTS = 5
 
+/** Consecutive quota pauses whose attempt is given back; past it, the attempt counts like any failure. */
+export const DEFAULT_MAX_QUOTA_PAUSES = 3
+
 /** Operational override of the threshold (machine env, not a secret). */
 export const MAX_TICKET_ATTEMPTS_ENV = 'AUTOMATOR_MAX_TICKET_ATTEMPTS'
 
@@ -41,6 +44,11 @@ export interface TicketAttemptRecord {
   total_cost: number
   first_at: string
   updated_at: string
+  /**
+   * CYAU-275 — consecutive quota pauses of the current phase whose attempt was given back. Absent = none. It
+   * caps the refunds: a failure mistaken for a quota limit must not retry a ticket forever.
+   */
+  quota_pauses?: number
 }
 
 /** Read outcome: `corrupt` distinguishes "no attempt yet" from "I do not know how many" (which blocks). */
@@ -121,6 +129,7 @@ function coerceRecord(raw: unknown, project: string, ticket: string): TicketAtte
   if (!safeCount(value.attempts) || !safeCount(value.total_attempts)) return null
   if (!finiteNonNegative(value.cost) || !finiteNonNegative(value.total_cost)) return null
   if (typeof value.first_at !== 'string' || typeof value.updated_at !== 'string') return null
+  if (value.quota_pauses !== undefined && !safeCount(value.quota_pauses)) return null
   return {
     project: value.project,
     ticket: value.ticket,
@@ -131,6 +140,7 @@ function coerceRecord(raw: unknown, project: string, ticket: string): TicketAtte
     total_cost: value.total_cost,
     first_at: value.first_at,
     updated_at: value.updated_at,
+    ...(typeof value.quota_pauses === 'number' && value.quota_pauses > 0 ? {quota_pauses: value.quota_pauses} : {}),
   }
 }
 
@@ -213,9 +223,45 @@ export function recordTicketAttempt(
     total_cost: previous?.total_cost ?? 0,
     first_at: previous?.first_at ?? at,
     updated_at: at,
+    // The pause count belongs to the phase, like the attempts.
+    ...(samePhase && previous.quota_pauses ? {quota_pauses: previous.quota_pauses} : {}),
   }
   writeRecord(file, record)
   return record
+}
+
+export interface SettleQuotaPauseInput {
+  project: string
+  ticket: string
+  /** The session stopped on a clear quota limit. */
+  quotaHit: boolean
+  maxPauses?: number
+  now?: Date
+}
+
+/**
+ * CYAU-275 — settles the attempt counted at the claim once the session is over. A quota limit gives it back:
+ * the account ran out, the ticket did not fail. Only up to `maxPauses` consecutive pauses, then the attempt
+ * stays counted and the usual threshold reports the ticket to a person. Any other outcome restarts the pause
+ * count. Without a readable record nothing is given back (`counted`).
+ */
+export function settleQuotaPause(
+  input: SettleQuotaPauseInput,
+  dir: string = ticketAttemptsDir(),
+): 'refunded' | 'cap_reached' | 'counted' {
+  const current = readTicketAttempts(input.project, input.ticket, dir)
+  if (current.corrupt || !current.record) return 'counted'
+  const {quota_pauses: pauses = 0, ...rest} = current.record
+  const updatedAt = (input.now ?? new Date()).toISOString()
+  const file = ticketAttemptsPath(input.project, input.ticket, dir)
+  if (!input.quotaHit) {
+    if (pauses > 0) writeRecord(file, {...rest, updated_at: updatedAt})
+    return 'counted'
+  }
+  const max = Number.isInteger(input.maxPauses) && input.maxPauses! >= 1 ? input.maxPauses! : DEFAULT_MAX_QUOTA_PAUSES
+  if (pauses >= max) return 'cap_reached'
+  writeRecord(file, {...rest, attempts: Math.max(0, rest.attempts - 1), quota_pauses: pauses + 1, updated_at: updatedAt})
+  return 'refunded'
 }
 
 export interface AddTicketAttemptCostInput {
@@ -275,8 +321,9 @@ export function resetTicketAttempts(
 ): TicketAttemptRecord | null {
   const current = readTicketAttempts(project, ticket, dir)
   if (current.corrupt || !current.record || current.record.attempts === 0) return current.record
+  const {quota_pauses: _pauses, ...kept} = current.record
   const record: TicketAttemptRecord = {
-    ...current.record,
+    ...kept,
     phase: null,
     attempts: 0,
     cost: 0,

@@ -8,6 +8,7 @@ import * as path from 'node:path'
 import {StringDecoder} from 'node:string_decoder'
 import {type Action} from './schema'
 import {buildClaudeArgv, CLAUDE_BIN} from './claude'
+import {createClaudeStreamReader} from './claude-stream'
 import {buildCodexArgv, CODEX_BIN} from './codex'
 import {evaluateAction} from './command-policy'
 import {openLog} from './logger'
@@ -16,6 +17,7 @@ import {codexHomeDir, guardrailsSettingsPath} from './paths'
 import {activeManagedGuardrailPaths} from './managed-service'
 import {redactSecrets, redactSecretsAtTruncation} from './secret-redaction'
 import {CYI_AUTH_ENV, GITHUB_TOKEN_ENV, isManagedSecretEnv, type SecretCapabilities} from './env-capabilities'
+import {sharedVmContainmentBackend, vmContainmentInstalled} from './vm-containment'
 import {claudeAuthEnv} from './org-claude-credential'
 import {
   createStrongContainmentBackend,
@@ -163,6 +165,12 @@ export interface RunContext {
   onContainmentFailure?: () => void
   containmentCleanupMs?: number
   containmentMaxCleanupMs?: number
+  /**
+   * CYAU-282 — receives every stream-json event of a claude action while it runs. Passing it switches the
+   * session to `stream-json`; stdout and the log still get only the result line. It informs and cannot fail
+   * the session: a throwing handler is ignored.
+   */
+  onStreamEvent?: (event: Record<string, unknown>) => void
 }
 
 function quote(arg: string): string {
@@ -215,6 +223,7 @@ export function buildCommand(
   playbookDir: string,
   guardrailsSettings: string = guardrailsSettingsPath(),
   authorizedCwd?: string,
+  options: {stream?: boolean} = {},
 ): BuiltCommand {
   let cmd: string
   let args: string[]
@@ -222,7 +231,7 @@ export function buildCommand(
   const cwd = resolveActionCwd(action, playbookDir, authorizedCwd)
   if (action.type === 'claude') {
     cmd = CLAUDE_BIN
-    args = buildClaudeArgv(action, guardrailsSettings, cwd)
+    args = buildClaudeArgv(action, guardrailsSettings, cwd, options)
   } else if (action.type === 'codex') {
     cmd = CODEX_BIN
     args = buildCodexArgv(action, guardrailsSettings, cwd)
@@ -406,6 +415,8 @@ function spawnCollect(
     onContainmentFailure?: () => void
     containmentCleanupMs?: number
     containmentMaxCleanupMs?: number
+    /** stdout is a Claude stream-json: events go here, only the result line goes on as stdout (CYAU-282). */
+    streamEvents?: (event: Record<string, unknown>) => void
   } = {},
 ): Promise<SpawnOutcome> {
   return new Promise((resolve) => {
@@ -545,6 +556,7 @@ function spawnCollect(
     }
     const finish = (code: number | null): void => {
       if (settled) return
+      streamReader?.end()
       settled = true
       clearTimeout(timer)
       if (forceTimer) clearTimeout(forceTimer)
@@ -564,6 +576,19 @@ function spawnCollect(
       resolve({code, timedOut, stdout, stdoutTruncated, containmentFailed})
     }
 
+    const streamEvents = options.streamEvents
+    const streamReader = streamEvents
+      ? createClaudeStreamReader({
+        onOutput: (text) => capture(text, 'stdout'),
+        onEvent: (event) => {
+          try {
+            streamEvents(event)
+          } catch {
+            // The live narration informs; it never fails the session it accompanies.
+          }
+        },
+      })
+      : undefined
     const capture = (chunk: Buffer | string, source: 'stdout' | 'stderr'): void => {
       if (settled) return
       const bytes = Buffer.from(chunk)
@@ -591,7 +616,10 @@ function spawnCollect(
         onChunk(OUTPUT_TRUNCATED, source, true)
       }
     }
-    child.stdout?.on('data', (chunk) => capture(chunk, 'stdout'))
+    child.stdout?.on('data', (chunk) => {
+      if (streamReader) streamReader.push(chunk)
+      else capture(chunk, 'stdout')
+    })
     child.stderr?.on('data', (chunk) => capture(chunk, 'stderr'))
     // After termination has started, close/error of the leader alone does not prove the process group is finished:
     // always wait for the SIGKILL escalation before resolving and, therefore, before any on_failure.
@@ -643,6 +671,7 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
   const clock = ctx.clock ?? Date.now
   let built: BuiltCommand
   let managedGuardrails: ReturnType<typeof activeManagedGuardrailPaths>
+  const stream = action.type === 'claude' && ctx.onStreamEvent !== undefined
   try {
     managedGuardrails = activeManagedGuardrailPaths()
     built = buildCommand(
@@ -650,6 +679,7 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
       ctx.playbookDir,
       managedGuardrails.settingsPath ?? guardrailsSettingsPath(),
       ctx.authorizedCwd,
+      {stream},
     )
     built.cwd = ctx.authorizeCwd
       ? ctx.authorizeCwd(built.cwd)
@@ -674,37 +704,6 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
     log.header({type: action.type, command: built.display, cwd: built.cwd, start: ctx.now})
     log.footer({status: 'failure', error_code: ErrorCodes.Policy.violation, reason: policy.reason ?? 'command policy'})
     return {status: 'failure', exitCode: null, errorCode: ErrorCodes.Policy.violation, durationMs: 0, logPath: log.path, stdout: '', stdoutTruncated: false}
-  }
-
-  let containment: StrongContainmentHandle | undefined
-  if (action.containment === 'strong') {
-    const backend = ctx.strongContainment ?? createStrongContainmentBackend()
-    const availability = await backend.available()
-    if (!availability.available) {
-      const log = openLog(ctx.logDir, ctx.logName ?? name, ctx.now)
-      log.header({type: action.type, command: built.display, cwd: built.cwd, start: ctx.now})
-      log.footer({
-        status: 'failure',
-        error_code: ErrorCodes.Exec.containmentUnavailable,
-        reason: availability.detail ?? 'strong containment non disponibile',
-      })
-      return {
-        status: 'failure', exitCode: null, errorCode: ErrorCodes.Exec.containmentUnavailable,
-        durationMs: 0, logPath: log.path, stdout: '', stdoutTruncated: false,
-      }
-    }
-    try {
-      containment = await backend.prepare({cmd: built.cmd, args: built.args, cwd: built.cwd})
-    } catch (error) {
-      const log = openLog(ctx.logDir, ctx.logName ?? name, ctx.now)
-      const reason = error instanceof Error ? error.message : 'preparazione strong containment fallita'
-      log.header({type: action.type, command: built.display, cwd: built.cwd, start: ctx.now})
-      log.footer({status: 'failure', error_code: ErrorCodes.Exec.containmentUnavailable, reason})
-      return {
-        status: 'failure', exitCode: null, errorCode: ErrorCodes.Exec.containmentUnavailable,
-        durationMs: 0, logPath: log.path, stdout: '', stdoutTruncated: false,
-      }
-    }
   }
 
   const env: NodeJS.ProcessEnv = {...process.env, ...action.env?.vars}
@@ -751,6 +750,41 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
   env.GIT_CONFIG_VALUE_2 = AUTOMATOR_GIT_IDENTITY.name
   env.GIT_CONFIG_KEY_3 = 'user.email'
   env.GIT_CONFIG_VALUE_3 = AUTOMATOR_GIT_IDENTITY.email
+  let containment: StrongContainmentHandle | undefined
+  if (action.containment === 'strong') {
+    // CYAU-302 — on a host with the VM backend installed, agent sessions run in a disposable VM; plain shell
+    // actions (sync, playbook steps) keep the systemd scope, where a VM boot would buy nothing.
+    const agent = action.type === 'claude' || action.type === 'codex'
+    const backend = ctx.strongContainment
+      ?? (agent && vmContainmentInstalled() ? sharedVmContainmentBackend() : createStrongContainmentBackend())
+    const availability = await backend.available()
+    if (!availability.available) {
+      const log = openLog(ctx.logDir, ctx.logName ?? name, ctx.now)
+      log.header({type: action.type, command: built.display, cwd: built.cwd, start: ctx.now})
+      log.footer({
+        status: 'failure',
+        error_code: ErrorCodes.Exec.containmentUnavailable,
+        reason: availability.detail ?? 'strong containment non disponibile',
+      })
+      return {
+        status: 'failure', exitCode: null, errorCode: ErrorCodes.Exec.containmentUnavailable,
+        durationMs: 0, logPath: log.path, stdout: '', stdoutTruncated: false,
+      }
+    }
+    try {
+      containment = await backend.prepare({cmd: built.cmd, args: built.args, cwd: built.cwd, env})
+    } catch (error) {
+      const log = openLog(ctx.logDir, ctx.logName ?? name, ctx.now)
+      const reason = error instanceof Error ? error.message : 'preparazione strong containment fallita'
+      log.header({type: action.type, command: built.display, cwd: built.cwd, start: ctx.now})
+      log.footer({status: 'failure', error_code: ErrorCodes.Exec.containmentUnavailable, reason})
+      return {
+        status: 'failure', exitCode: null, errorCode: ErrorCodes.Exec.containmentUnavailable,
+        durationMs: 0, logPath: log.path, stdout: '', stdoutTruncated: false,
+      }
+    }
+  }
+
   const timeoutMs = (action.timeout ?? DEFAULT_TIMEOUT_S) * 1000
 
   const log = openLog(ctx.logDir, ctx.logName ?? name, ctx.now)
@@ -758,10 +792,11 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
 
   const startedAt = clock()
   const executed = containment?.command ?? built
-  const outcome = await spawnCollect(spawnFn, executed, env, timeoutMs, (chunk, source, truncated) => {
+  // A backend that carries the environment itself (VM) spawns its wrapper without the session's secrets.
+  const outcome = await spawnCollect(spawnFn, executed, containment?.command.env ?? env, timeoutMs, (chunk, source, truncated) => {
     if (truncated) log.truncate()
     log.write(chunk, source)
-  }, ctx.signal, {...ctx, containment})
+  }, ctx.signal, {...ctx, containment, streamEvents: stream ? ctx.onStreamEvent : undefined})
   const durationMs = clock() - startedAt
   const safeStdout = outcome.stdoutTruncated
     ? boundTruncatedStdout(redactSecretsAtTruncation(outcome.stdout), OUTPUT_MAX_BYTES)

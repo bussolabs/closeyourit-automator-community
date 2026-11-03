@@ -3,6 +3,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {afterAll, describe, expect, it, vi} from 'vitest'
 import {defaultSleep, formatIterationLines, runDaemon, runHeartbeatKeepalive} from '../src/lib/daemon'
+import {readLock} from '../src/lib/lock'
 import {type SpawnFn} from '../src/lib/executor'
 import {type DeliveryRecord, type ExecutedAction, type RunOnceResult} from '../src/lib/runner'
 import {PlaybookSchema} from '../src/lib/schema'
@@ -258,6 +259,92 @@ describe('runDaemon', () => {
       maxIterations: 1,
     })
     expect(process.listenerCount('SIGTERM')).toBe(before)
+  })
+})
+
+// CYAU-289: the daemon loop feeds the hang watchdog and stops it on shutdown.
+describe('runDaemon — hang watchdog (CYAU-289)', () => {
+  it('ticks the watchdog from the main loop and stops it when the daemon stops', async () => {
+    const s = scenario(VALID)
+    const watchdog = {tick: vi.fn(), stop: vi.fn(async () => undefined)}
+    await runDaemon({...s, spawn: noopSpawn, sleep: async () => undefined, registerSignals: false, maxIterations: 1, watchdog})
+    expect(watchdog.tick).toHaveBeenCalled()
+    expect(watchdog.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('a watchdog that throws never stops the loop', async () => {
+    const s = scenario(VALID)
+    let iterations = 0
+    const watchdog = {
+      tick: () => {
+        throw new Error('worker gone')
+      },
+      stop: async () => {
+        throw new Error('worker gone')
+      },
+    }
+    await runDaemon({
+      ...s, spawn: noopSpawn, sleep: async () => undefined, registerSignals: false, maxIterations: 2, watchdog,
+      onIteration: () => (iterations += 1),
+    })
+    expect(iterations).toBe(2)
+  })
+})
+
+// CYAU-273: one council pass per round, after the supporter, holding the cycle lock.
+describe('runDaemon — council pass (CYAU-273)', () => {
+  const base = {
+    spawn: noopSpawn,
+    sleep: async () => undefined,
+    registerSignals: false,
+    now: () => new Date('2026-07-07T09:00:00.000Z'),
+  }
+
+  it('runs the council once per round, after the supporter, holding the cycle lock', async () => {
+    const s = scenario(VALID)
+    const calls: string[] = []
+    const heldBy: (string | undefined)[] = []
+    const supporter = vi.fn(async () => {
+      calls.push('supporter')
+    })
+    const council = vi.fn(async (signal: AbortSignal) => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+      calls.push('council')
+      heldBy.push(readLock(s.lockFile)?.label)
+    })
+    let iterations = 0
+    await runDaemon({...s, ...base, label: 'automator', maxIterations: 2, supporter, council, onIteration: () => (iterations += 1)})
+    expect(calls).toEqual(['supporter', 'council', 'supporter', 'council'])
+    expect(heldBy).toEqual(['automator-council', 'automator-council'])
+    // The lock is released before the ticket round: both rounds ran and nothing is left behind.
+    expect(iterations).toBe(2)
+    expect(fs.existsSync(s.lockFile)).toBe(false)
+  })
+
+  it('a council pass that throws does not skip the ticket round', async () => {
+    const s = scenario(VALID)
+    const logs: string[] = []
+    const council = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    let result: RunOnceResult | undefined
+    await runDaemon({...s, ...base, maxIterations: 1, council, log: (m) => logs.push(m), onIteration: (r) => (result = r)})
+    expect(council).toHaveBeenCalledTimes(1)
+    expect(result?.skipped).toBeFalsy()
+    expect(logs).toContain('council: error (continuing): boom')
+    expect(fs.existsSync(s.lockFile)).toBe(false)
+  })
+
+  it('skips the council while another process holds the cycle lock', async () => {
+    const s = scenario(VALID)
+    fs.writeFileSync(s.lockFile, JSON.stringify({pid: 999_999, startedAt: '2026-07-07T08:59:00.000Z', label: 'automator-update'}))
+    const council = vi.fn(async () => undefined)
+    const logs: string[] = []
+    await runDaemon({...s, ...base, maxIterations: 1, council, isAlive: () => true, log: (m) => logs.push(m)})
+    expect(council).not.toHaveBeenCalled()
+    expect(logs).toContain('council: machine busy, skipped this round')
+    // Someone else's lock is never removed.
+    expect(readLock(s.lockFile)?.label).toBe('automator-update')
   })
 })
 

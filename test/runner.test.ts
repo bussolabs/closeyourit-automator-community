@@ -265,6 +265,54 @@ describe('runOnce', () => {
     expect(spese).toEqual(['{"total_cost_usd":0.40}', '{"total_cost_usd":0.60}'])
   })
 
+  // CYAU-275 — a session stopped on the quota pauses the engine until the reset and gives the attempt back.
+  describe('quota limit', () => {
+    const quotaRun = async (stdout: string) => {
+      const p = paths()
+      saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
+      const settled: boolean[] = []
+      const runtime: AgentRuntime = {
+        id: 'fake',
+        healthCheck: async () => ({available: true}),
+        execute: () => ({
+          result: Promise.resolve({
+            status: 'failure' as const, exitCode: 1, errorCode: 'C001-EXEC-003', durationMs: 1, logPath: '/nonexistent', stdout,
+          }),
+          cancel: () => undefined,
+        }),
+      }
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quota-state-'))
+      vi.stubEnv('AUTOMATOR_STATE_DIR', stateDir)
+      try {
+        await runOnce({
+          playbook, playbookDir: dir, now, ...p, runtime,
+          preflight: async (_name, action) => ({
+            outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+            action: {...action, type: 'claude', run: 'work'} as never,
+            ticketAttempt: {recordSessionCost: () => undefined, settleQuotaPause: (hit: boolean) => settled.push(hit)},
+          }),
+        })
+        const pauseFile = path.join(stateDir, 'quota-pause.json')
+        return {settled, pause: fs.existsSync(pauseFile) ? JSON.parse(fs.readFileSync(pauseFile, 'utf8')) : null}
+      } finally {
+        vi.unstubAllEnvs()
+        fs.rmSync(stateDir, {recursive: true, force: true})
+      }
+    }
+
+    it('pauses the engine until the reset and settles the attempt as a quota pause', async () => {
+      const outcome = await quotaRun(JSON.stringify({type: 'result', is_error: true, result: 'Claude AI usage limit reached|1783417800'}))
+      expect(outcome.settled).toEqual([true])
+      expect(outcome.pause).toEqual({claude: new Date(1_783_417_800_000).toISOString()})
+    })
+
+    it('another failure keeps the attempt counted and pauses nothing', async () => {
+      const outcome = await quotaRun('{"type":"result","is_error":true,"result":"API Error: 500"}')
+      expect(outcome.settled).toEqual([false])
+      expect(outcome.pause).toBeNull()
+    })
+  })
+
   it('throwing ticket counter → the run stays recorded (the spend is a measure, not a gate)', async () => {
     const p = paths()
     saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))

@@ -11,6 +11,7 @@ import {
   readTicketAttempts,
   recordTicketAttempt,
   resetTicketAttempts,
+  settleQuotaPause,
   ticketAttemptsPath,
 } from '../src/lib/ticket-attempts'
 
@@ -229,5 +230,67 @@ describe('resetTicketAttempts e listTicketAttempts', () => {
 
   it('missing directory: no spend to show, no error', () => {
     expect(listTicketAttempts(path.join(tempDir(), 'mai-creata'))).toEqual([])
+  })
+})
+
+// CYAU-275: a quota limit is a pause, not a failed attempt — but only up to a cap of consecutive pauses (R-1).
+describe('settleQuotaPause', () => {
+  const claim = (dir: string) => recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-275', phase: 'autopilot', now: at('2026-11-03T10:00:00Z')}, dir)
+  const settle = (dir: string, quotaHit: boolean) =>
+    settleQuotaPause({project: 'CYAU', ticket: 'CYAU-275', quotaHit, maxPauses: 2, now: at('2026-11-03T11:00:00Z')}, dir)
+
+  it('a quota pause gives the attempt back and keeps what the ticket cost in total', () => {
+    const dir = tempDir()
+    claim(dir)
+    claim(dir)
+
+    expect(settle(dir, true)).toBe('refunded')
+    expect(readTicketAttempts('CYAU', 'CYAU-275', dir).record).toMatchObject({attempts: 1, total_attempts: 2, quota_pauses: 1})
+  })
+
+  it('past the cap of consecutive pauses the attempt stays counted', () => {
+    const dir = tempDir()
+    for (let round = 0; round < 2; round++) {
+      claim(dir)
+      expect(settle(dir, true)).toBe('refunded')
+    }
+    claim(dir)
+
+    expect(settle(dir, true)).toBe('cap_reached')
+    expect(readTicketAttempts('CYAU', 'CYAU-275', dir).record).toMatchObject({attempts: 1, quota_pauses: 2})
+  })
+
+  it('a session ended for another reason keeps its attempt and restarts the pause count', () => {
+    const dir = tempDir()
+    claim(dir)
+    settle(dir, true)
+    claim(dir)
+
+    expect(settle(dir, false)).toBe('counted')
+    const record = readTicketAttempts('CYAU', 'CYAU-275', dir).record
+    expect(record?.attempts).toBe(1)
+    expect(record?.quota_pauses).toBeUndefined()
+  })
+
+  it('the pause count survives the next claim of the same phase and restarts on a new phase', () => {
+    const dir = tempDir()
+    claim(dir)
+    settle(dir, true)
+    expect(claim(dir).quota_pauses).toBe(1)
+    expect(recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-275', phase: 'closer_staging'}, dir).quota_pauses).toBeUndefined()
+  })
+
+  it('no record or an unreadable one: nothing is given back', () => {
+    const dir = tempDir()
+    expect(settle(dir, true)).toBe('counted')
+    fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-275', dir), '{broken')
+    expect(settle(dir, true)).toBe('counted')
+  })
+
+  it('an invalid pause count makes the record unreadable', () => {
+    const dir = tempDir()
+    const record = claim(dir)
+    fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-275', dir), JSON.stringify({...record, quota_pauses: -1}))
+    expect(readTicketAttempts('CYAU', 'CYAU-275', dir).corrupt).toBe(true)
   })
 })
