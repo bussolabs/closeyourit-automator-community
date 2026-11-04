@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.48.1] - 2026-11-04
+
+### Fixed
+
+- **Le migrazioni Rails si chiudono da sole.** L'agente raggiunge il database locale e fa riscrivere lo schema a Rails. Restano chiusi i canali che permetterebbero di uscire dal recinto. (CYRA-1193)
+
+- **Lo strumento dei ticket e il revisore partono su ogni macchina.** `cyi` funziona con qualsiasi versione di Node chiesta dal progetto, e la rilettura di Claude trova sempre Codex. (CYRA-1193)
+
 ## [0.48.0] - 2026-11-03
 
 ### Added

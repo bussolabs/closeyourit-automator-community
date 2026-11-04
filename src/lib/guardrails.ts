@@ -139,6 +139,15 @@ const SANDBOX_DENIED_READ_PATHS = [
   '~/.claude',
   '~/.codex',
   '~/.local/share/keyrings',
+  // CYRA-1193 — the Unix sockets that run commands outside the sandbox (systemd user bus, D-Bus, Docker,
+  // Incus): allowAllUnixSockets opens every socket, so these are hidden instead.
+  '/run/user',
+  '/run/dbus',
+  '/run/systemd',
+  '/var/run/docker.sock',
+  '/run/docker.sock',
+  '/var/lib/incus',
+  '/run/incus',
 ] as const
 
 function productionHostArgs(): string[] {
@@ -197,7 +206,9 @@ function renderSettings(hooksDir: string, worktreesRoot: string, skillsPluginRoo
       enabled: true,
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
-      network: {allowedDomains: sandboxAllowedDomains()},
+      // CYRA-1193 — a Rails migration must reach the local PostgreSQL socket to rewrite db/schema.rb. On Linux the
+      // sandbox opens Unix sockets only all together (a path list is ignored); the escaping ones are denied below.
+      network: {allowedDomains: sandboxAllowedDomains(), allowAllUnixSockets: true},
       // CYAU-242: the operator's GitHub token (`gh auth token`), the automator config, the Claude/Codex homes and
       // the keyring are not readable from the sandboxed Bash. The hooks and the settings are read by the parent
       // Claude process, outside the sandbox, so denying them here costs nothing to the session.
