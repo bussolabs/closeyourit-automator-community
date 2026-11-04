@@ -40,6 +40,8 @@ case "$mode" in
   status)
     # The newest action log, and the groups the running daemon really holds (a group added after the user's
     # systemd manager started is not in its processes until that manager restarts).
+    # Session timeline of the last 24h: first-line time (start) and last write (end) per action log, to see overlaps.
+    ssh "${ssh_args[@]}" "$host" 'for f in $(find /home/automator/.local/state/closeyourit-automator/logs -name "*.log" -mmin -1440 2>/dev/null | sort); do printf "%s start=%s end=%s\n" "$(basename "$f")" "$(head -c 400 "$f" | grep -oE "20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9:]{8}" | head -1)" "$(date -u -r "$f" +%FT%T)"; done' || true
     ssh "${ssh_args[@]}" "$host" 'f=$(ls -t /home/automator/.local/state/closeyourit-automator/logs/*.log 2>/dev/null | head -1); echo "--- $f"; [ -n "$f" ] && tail -25 "$f"; for p in $(pgrep -u automator -f "automator.*daemon"); do echo "daemon $p: $(grep -E "^Groups" /proc/$p/status)"; done; echo "automator ids: $(id automator)"' || true
     # Ticket worktrees: owners other than the daemon user (left by a guest before the id mapping) break `prepare`.
     ssh "${ssh_args[@]}" "$host" 'd=/home/automator/.local/share/closeyourit-automator/worktrees; ls -la "$d" "$d"/* 2>&1 | head -40; echo "foreign-owned: $(find "$d" ! -user automator 2>/dev/null | wc -l)"; find "$d" ! -user automator 2>/dev/null | head -5; for r in closeyourit-rails closeyourit-cli; do p=$(find /home/automator/Lavoro -maxdepth 4 -type d -name "$r" | head -1); echo "== $p"; runuser -u automator -- git -C "$p" worktree list 2>&1 | head -8; runuser -l automator -c "git -C $p remote -v | head -1 | sed -E \"s#//[^@/]*@#//***@#\"; timeout 60 git -C $p fetch origin 2>&1 | tail -3; echo fetch-exit=\$?"; done' || true

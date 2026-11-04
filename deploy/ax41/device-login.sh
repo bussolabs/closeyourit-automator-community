@@ -10,6 +10,9 @@ logs="$HOME/.local/state/device-login"
 mkdir -p "$logs"
 
 command -v codex >/dev/null || { npm install -g @openai/codex >/dev/null && mise reshim; }
+# The review trusts ~/.local/bin, never the mise shims: without this link every Claude review fails with
+# "Claude OS confinement is unavailable", because Claude is confined through Codex (CYRA-1193).
+ln -sfn "$(mise which codex)" "$HOME/.local/bin/codex"
 
 start() {  # <unit> <log> <answers> <command...>
   local unit=$1 log=$2 answers=$3; shift 3

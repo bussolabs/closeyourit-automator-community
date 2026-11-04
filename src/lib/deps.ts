@@ -79,7 +79,7 @@ export const DEPS: Dep[] = [
     versionCmd: 'cyi --version',
     required: true,
     managedBy: 'bootstrap',
-    install: {cmd: 'npm install -g @bussolabs/closeyourit-cli', sudo: false},
+    install: {cmd: "mise use -g 'npm:@bussolabs/closeyourit-cli[allow_low_downloads=true]@latest'", sudo: false},
   },
   {
     name: 'claude',

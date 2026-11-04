@@ -335,13 +335,11 @@ if (launcherPresent) {
 process.stdout.write(`Automator ${selectedRelease.version} verificato e disponibile: ${launcher}\n`)
 AUTOMATOR_BOOTSTRAP_NODE
 
-# 5) cyi (closeyourit-cli) via global npm
-if have cyi; then
-  log "cyi già presente ($(cyi --version 2>/dev/null || echo '?'))"
-else
-  log "installo @bussolabs/closeyourit-cli…"
-  npm install -g @bussolabs/closeyourit-cli
-fi
+# 5) cyi (closeyourit-cli) as a mise tool. Not `npm install -g`: that binds cyi to one Node
+# version, and in a repository pinning another Node the shim finds no cyi (CYRA-1193).
+# allow_low_downloads: our own package, below mise's popularity threshold. `mise use` is idempotent.
+log "assicuro @bussolabs/closeyourit-cli via mise…"
+mise use -g "npm:@bussolabs/closeyourit-cli[allow_low_downloads=true]@latest"
 
 # 6) Claude Code (native installer → ~/.local/bin/claude)
 if have claude; then

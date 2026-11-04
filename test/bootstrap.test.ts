@@ -230,6 +230,17 @@ describe('bin/bootstrap.sh — verified fresh install', () => {
     expect(fs.readFileSync(subject.log, 'utf8')).toContain('mise use -g github:cli/cli@2.102.0')
   })
 
+  // CYRA-1193 — `npm install -g` put cyi inside one Node version only: in a repository pinning another
+  // Node the shim found no cyi and the agent could not read its ticket. mise installs it on its own.
+  it('installs cyi as a mise tool, independent of the Node version a repository pins', () => {
+    const subject = harness()
+
+    const result = subject.run()
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(fs.readFileSync(subject.log, 'utf8')).toContain('mise use -g npm:@bussolabs/closeyourit-cli[allow_low_downloads=true]@latest')
+  })
+
   it('is idempotent on a second run', () => {
     const subject = harness()
     expect(subject.run().status).toBe(0)

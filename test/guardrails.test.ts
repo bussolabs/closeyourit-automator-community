@@ -177,7 +177,29 @@ describe('sandbox OS-level del skill-mode (CYAU-67)', () => {
       '~/.claude',
       '~/.codex',
       '~/.local/share/keyrings',
+      '/run/user',
+      '/run/dbus',
+      '/run/systemd',
+      '/var/run/docker.sock',
+      '/run/docker.sock',
+      '/var/lib/incus',
+      '/run/incus',
     ])
+  })
+
+  // CYRA-1193 — a Rails migration needs the local PostgreSQL socket to rewrite db/schema.rb. On Linux the
+  // sandbox opens Unix sockets only all together, so the ones that run commands outside it are hidden.
+  it('the sandbox reaches local Unix sockets, with the escaping ones hidden', () => {
+    const {hooksDir, settingsPath, codexRulesPath} = paths()
+    installGuardrails(ASSETS, {hooksDir, settingsPath, codexRulesPath})
+
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+      sandbox?: {network?: {allowAllUnixSockets?: boolean}; filesystem?: {denyRead?: string[]}}
+    }
+    expect(settings.sandbox?.network?.allowAllUnixSockets).toBe(true)
+    for (const socketDir of ['/run/user', '/run/dbus', '/var/run/docker.sock', '/var/lib/incus']) {
+      expect(settings.sandbox?.filesystem?.denyRead).toContain(socketDir)
+    }
   })
 
   it('the sandbox block is included in the generationId pin (a drift is rejected)', () => {
