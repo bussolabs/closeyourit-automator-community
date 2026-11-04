@@ -194,6 +194,26 @@ describe('makeSupporterPass on plans', () => {
     expect(log).toHaveBeenCalledWith('supporter: LAB-8 plan v2 engine=claude outcome=rehearsed')
   })
 
+  // CYRA-1193 — a machine round lasts as long as its slowest session (about 25 minutes): one plan per round left
+  // a hundred plans waiting a day. Up to five per pass; a plan left without a verdict ends the pass.
+  it('judges up to five plans per pass', async () => {
+    const {fetchFn, calls} = server(null, 204, {body: planRound, status: 200})
+    const run = vi.fn<SupporterRun>(async () => ({ok: true, text: JSON.stringify({verdict})}))
+
+    await makeSupporterPass(secrets, {fetchFn, run})?.()
+
+    expect(calls.filter((call) => call.url.endsWith('/verdict'))).toHaveLength(5)
+  })
+
+  it('stops the pass at the first plan left without a verdict', async () => {
+    const {fetchFn} = server(null, 204, {body: planRound, status: 200})
+    const run = vi.fn<SupporterRun>(async () => ({ok: false, detail: 'timed out'}))
+
+    await makeSupporterPass(secrets, {fetchFn, run})?.()
+
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
   it('passes an escalation on a reserved topic as it is, never turning it into an approval', async () => {
     const reserved = {...verdict, recommendation: 'escalate', risk_score: 10, touched_paths: ['app/payments/charge.rb']}
     const {fetchFn, calls} = server(null, 204, {body: planRound, status: 200, verdict: {data: {outcome: 'escalated'}}})
@@ -267,7 +287,7 @@ describe('makeSupporterPass on plans', () => {
 
     await makeSupporterPass(secrets, {fetchFn, run})?.()
 
-    expect(run).toHaveBeenCalledTimes(2)
+    expect(run.mock.calls.filter(([, request]) => !request.prompt.includes('waits for approval'))).toHaveLength(1)
     expect(verdictPost(calls)).toBeDefined()
   })
 

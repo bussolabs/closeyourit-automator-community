@@ -194,8 +194,11 @@ function readPlanVerdict(value: unknown): SupporterPlanVerdict | null {
   }
 }
 
+/** Plans judged at most per pass; a plan left without a verdict ends the pass early. */
+export const SUPPORTER_PLANS_PER_PASS = 5
+
 /**
- * One supporter pass: at most one question round, then at most one plan, per machine round. Each half fails on its
+ * One supporter pass: at most one question round, then up to SUPPORTER_PLANS_PER_PASS plans, per machine round. Each half fails on its
  * own and never stops the other. Never throws; logs never carry tokens.
  */
 export function makeSupporterPass(
@@ -240,24 +243,25 @@ export function makeSupporterPass(
 
   // Unlike the questions, a plan without a readable verdict is not posted at all: the plan simply stays with a
   // person, and a later round may offer it again.
-  const judgePlan = async (signal?: AbortSignal) => {
+  // True when a verdict reached the server, so the next plan may be asked for.
+  const judgePlan = async (signal?: AbortSignal): Promise<boolean> => {
     try {
-      if (signal?.aborted) return
+      if (signal?.aborted) return false
       const res = await fetchFn(`${api}/supporter_plan`, {method: 'GET', headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)})
-      if (res.status !== 200) return
+      if (res.status !== 200) return false
       const round = ((await res.json().catch(() => null)) as {data?: SupporterPlanRound} | null)?.data
-      if (!round?.plan_id || !round.digest || !round.plan?.document) return
+      if (!round?.plan_id || !round.digest || !round.plan?.document) return false
       const cwd = secrets.hosts?.[round.project_key]?.cwd
       if (!cwd) {
         log(`supporter: project "${round.project_key}" is not in the host map, plan ${round.plan_id} left to a person`)
-        return
+        return false
       }
       const session = await run(round.engine, {prompt: buildSupporterPlanPrompt(round), cwd, model: round.model, timeoutMs: SESSION_TIMEOUT_MS, signal})
       const verdict = session.ok ? parseSupporterPlanVerdict(session.text) : null
       if (!verdict) {
         log(`supporter: ${round.ticket.code} plan v${round.plan.version} no readable verdict ` +
           `(${session.ok ? 'invalid output' : session.detail}), plan left to a person`)
-        return
+        return false
       }
       const post = await fetchFn(`${api}/supporter_plans/${round.plan_id}/verdict`, {
         method: 'POST',
@@ -268,14 +272,19 @@ export function makeSupporterPass(
       const body = (await post.json().catch(() => null)) as {data?: {outcome?: string}; error?: {code?: string}} | null
       log(`supporter: ${round.ticket.code} plan v${round.plan.version} engine=${round.engine} ` +
         `outcome=${body?.data?.outcome ?? body?.error?.code ?? post.status}`)
+      return true
     } catch (error) {
       log(`supporter: plan error (continuing): ${error instanceof Error ? error.message : String(error)}`)
+      return false
     }
   }
 
   return async (signal?: AbortSignal) => {
     await answerRound(signal)
-    await judgePlan(signal)
+    // CYRA-1193 — a machine round lasts as long as its slowest session: one plan per round is far too slow.
+    for (let judged = 0; judged < SUPPORTER_PLANS_PER_PASS; judged++) {
+      if (!await judgePlan(signal)) break
+    }
   }
 }
 

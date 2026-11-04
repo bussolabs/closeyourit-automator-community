@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.48.2] - 2026-11-04
+
+### Fixed
+
+- **Il supporter smaltisce i piani in attesa.** A ogni giro della macchina giudica fino a 5 piani invece di uno, e si ferma appena un piano resta senza verdetto. (CYRA-1193)
+
 ## [0.48.1] - 2026-11-04
 
 ### Fixed
