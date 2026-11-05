@@ -6,7 +6,7 @@ import {type CodexActionT} from './schema'
 import {CODEX_MODEL} from './models'
 import {extractRetryFindings} from './claude'
 import {FLOW_STEPS, SKILL_PLUGIN} from './flow-engine'
-import {sandboxAllowedDomains} from './guardrails'
+import {ESCAPE_SOCKET_PATHS, sandboxAllowedDomains} from './guardrails'
 import {guardrailsSettingsPath} from './paths'
 import {type AgentConversation, CONVERSATION_RESUME_PROMPT, isConversationId} from './agent-conversation'
 
@@ -107,7 +107,8 @@ function buildCodexSkillArgv(
 ): string[] {
   const step = skillStep(skill.command)
   const gitRoots = action.sandbox === 'workspace-write' ? ticketGitWritableRoots(cwd) : []
-  const filesystem = ['":root"="read"', `":workspace_roots"="${action.sandbox === 'workspace-write' ? 'write' : 'read'}"`, ...gitRoots.map((root) => `${JSON.stringify(root)}="write"`)]
+  const filesystem = ['":root"="read"', `":workspace_roots"="${action.sandbox === 'workspace-write' ? 'write' : 'read'}"`, ...gitRoots.map((root) => `${JSON.stringify(root)}="write"`),
+    ...ESCAPE_SOCKET_PATHS.map((socket) => `${JSON.stringify(socket)}="none"`)]
     .join(', ')
   const invocation = `Use $${step} at ${skill.plugin_dir}/skills/${step}/SKILL.md${skill.args ? ` with this input: ${skill.args}` : ''}`
   const retryFindings = extractRetryFindings(action.run)
@@ -131,6 +132,9 @@ function buildCodexSkillArgv(
     '-c', `permissions.${PERMISSIONS_PROFILE}.filesystem={${filesystem}}`,
     '-c', `permissions.${PERMISSIONS_PROFILE}.network.enabled=true`,
     '-c', `permissions.${PERMISSIONS_PROFILE}.network.domains={${domains}}`,
+    // The tests of a Rails ticket need the local Postgres, a Unix socket. Codex 0.162 opens Unix sockets only
+    // all together (a single path is still refused, tried on Ubuntu 24.04); the escape sockets are hidden above.
+    '-c', `permissions.${PERMISSIONS_PROFILE}.network.dangerously_allow_all_unix_sockets=true`,
     // The executor already builds the session env (cyi credential, no managed secrets): the skill scripts need it.
     '-c', 'shell_environment_policy.inherit="all"',
     '--model', action.model ?? CODEX_MODEL,

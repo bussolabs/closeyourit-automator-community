@@ -133,14 +133,9 @@ export function sandboxAllowedDomains(env: NodeJS.ProcessEnv = process.env): str
 }
 
 /** Credential directories the sandboxed Bash must not read (CYAU-242). `~` is the session user's home. */
-const SANDBOX_DENIED_READ_PATHS = [
-  '~/.config/gh',
-  '~/.config/closeyourit-automator',
-  '~/.claude',
-  '~/.codex',
-  '~/.local/share/keyrings',
-  // CYRA-1193 — the Unix sockets that run commands outside the sandbox (systemd user bus, D-Bus, Docker,
-  // Incus): allowAllUnixSockets opens every socket, so these are hidden instead.
+// CYRA-1193 — the Unix sockets that run commands outside the sandbox (systemd user bus, D-Bus, Docker,
+// Incus): both sandboxes open every Unix socket (Postgres needs its own), so these are hidden instead.
+export const ESCAPE_SOCKET_PATHS = [
   '/run/user',
   '/run/dbus',
   '/run/systemd',
@@ -148,6 +143,15 @@ const SANDBOX_DENIED_READ_PATHS = [
   '/run/docker.sock',
   '/var/lib/incus',
   '/run/incus',
+] as const
+
+const SANDBOX_DENIED_READ_PATHS = [
+  '~/.config/gh',
+  '~/.config/closeyourit-automator',
+  '~/.claude',
+  '~/.codex',
+  '~/.local/share/keyrings',
+  ...ESCAPE_SOCKET_PATHS,
 ] as const
 
 function productionHostArgs(): string[] {

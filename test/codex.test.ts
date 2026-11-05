@@ -144,8 +144,12 @@ describe('buildCodexArgv in skill-mode', () => {
     expect(argv).toContain('features.hooks=true')
     expect(argv).toContain('features.network_proxy=true')
     expect(argv).toContain('default_permissions="automator"')
-    expect(argv).toContain('permissions.automator.filesystem={":root"="read", ":workspace_roots"="read"}')
+    expect(argv).toContain('permissions.automator.filesystem={":root"="read", ":workspace_roots"="read", ' +
+      '"/run/user"="none", "/run/dbus"="none", "/run/systemd"="none", "/var/run/docker.sock"="none", ' +
+      '"/run/docker.sock"="none", "/var/lib/incus"="none", "/run/incus"="none"}')
     expect(argv).toContain('permissions.automator.network.enabled=true')
+    // The local database is a Unix socket: Codex opens them only all together, with the escape sockets hidden above.
+    expect(argv).toContain('permissions.automator.network.dangerously_allow_all_unix_sockets=true')
     expect(argv.find((a) => a.startsWith('permissions.automator.network.domains='))).toBe(
       'permissions.automator.network.domains={"closeyour.it"="allow", "*.closeyour.it"="allow", "github.com"="allow", ' +
       '"*.github.com"="allow", "*.githubusercontent.com"="allow", "registry.npmjs.org"="allow", "rubygems.org"="allow", "*.rubygems.org"="allow"}')
@@ -176,7 +180,9 @@ describe('buildCodexArgv in skill-mode', () => {
       `permissions.automator.filesystem={":root"="read", ":workspace_roots"="write", ` +
       `${JSON.stringify(path.join(common, 'worktrees', 'CYRA-7'))}="write", ${JSON.stringify(path.join(common, 'objects'))}="write", ` +
       `${JSON.stringify(path.join(common, 'refs', 'heads', 'ticket'))}="write", ${JSON.stringify(path.join(common, 'logs', 'refs', 'heads', 'ticket'))}="write", ` +
-      `${JSON.stringify(path.join(common, 'refs', 'remotes', 'origin'))}="write", ${JSON.stringify(path.join(common, 'logs', 'refs', 'remotes', 'origin'))}="write"}`)
+      `${JSON.stringify(path.join(common, 'refs', 'remotes', 'origin'))}="write", ${JSON.stringify(path.join(common, 'logs', 'refs', 'remotes', 'origin'))}="write", ` +
+      '"/run/user"="none", "/run/dbus"="none", "/run/systemd"="none", "/var/run/docker.sock"="none", ' +
+      '"/run/docker.sock"="none", "/var/lib/incus"="none", "/run/incus"="none"}')
     // The directories a first commit or push writes to exist before the session starts.
     expect(fs.existsSync(path.join(common, 'logs', 'refs', 'remotes', 'origin'))).toBe(true)
   })
