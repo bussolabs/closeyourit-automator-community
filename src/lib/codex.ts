@@ -132,7 +132,7 @@ function buildCodexSkillArgv(
 
 /**
  * The Git data a commit and a push of the ticket worktree write to, outside the worktree itself: the worktree's own
- * git dir, the shared objects, and the `ticket/` branches with their reflogs and remote-tracking refs. Not `main`,
+ * git dir, the shared objects, the `ticket/` branches with their reflogs, and origin's remote-tracking refs. Not `main`,
  * not the config, not the hooks. Measured on Ubuntu 24.04: without them `commit.sh` fails on a read-only index.
  * Created beforehand, so a first commit or push finds them. Not a linked worktree → no session.
  */
@@ -146,8 +146,10 @@ function ticketGitWritableRoots(cwd: string | undefined): string[] {
     path.join(commonDir, 'objects'),
     path.join(commonDir, 'refs', 'heads', 'ticket'),
     path.join(commonDir, 'logs', 'refs', 'heads', 'ticket'),
-    path.join(commonDir, 'refs', 'remotes', 'origin', 'ticket'),
-    path.join(commonDir, 'logs', 'refs', 'remotes', 'origin', 'ticket'),
+    // All of origin's remote-tracking refs, not only ticket/: sync-main.sh fetches main, which moves
+    // refs/remotes/origin/main (CYRA-1193). They mirror the remote; the local main stays read-only.
+    path.join(commonDir, 'refs', 'remotes', 'origin'),
+    path.join(commonDir, 'logs', 'refs', 'remotes', 'origin'),
   ]
   for (const root of roots) fs.mkdirSync(root, {recursive: true})
   return roots

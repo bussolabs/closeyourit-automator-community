@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.48.3] - 2026-11-05
+
+### Fixed
+
+- **Codex risolve di nuovo i conflitti con main.** Durante la risoluzione poteva leggere main ma non aggiornarne la copia locale, e ogni tentativo si fermava. (CYRA-1193)
+
 ## [0.48.2] - 2026-11-04
 
 ### Fixed

@@ -175,9 +175,33 @@ describe('buildCodexArgv in skill-mode', () => {
       `permissions.automator.filesystem={":root"="read", ":workspace_roots"="write", ` +
       `${JSON.stringify(path.join(common, 'worktrees', 'CYRA-7'))}="write", ${JSON.stringify(path.join(common, 'objects'))}="write", ` +
       `${JSON.stringify(path.join(common, 'refs', 'heads', 'ticket'))}="write", ${JSON.stringify(path.join(common, 'logs', 'refs', 'heads', 'ticket'))}="write", ` +
-      `${JSON.stringify(path.join(common, 'refs', 'remotes', 'origin', 'ticket'))}="write", ${JSON.stringify(path.join(common, 'logs', 'refs', 'remotes', 'origin', 'ticket'))}="write"}`)
+      `${JSON.stringify(path.join(common, 'refs', 'remotes', 'origin'))}="write", ${JSON.stringify(path.join(common, 'logs', 'refs', 'remotes', 'origin'))}="write"}`)
     // The directories a first commit or push writes to exist before the session starts.
-    expect(fs.existsSync(path.join(common, 'logs', 'refs', 'remotes', 'origin', 'ticket'))).toBe(true)
+    expect(fs.existsSync(path.join(common, 'logs', 'refs', 'remotes', 'origin'))).toBe(true)
+  })
+
+  // CYRA-1193 — sync-main.sh runs `git fetch origin main`, which moves refs/remotes/origin/main: with only the
+  // ticket remote refs writable, every conflict-resolution round on Codex died on a read-only ref.
+  it('a write phase may move the remote-tracking main a fetch updates, never the local main', () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codex-skill-fetch-')))
+    const repo = path.join(root, 'repo')
+    const worktree = path.join(root, 'worktrees', 'CYRA-8')
+    const git = (cwd: string, ...args: string[]) =>
+      require('node:child_process').spawnSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@example.invalid', ...args], {cwd})
+    fs.mkdirSync(repo, {recursive: true})
+    git(repo, 'init', '-q', '-b', 'main')
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a\n')
+    git(repo, 'add', 'a.txt')
+    git(repo, 'commit', '-qm', 'base')
+    git(repo, 'worktree', 'add', '-q', '-b', 'ticket/CYRA-8', worktree)
+
+    const argv = buildCodexArgv(codexAction({run: 'x', sandbox: 'workspace-write', skill}), settingsFile(guardrails), worktree)
+    const filesystem = argv.find((arg) => arg.startsWith('permissions.automator.filesystem='))!
+    const common = path.join(repo, '.git')
+
+    expect(filesystem).toContain(`${JSON.stringify(path.join(common, 'refs', 'remotes', 'origin'))}="write"`)
+    expect(filesystem).not.toContain(`${JSON.stringify(path.join(common, 'refs', 'heads'))}="write"`)
+    expect(filesystem).not.toContain(`${JSON.stringify(path.join(common, 'refs'))}="write"`)
   })
 
   it('a write phase outside a linked Git worktree does not start', () => {
