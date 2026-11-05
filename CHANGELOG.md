@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.49.2] - 2026-11-05
+
+### Fixed
+
+- **Codex raggiunge il database locale dei test.** Le lavorazioni Rails su Codex si fermavano perché dal recinto non potevano rigenerare `db/schema.rb`; il bus di sistema e Docker restano chiusi.
+
 ## [0.49.1] - 2026-11-05
 
 ### Fixed
