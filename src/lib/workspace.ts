@@ -10,7 +10,8 @@ import {AutomatorError, ErrorCodes} from '../errors/error-codes'
 // operator's personal repositories: it keeps its own checkouts in `repositories/<owner>/<repo>` and an
 // ISOLATED worktree for each ticket in `worktrees/<project>/<ticket>`. The preparation is additive and
 // idempotent: it clones the repo only if missing, adds the worktree only if missing, otherwise REUSES the
-// existing ones. It never runs reset/clean/remove → it does not delete work not yet integrated. It prevents
+// existing ones. It never runs reset/clean/remove → it does not delete work not yet integrated; before every
+// attempt it aligns the ticket branch with its GitHub copy, stopping instead of choosing on a conflict. It prevents
 // nested worktrees (never a worktree inside the repository tree). Pure with respect to git/fs: every command
 // lives behind `WorkspaceGit`, injectable in tests.
 
@@ -107,6 +108,9 @@ export interface WorkspaceState {
   worktreeIsGit: boolean
 }
 
+/** What the alignment of the ticket branch with its GitHub copy did (see `WorkspaceGit.alignTicketBranch`). */
+export type BranchAlignment = 'no-remote' | 'up-to-date' | 'ahead' | 'fast-forwarded' | 'rebased' | 'merged'
+
 export type RepoAction = 'clone' | 'reuse'
 export type WorktreeAction = 'add' | 'reuse'
 
@@ -149,6 +153,13 @@ export interface WorkspaceGit {
   /** Default branch of the remote in the form `origin/<name>`; null if not resolvable. */
   defaultRemoteBranch(repoDir: string): string | null
   addWorktree(repoDir: string, worktreeDir: string, branch: string, createBranch: boolean, startPoint?: string): void
+  /**
+   * Aligns the checked-out ticket branch with `origin/<branch>` as last fetched (CYAU-270): fast-forward when only
+   * behind, untouched when ahead, local commits replayed on top of the remote ones when both moved (joined with a
+   * merge commit instead when they contain a merge, whose own changes a replay would drop). Never drops local work:
+   * on a conflict, or uncommitted changes in the way, it undoes everything and throws `diverged`.
+   */
+  alignTicketBranch(worktreeDir: string, branch: string): BranchAlignment
   /** Raw origin URL; null if missing/not queryable. */
   remoteUrl(checkoutDir: string): string | null
   /** Authoritative registration of worktreeDir in the expected repository. */
@@ -245,13 +256,31 @@ export function prepareWorkspace(input: PrepareInput, git: WorkspaceGit = defaul
   const {repoPath, worktreePath: wtPath, branch} = inspected
 
   if (inspected.repoAction === 'clone') git.clone(input.url ?? cloneUrl(input.fullName), repoPath)
+  fetchTolerant(repoPath, git)
   if (inspected.worktreeAction === 'add') createTicketWorktree(repoPath, wtPath, branch, git)
+  // Every attempt, resumed or not, starts from the branch as GitHub has it (CYAU-270), see `alignTicketBranch`.
+  git.alignTicketBranch(wtPath, branch)
   ensurePushableRepo(repoPath, git)
   // The output of a dependency-install must never be stageable (CYAU-142): managed ignore in the gitdir,
   // always (re)applied — idempotent, additive, never destructive — so a repo cloned before the fix receives it on reuse.
   git.ensureManagedIgnore(repoPath)
 
   return inspected
+}
+
+/**
+ * Updates the remote-tracking refs before every attempt — the default branch a new ticket branch starts from
+ * and the GitHub copy of a resumed one (CYAU-270: it used to happen only for new branches, so a branch updated
+ * by someone else on GitHub was reviewed stale and the push was refused). Tolerant: if the network does not
+ * answer, falling back to slightly old remote-tracking refs is still vastly better than nothing, and blocking
+ * every piece of work for a blip would be worse than the disease.
+ */
+function fetchTolerant(repoPath: string, git: WorkspaceGit): void {
+  try {
+    git.fetchOrigin(repoPath)
+  } catch {
+    // Deliberately swallowed: continue with the remote-tracking refs already present (see above).
+  }
 }
 
 /**
@@ -270,22 +299,14 @@ export function prepareWorkspace(input: PrepareInput, git: WorkspaceGit = defaul
  * because the merge is built on `origin/main`: the damage is all upstream, in the context.
  *
  * Fail-closed on the default branch: without it, we would silently fall back to exactly the behaviour that
- * this function exists to remove. The fetch instead is tolerant: if the network does not answer, falling back
- * to slightly old remote-tracking refs is still vastly better than the local `main`, and blocking every
- * piece of work for a blip would be worse than the disease.
+ * this function exists to remove. The fetch (`fetchTolerant`, run before this) instead is tolerant.
  */
 function createTicketWorktree(repoPath: string, wtPath: string, branch: string, git: WorkspaceGit): void {
   const createBranch = !git.hasBranch(repoPath, branch)
   if (!createBranch) {
-    // The branch already exists (resumed work): it is reused as is, the starting point does not apply.
+    // The branch already exists (resumed work): the starting point does not apply, the alignment follows.
     git.addWorktree(repoPath, wtPath, branch, false)
     return
-  }
-
-  try {
-    git.fetchOrigin(repoPath)
-  } catch {
-    // Deliberately swallowed: continue with the remote-tracking refs already present (see above).
   }
 
   const startPoint = git.defaultRemoteBranch(repoPath)
@@ -513,6 +534,60 @@ export function defaultWorkspaceGit(
         : ['-C', repoDir, 'worktree', 'add', '--', worktreeDir, branch]
       const r = runGit(args)
       if (!r.ok) throw new AutomatorError(ErrorCodes.Workspace.gitFailed, `git worktree add fallito: ${r.stderr.trim() || branch}`, 1)
+    },
+    alignTicketBranch(worktreeDir, branch) {
+      // Same criterion as the read-only checkout refresh (checkout-refresh.ts): move forward only when it is
+      // safe, never reset. The remote ref is namespaced, so an anomalous branch name is never taken for a flag.
+      const remote = `refs/remotes/origin/${branch}`
+      const inWorktree = (args: string[]) => runGit(['-C', worktreeDir, ...args])
+      const diverged = (reason: string, detail: string) => new AutomatorError(
+        ErrorCodes.Workspace.diverged,
+        `Il branch ${branch} non si allinea alla sua copia su GitHub: ${reason}. La copia locale resta com'era${detail ? ` (${detail.split('\n')[0]})` : ''}`,
+        1,
+      )
+
+      // Never published (or the fetch never saw it): nothing to align with.
+      if (!inWorktree(['rev-parse', '--verify', '--quiet', `${remote}^{commit}`]).ok) return 'no-remote'
+
+      if (inWorktree(['merge-base', '--is-ancestor', remote, 'HEAD']).ok) {
+        const head = inWorktree(['rev-parse', 'HEAD']).stdout.trim()
+        return head === inWorktree(['rev-parse', remote]).stdout.trim() ? 'up-to-date' : 'ahead'
+      }
+
+      if (inWorktree(['merge-base', '--is-ancestor', 'HEAD', remote]).ok) {
+        // Uncommitted changes survive a fast-forward; git refuses it, touching nothing, only if they are in the way.
+        // `--no-autostash` overrides `merge.autoStash`: stashing them would let the move succeed with conflicted files.
+        const ff = inWorktree(['merge', '--ff-only', '--no-autostash', '--quiet', remote])
+        if (!ff.ok) throw diverged('avanzare toccherebbe modifiche non salvate nella cartella di lavoro', ff.stderr.trim())
+        return 'fast-forwarded'
+      }
+
+      // Both sides have new commits: the local ones are replayed on top of GitHub's. Rewriting with uncommitted
+      // changes around could lose them, so the attempt stops instead of stashing them away.
+      if (inWorktree(['status', '--porcelain', '--untracked-files=no']).stdout.trim() !== '') {
+        throw diverged('entrambe le copie hanno commit nuovi e la cartella di lavoro ha modifiche non salvate', '')
+      }
+
+      // A replay drops merge commits, and with them whatever only they carry (a conflict resolution, an edit made
+      // while merging): a local history with a merge is joined to GitHub's with a merge commit, rewriting nothing.
+      if (inWorktree(['rev-list', '--merges', '--max-count=1', `${remote}..HEAD`]).stdout.trim() !== '') {
+        const merge = inWorktree(['merge', '--no-ff', '--no-edit', '--no-autostash', '--quiet', remote])
+        if (!merge.ok) {
+          inWorktree(['merge', '--abort'])
+          throw diverged('i commit locali e quelli su GitHub non si combinano (conflitto), unione annullata', merge.stderr.trim())
+        }
+
+        return 'merged'
+      }
+
+      const rebase = inWorktree(['rebase', '--no-autostash', '--quiet', remote])
+      if (!rebase.ok) {
+        // Conflict (or anything else): undo, so the branch and its files are exactly as before.
+        inWorktree(['rebase', '--abort'])
+        throw diverged('i commit locali e quelli su GitHub non si combinano (conflitto), unione annullata', rebase.stderr.trim())
+      }
+
+      return 'rebased'
     },
     remoteUrl(checkoutDir) {
       const result = runGit(['-C', checkoutDir, 'remote', 'get-url', 'origin'])

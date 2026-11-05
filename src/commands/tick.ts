@@ -12,7 +12,9 @@ import {makeOrgClaudeCredentialReconciler} from '../lib/org-claude-credential'
 import {makeOrgOpenrouterKeyReconciler} from '../lib/org-openrouter-credential'
 import {makeSkillsReconciler} from '../lib/skills-manifest'
 import {makeSync} from '../lib/sync'
-import {logsDir, lockPath, playbookPath, skillsModeEnabled, statePath} from '../lib/paths'
+import {agentConversationsDir, logsDir, lockPath, playbookPath, skillsModeEnabled, statePath} from '../lib/paths'
+import {localConversationStore} from '../lib/agent-conversation'
+import {agentCodexHome} from '../lib/executor'
 import {type Playbook} from '../lib/schema'
 import {type TicketQueueTarget} from '../lib/runner'
 import {makeGithubTokenFetcher} from '../lib/github-token'
@@ -115,6 +117,8 @@ export default class Tick extends BaseCommand {
       claimQueue: makeQueueClaimer(secrets),
       // CYAU-248: each ticket session gets a one-hour GitHub token for its own repository.
       githubToken: makeGithubTokenFetcher(secrets, {log: (message) => this.log(message)}),
+      // CYAU-285: a phase interrupted by a restart resumes its agent conversation when its file is still here.
+      conversations: localConversationStore(agentConversationsDir(), () => agentCodexHome()),
       // Skill-mode (CYAU-69): dispatch via bounded pool, cap = host-scoped max_parallel. The resolver is invoked
       // by runOnce ONLY in skill-mode (no policy call in prompt-mode).
       skillsMode: skillsModeEnabled(),

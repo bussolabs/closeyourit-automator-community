@@ -587,8 +587,11 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         const verified = inspect(workspaceInput)
         assertVerifiedWorkspace(prepared, verified)
         prepared = verified
-      } catch {
+      } catch (error) {
         try { move('blocked') } catch { /* the original failure stays authoritative */ }
+        // CYAU-270 — a branch that does not align with GitHub keeps its own reason: the generic one would hide
+        // a conflict that only a person can resolve.
+        if (error instanceof AutomatorError && error.code === ErrorCodes.Workspace.diverged) throw error
         throw new Error('workspace ticket non attestabile (fail-closed)')
       }
 

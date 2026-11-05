@@ -506,6 +506,16 @@ export interface WorkflowParseOutcome {
 
 export const NO_JSON_OBJECT_ISSUE = 'nessun oggetto JSON riconosciuto nell\'output'
 
+/**
+ * Agents sometimes declare the v2 contract as `"version": 2`. Read without the alias, the result fell to the v1
+ * rules, was rejected as uninterpretable and the work was thrown away; the server only knows `contract_version`.
+ */
+function withContractVersion(candidate: Record<string, unknown>): Record<string, unknown> {
+  if (candidate.contract_version !== undefined || candidate.version !== 2) return candidate
+  const {version: _version, ...rest} = candidate
+  return {...rest, contract_version: 2}
+}
+
 /** Schema of the phase, or of the version declared by the candidate; `null` if the pair does not exist. */
 function schemaFor(candidate: Record<string, unknown>, phase: ExecutionPhase): z.ZodTypeAny | null {
   const version = candidate.contract_version
@@ -529,7 +539,7 @@ export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhas
     // Only objects: a scalar or an array is never a result, and as the "closest candidate" with a
     // single issue ("expected object") it would hide the real object, the one explaining what is wrong.
     if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue
-    const object = candidate as Record<string, unknown>
+    const object = withContractVersion(candidate as Record<string, unknown>)
     const schema = schemaFor(object, phase)
     let issues: string[]
     if (schema) {

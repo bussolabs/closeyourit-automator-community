@@ -24,6 +24,7 @@ import {hasOperationalHostIdentity, type Secrets} from './config'
 import {defaultGuidanceFs, defaultKbProbe, type GuidanceDeps} from './guidance'
 import {parseTicketGuidance, type ReferenceProbe} from './ticket-guidance'
 import {normalizeGitHubRemote, readGitHubAliases, readGitRemotes} from './discover'
+import {AutomatorError, ErrorCodes} from '../errors/error-codes'
 import {
   buildLeaseRequest,
   buildReleaseRequest,
@@ -1614,7 +1615,11 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
                 ...(acquired.reviewerModel ? {reviewerModel: acquired.reviewerModel} : {}),
                 signal: context.signal,
               })
-            } catch {
+            } catch (error) {
+              // CYAU-270 — a ticket branch that does not align with GitHub says why, instead of the generic reason.
+              if (error instanceof AutomatorError && error.code === ErrorCodes.Workspace.diverged) {
+                return denyDispatch(`${error.message} (fail-closed)`)
+              }
               return denyDispatch('workspace ticket non attestabile (fail-closed)')
             }
           } else if (profile) {

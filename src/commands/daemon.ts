@@ -13,7 +13,9 @@ import {makeOrgClaudeCredentialReconciler} from '../lib/org-claude-credential'
 import {makeOrgOpenrouterKeyReconciler} from '../lib/org-openrouter-credential'
 import {makeSkillsReconciler} from '../lib/skills-manifest'
 import {makeSync} from '../lib/sync'
-import {logsDir, lockPath, playbookPath, skillsModeEnabled, statePath} from '../lib/paths'
+import {agentConversationsDir, logsDir, lockPath, playbookPath, skillsModeEnabled, statePath} from '../lib/paths'
+import {localConversationStore} from '../lib/agent-conversation'
+import {agentCodexHome} from '../lib/executor'
 import {guardrailsInstalled, installGuardrails} from '../lib/guardrails'
 import {activeManagedGuardrailPaths} from '../lib/managed-service'
 import {makeGithubTokenFetcher} from '../lib/github-token'
@@ -110,6 +112,8 @@ export default class Daemon extends BaseCommand {
       claimQueue: makeQueueClaimer(secrets),
       // CYAU-248: each ticket session gets a one-hour GitHub token for its own repository.
       githubToken: makeGithubTokenFetcher(secrets, {log}),
+      // CYAU-285: a phase interrupted by a restart resumes its agent conversation when its file is still here.
+      conversations: localConversationStore(agentConversationsDir(), () => agentCodexHome()),
       // Skill-mode (CYAU-69): dispatch via bounded pool, cap = host-scoped max_parallel. Skill-mode is fixed for
       // the process (env); the resolver re-reads the policy at every iteration (fresh, fail-closed cache).
       skillsMode: skillsModeEnabled(),

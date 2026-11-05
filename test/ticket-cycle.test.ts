@@ -404,6 +404,20 @@ describe('persistent ticket cycle', () => {
       .toEqual(['validating', 'blocked'])
   })
 
+  // CYAU-270 — a ticket branch that conflicts with its GitHub copy blocks the run and keeps its own reason.
+  it('a ticket branch that does not align with GitHub blocks the run with its own reason', async () => {
+    const runsBase = temporaryDirectory()
+    const cycle = provider(runsBase, {
+      prepareWorkspace: vi.fn(() => {
+        throw new AutomatorError(ErrorCodes.Workspace.diverged, 'Il branch ticket/CYAU-11 non si allinea: conflitto', 1)
+      }),
+    })
+
+    await expect(cycle.prepare(input)).rejects.toMatchObject({code: ErrorCodes.Workspace.diverged, message: expect.stringContaining('conflitto')})
+    expect(readRun(runPath(input.runId, runsBase)).run?.checkpoints.map((entry) => entry.phase))
+      .toEqual(['validating', 'blocked'])
+  })
+
   it('re-attests branch and worktree right before the runtime', async () => {
     const runsBase = temporaryDirectory()
     const inspectWorkspace = vi.fn()

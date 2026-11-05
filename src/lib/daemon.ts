@@ -95,6 +95,8 @@ export interface DaemonOptions {
   /** Atomic queue claim (CYAU-169): forwarded to runOnce, which uses it to fill the slots. */
   claimQueue?: RunOnceOptions['claimQueue']
   githubToken?: RunOnceOptions['githubToken']
+  /** CYAU-285: forwarded to runOnce, which records and resumes the phase conversations there. */
+  conversations?: RunOnceOptions['conversations']
   /** Skill-mode (CYAU-69): forwarded to runOnce → dispatch via bounded pool; default `skillsModeEnabled()`. */
   skillsMode?: RunOnceOptions['skillsMode']
   /** Per-step concurrency cap in skill-mode (`limits.max_parallel`); resolver invoked by runOnce only in skill-mode. */
@@ -303,6 +305,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
             deferQueue: opts.deferQueue,
             claimQueue: opts.claimQueue,
             githubToken: opts.githubToken,
+            conversations: opts.conversations,
             // Skill-mode (CYAU-69): forwards gate and cap; runOnce resolves the cap ONLY in skill-mode (no
             // policy call in prompt-mode). The resolver is re-evaluated at every iteration (the policy can change).
             skillsMode: opts.skillsMode,

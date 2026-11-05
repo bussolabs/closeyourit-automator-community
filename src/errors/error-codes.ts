@@ -199,6 +199,9 @@ export const ErrorCodes = {
     noRepo: 'C404-WORKSPACE-005',
     // Existing checkout but remote/worktree/branch identity differs from the expected one: preserve and stop.
     mismatch: 'C409-WORKSPACE-006',
+    // The ticket branch cannot be aligned with its GitHub copy without rewriting local work (conflict, or
+    // uncommitted changes in the way): the alignment is undone and the attempt stops (CYAU-270).
+    diverged: 'C409-WORKSPACE-007',
   },
   Guidance: {
     // Invalid context preparation input (CYAU-26): project key not safe as a segment (it ends up

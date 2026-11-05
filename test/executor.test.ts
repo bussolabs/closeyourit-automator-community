@@ -1477,3 +1477,108 @@ describe('runAction with stream events', () => {
     expect(events).toEqual([])
   })
 })
+
+// CYAU-285 — a Codex phase session with a conversation: its name arrives in the first event, its result in a file.
+describe('runAction with a Codex conversation', () => {
+  const threadId = '0192f0c4-5d8a-7f7e-9a3c-2f1e8c3b9d10'
+  const result = '{"code":"CYAU-285","state":"delivered"}'
+  const passThrough: StrongContainmentBackend = {
+    available: () => ({available: true}),
+    prepare: (command) => ({identity: 'unit', command, signal: () => true, empty: () => true}),
+  }
+  const skill = {command: '/closeyourit-skills:triage', args: 'CYAU-285', plugin_dir: '/skills'}
+  const codexSkill = () => action({type: 'codex', run: 'x', containment: 'strong', skill})
+  const events = (lines: Array<Record<string, unknown>>) => lines.map((line) => JSON.stringify(line)).join('\n') + '\n'
+  const stream = events([
+    {type: 'thread.started', thread_id: threadId},
+    {type: 'turn.started'},
+    {type: 'item.completed', item: {type: 'command_execution', command: 'ls'}},
+    {type: 'item.completed', item: {type: 'agent_message', text: 'from the events'}},
+    {type: 'turn.completed', usage: {}},
+  ])
+
+  /** A codex that writes `written` (when given) to the file it was asked to write its last message to. */
+  function codexSpawn(stdout: string, written?: string, code = 0) {
+    const {spawn, calls} = makeSpawn({code, stdout})
+    const writing: SpawnFn = (cmd, args, opts) => {
+      const file = args[args.indexOf('--output-last-message') + 1]
+      if (written !== undefined && args.includes('--output-last-message')) fs.writeFileSync(file, written)
+      return spawn(cmd, args, opts)
+    }
+    return {spawn: writing, calls}
+  }
+
+  let runs = 0
+  async function run(spawn: SpawnFn, extra: Record<string, unknown>) {
+    const config = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-conversation-config-'))
+    fs.mkdirSync(path.join(config, 'guardrails'))
+    fs.writeFileSync(path.join(config, 'guardrails', 'settings.json'), JSON.stringify({hooks: {PreToolUse: [
+      {matcher: 'Bash', hooks: [{type: 'command', command: '/usr/bin/true'}]},
+    ]}}))
+    const previous = process.env.AUTOMATOR_CONFIG_DIR
+    process.env.AUTOMATOR_CONFIG_DIR = config
+    try {
+      return await runAction('a', codexSkill(), {
+        playbookDir: '/pb', logDir: dir, logName: `codex-conversation-${++runs}`, now, spawn, strongContainment: passThrough,
+        authorizeCwd: (cwd: string) => cwd, resolveExecutable: (cmd: string) => `/trusted/${cmd}`, ...extra,
+      })
+    } finally {
+      if (previous === undefined) delete process.env.AUTOMATOR_CONFIG_DIR
+      else process.env.AUTOMATOR_CONFIG_DIR = previous
+      fs.rmSync(config, {recursive: true, force: true})
+    }
+  }
+
+  it('announces the conversation name as soon as it arrives and reads the result from the file', async () => {
+    const started: string[] = []
+    const {spawn, calls} = codexSpawn(stream, result)
+    const outcome = await run(spawn, {conversation: {mode: 'new'}, onConversationStarted: (id: string) => started.push(id)})
+    expect(started).toEqual([threadId])
+    expect(outcome.status).toBe('success')
+    expect(outcome.stdout).toBe(result)
+    const args = calls[0].args
+    expect(args).toContain('--json')
+    const file = args[args.indexOf('--output-last-message') + 1]
+    expect(path.dirname(file)).toBe(os.tmpdir())
+    expect(fs.existsSync(file)).toBe(false)
+    const log = fs.readFileSync(outcome.logPath, 'utf8')
+    expect(log).toContain('thread.started')
+    expect(log).toContain(result)
+  })
+
+  it('without the file, the last agent message is the result', async () => {
+    const outcome = await run(codexSpawn(stream).spawn, {conversation: {mode: 'new'}})
+    expect(outcome.stdout).toBe('from the events')
+  })
+
+  it('without file nor message, whatever plain text reached stdout stays', async () => {
+    const outcome = await run(codexSpawn('plain text\n', '   ').spawn, {conversation: {mode: 'new'}})
+    expect(outcome.stdout).toBe('plain text\n')
+  })
+
+  it('a resumed conversation keeps the error events in the log, where a quota limit is read', async () => {
+    const failing = events([{type: 'thread.started', thread_id: threadId}, {type: 'turn.failed', error: {message: 'usage limit reached'}}])
+    const started: string[] = []
+    const {spawn, calls} = codexSpawn(failing, undefined, 1)
+    const outcome = await run(spawn, {conversation: {mode: 'resume', id: threadId}, onConversationStarted: (id: string) => started.push(id)})
+    expect(outcome.status).toBe('failure')
+    expect(calls[0].args).toContain('resume')
+    expect(started).toEqual([threadId])
+    expect(fs.readFileSync(outcome.logPath, 'utf8')).toContain('usage limit reached')
+  })
+
+  it('a failing name handler never breaks the session', async () => {
+    const outcome = await run(codexSpawn(stream, result).spawn, {
+      conversation: {mode: 'new'}, onConversationStarted: () => { throw new Error('registry down') },
+    })
+    expect(outcome.status).toBe('success')
+    expect(outcome.stdout).toBe(result)
+  })
+
+  it('without a conversation the Codex session is unchanged', async () => {
+    const {spawn, calls} = codexSpawn('final message\n')
+    const outcome = await run(spawn, {})
+    expect(calls[0].args).not.toContain('--json')
+    expect(outcome.stdout).toBe('final message\n')
+  })
+})

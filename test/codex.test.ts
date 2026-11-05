@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest'
-import {buildCodexArgv, CODEX_BIN} from '../src/lib/codex'
+import {buildCodexArgv, CODEX_BIN, readCodexEvent} from '../src/lib/codex'
 import {composeRetryRun} from '../src/lib/claude'
+import {CONVERSATION_RESUME_PROMPT} from '../src/lib/agent-conversation'
 import {type CodexActionT, PlaybookSchema} from '../src/lib/schema'
 
 /** Builds a typed codex Action with the defaults applied (via zod). */
@@ -223,10 +224,72 @@ describe('buildCodexArgv in skill-mode', () => {
     expect(() => buildCodexArgv(action, settingsFile([{matcher: 'Read', hooks: []}]))).toThrow()
   })
 
+  // CYAU-285 — the conversation name arrives in the first event, so the result moves to a file.
+  const id = '0192f0c4-5d8a-7f7e-9a3c-2f1e8c3b9d10'
+
+  it('a new conversation emits events and writes its result to the given file', () => {
+    const argv = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined,
+      {conversation: {mode: 'new'}, lastMessageFile: '/repo/.git/result.txt'})
+    expect(argv.slice(0, 8)).toEqual([
+      '--ask-for-approval', 'never', '--dangerously-bypass-hook-trust', 'exec',
+      '--json', '--output-last-message', '/repo/.git/result.txt', '--ignore-user-config',
+    ])
+    expect(argv).not.toContain('resume')
+    expect(argv.slice(-2)).toEqual(['--', 'Use $autopilot at /opt/skills/current/skills/autopilot/SKILL.md with this input: CYRA-7'])
+  })
+
+  it('a resumed conversation continues by name and is asked to carry on, not to start over', () => {
+    const argv = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined,
+      {conversation: {mode: 'resume', id}, lastMessageFile: '/repo/.git/result.txt'})
+    expect(argv.slice(0, 8)).toEqual([
+      '--ask-for-approval', 'never', '--dangerously-bypass-hook-trust', 'exec', 'resume',
+      '--json', '--output-last-message', '/repo/.git/result.txt',
+    ])
+    expect(argv.slice(-3)).toEqual(['--', id, CONVERSATION_RESUME_PROMPT])
+    expect(argv).toContain('features.hooks=true')
+    expect(argv).toContain('default_permissions="automator"')
+  })
+
+  it('without a result file the session runs as before, and a malformed name is never resumed', () => {
+    const plain = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails))
+    expect(buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined,
+      {conversation: {mode: 'resume', id}})).toEqual(plain)
+    const forged = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined,
+      {conversation: {mode: 'resume', id: '--last'}, lastMessageFile: '/r.txt'})
+    expect(forged).not.toContain('resume')
+    expect(forged).not.toContain('--last')
+  })
+
+  it('a playbook action ignores the conversation: only phase skills have one', () => {
+    const action = codexAction({run: 'analizza'})
+    expect(buildCodexArgv(action, undefined, undefined, {conversation: {mode: 'new'}, lastMessageFile: '/r.txt'}))
+      .toEqual(buildCodexArgv(action))
+  })
+
   it('refuses a skill command that is not a step of the CloseYourIt plugin', () => {
     for (const command of ['/other-plugin:triage', '/closeyourit-skills:deploy', '/closeyourit-skills']) {
       const action = codexAction({run: 'x', skill: {...skill, command}})
       expect(() => buildCodexArgv(action, settingsFile(guardrails))).toThrow()
     }
+  })
+})
+
+// CYAU-285 — what the automator reads from a Codex `--json` session.
+describe('readCodexEvent', () => {
+  it('reads the conversation name from thread.started, only when it is a UUID', () => {
+    expect(readCodexEvent({type: 'thread.started', thread_id: '0192f0c4-5d8a-7f7e-9a3c-2f1e8c3b9d10'}))
+      .toEqual({threadId: '0192f0c4-5d8a-7f7e-9a3c-2f1e8c3b9d10'})
+    expect(readCodexEvent({type: 'thread.started', thread_id: '../../etc'})).toEqual({})
+    expect(readCodexEvent({type: 'thread.started'})).toEqual({})
+  })
+
+  it('reads the text of a completed agent message, and nothing from the other items', () => {
+    expect(readCodexEvent({type: 'item.completed', item: {type: 'agent_message', text: '{"state":"delivered"}'}}))
+      .toEqual({lastMessage: '{"state":"delivered"}'})
+    expect(readCodexEvent({type: 'item.completed', item: {type: 'command_execution', text: 'ls'}})).toEqual({})
+    expect(readCodexEvent({type: 'item.completed', item: {type: 'agent_message', text: 3}})).toEqual({})
+    expect(readCodexEvent({type: 'item.completed', item: ['x']})).toEqual({})
+    expect(readCodexEvent({type: 'item.completed', item: null})).toEqual({})
+    expect(readCodexEvent({type: 'turn.completed'})).toEqual({})
   })
 })

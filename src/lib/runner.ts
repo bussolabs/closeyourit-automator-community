@@ -38,7 +38,16 @@ import {type PreflightStop} from './heartbeat'
 import {skillsModeEnabled} from './paths'
 import {describeRuntimeFailure} from './runtime-failure'
 import {agentRuntimeReadiness} from './runtime-probe'
-import {noteQuotaFailure} from './agent-quota'
+import {detectQuotaLimit, noteQuotaFailure} from './agent-quota'
+import {
+  type AgentConversation,
+  chooseConversation,
+  clearConversation,
+  conversationFingerprint,
+  type ConversationStore,
+  newConversationId,
+  recordConversation,
+} from './agent-conversation'
 import {redactSecrets} from './secret-redaction'
 import {type ReviewMode} from './review'
 import {liveEventsFromClaude} from './live-events'
@@ -308,6 +317,11 @@ export interface RunOnceOptions {
    * Missing or refused = the session runs without one (the push then fails as it would anyway).
    */
   githubToken?: GithubTokenFetcher
+  /**
+   * CYAU-285 — where the agent conversations of the ticket phases are recorded, so a phase interrupted by a restart
+   * resumes its conversation instead of starting over. Missing = every session starts a new one, as before.
+   */
+  conversations?: ConversationStore
   /**
    * Skill-mode (CYAU-69): with `true` the dispatch of the due actions uses the bounded `runFlowPool` pool (PER-STEP
    * concurrency, cap = `resolveFlowConcurrency(flowMaxParallel)`); with `false` the unchanged inline SERIAL path
@@ -754,6 +768,19 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         if (executionLease) await executionLease.release().catch(() => undefined)
         return 'stop'
       }
+      // CYAU-285 — the conversation of this ticket phase, keyed by ticket and phase (a restart claims the ticket with
+      // a new run identity). Only phase skill sessions have one: they are the sessions a restart can interrupt.
+      const conversationStore = opts.conversations
+      const conversationTicket = workflowDelivery?.ticketCode ?? claimedTicket
+      const conversationPhase = workflowDelivery?.executionPhase
+      const forgetConversation = (): void => {
+        if (!conversationStore || !conversationTicket || !conversationPhase) return
+        try {
+          clearConversation(conversationStore.dir, conversationTicket, conversationPhase)
+        } catch {
+          // A leftover entry is checked again before any resume: it cannot make the next phase continue it.
+        }
+      }
       if (ticketRun) {
         if (!executionLease) {
           await ticketRun.block().catch(() => undefined)
@@ -851,6 +878,8 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             })
             // Same guarantee as the normal path: the recovery outcome is made durable before continuing.
             persistState(opts.stateFile, state)
+            // The phase ended here, through its recovery: its conversation is not continued by the next one.
+            forgetConversation()
             if (recoveryStatus === 'failure') {
               preflightStopped.push({
                 name,
@@ -934,11 +963,58 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             liveSender?.push(written)
           }
           : undefined
+        const conversationBase = conversationStore && conversationTicket && conversationPhase && sessionCwd &&
+          effectiveAction.type !== 'shell' && effectiveAction.skill
+          ? {ticket: conversationTicket, phase: conversationPhase, engine: effectiveAction.type, cwd: sessionCwd}
+          : undefined
+        // Why the next session must start a new conversation whatever the registry says: a resume just failed.
+        let freshReason: string | undefined
+        // A resumed conversation is broken when it fails, or ends without a result the phase can read. A quota limit
+        // or a timeout is not the conversation's fault: a new one would meet the same wall.
+        const resumeBroke = (raw: RunResult): boolean => {
+          if (raw.status === 'timeout') return false
+          if (raw.status === 'failure') return detectQuotaLimit(`${raw.stdout}\n${readLogTail(raw.logPath)}`, opts.now) === null
+          return workflowDelivery !== undefined && !parseWorkflowResultDetailed(raw.stdout, workflowDelivery.executionPhase).value
+        }
         while (true) {
           const attemptAction = retryPrompt
             ? {...effectiveAction, run: composeRetryRun(retryPrompt, originalRun)}
             : effectiveAction
           let lifecycleResult: Awaited<ReturnType<TicketRunLifecycle['afterRuntime']>> | undefined
+          // CYAU-285 — resume the conversation a restart interrupted, or start one and record its name before the
+          // work begins: Claude takes the name chosen here, Codex announces its own in its first event. Review
+          // corrections always start over: that conversation was about a different instruction.
+          let conversation: AgentConversation | undefined
+          let conversationReason: string | undefined
+          let conversationId: string | undefined
+          let onConversationStarted: ((id: string) => void) | undefined
+          let resumeFailed = false
+          if (conversationBase && conversationStore) {
+            const target = {...conversationBase, fingerprint: conversationFingerprint(attemptAction)}
+            try {
+              const choice = chooseConversation(conversationStore, target, retryPrompt ? 'review corrections to apply' : freshReason, opts.now)
+              conversationReason = choice.reason
+              if (choice.conversation.mode === 'resume') {
+                conversation = choice.conversation
+                conversationId = choice.conversation.id
+              } else if (target.engine === 'claude') {
+                conversationId = newConversationId()
+                recordConversation(conversationStore.dir, target, conversationId, opts.now)
+                conversation = {mode: 'new', id: conversationId}
+              } else {
+                conversation = {mode: 'new'}
+                onConversationStarted = (id) => {
+                  conversationId = id
+                  recordConversation(conversationStore.dir, target, id)
+                }
+              }
+            } catch {
+              // An unusable registry costs the resume, never the session: it starts as it always did.
+              conversation = undefined
+              conversationId = undefined
+              conversationReason = 'conversation registry not writable'
+            }
+          }
           // A fresh token per session: it lasts one hour, the same as the phase cap.
           const githubToken = claimedTicket && opts.githubToken ? await opts.githubToken(claimedTicket) : undefined
           execution = await executeRuntime(runtime, name, attemptAction, {
@@ -954,10 +1030,19 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             signal: opts.signal,
             authorizedCwd: sessionCwd,
             ...(onStreamEvent ? {onStreamEvent} : {}),
+            ...(conversation ? {conversation} : {}),
+            ...(onConversationStarted ? {onConversationStarted} : {}),
           }, executionLease, async (raw, lifecycleSignal, leaseLost) => {
             // The app takes steps only while the attempt runs: the last ones leave before the delivery closes it.
             await liveSender?.drain()
             result = raw
+            // CYAU-285 — a resumed conversation that breaks is not this phase's outcome: nothing is delivered nor
+            // checked, and the same round starts the phase again in a new conversation.
+            if (conversation?.mode === 'resume' && !leaseLost() && !(lifecycleSignal?.aborted ?? false) && resumeBroke(raw)) {
+              resumeFailed = true
+              agentResult = normalizeAgentResult({runtime: runtime.id, action: name, result: raw})
+              return
+            }
             agentResult = normalizeAgentResult({
               runtime: runtime.id,
               action: name,
@@ -1242,6 +1327,29 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           // One session per cycle round: the spend is summed here, not after the loop, otherwise the attempts
           // before a retry would disappear from the ticket's account.
           chargeSession(execution.result.stdout)
+          // CYAU-285 — the run log says which conversation the session had, and why an existing one was not resumed.
+          if (conversation && execution.result.logPath) {
+            appendLogFooter(execution.result.logPath, {
+              conversation: conversation.mode,
+              conversation_id: conversationId ?? '-',
+              ...(conversationReason ? {conversation_reason: conversationReason} : {}),
+              ...(resumeFailed ? {conversation_resume: 'failed, starting a new conversation'} : {}),
+            })
+          } else if (conversationReason && execution.result.logPath) {
+            appendLogFooter(execution.result.logPath, {conversation_reason: conversationReason})
+          }
+          if (resumeFailed && !execution.leaseLost && !opts.signal?.aborted) {
+            // The broken entry goes with the next choice (forced), and the new conversation is recorded in its place.
+            freshReason = `resumed conversation failed (${execution.result.errorCode ?? 'unreadable result'})`
+            if (!executionLease || !(await attestExecutionLease(executionLease, opts.signal))) {
+              execution = {result: {...execution.result, status: 'failure', errorCode: ErrorCodes.Lease.lost}, leaseLost: true}
+              result = execution.result
+              agentResult = normalizeAgentResult({runtime: runtime.id, action: name, result, cancelled: true})
+              await ticketRun?.block().catch(() => undefined)
+              break
+            }
+            continue
+          }
           // The lease can be lost while the post-runtime callback ends; the recorded result must reflect
           // the supervisor's final outcome, not the snapshot taken before the in-flight renew's response.
           agentResult = normalizeAgentResult({
@@ -1263,6 +1371,9 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           }
           await ticketRun?.beforeRuntime()
         }
+        // CYAU-285 — the phase is over, well or badly: the next phase starts a conversation of its own. A shutdown or
+        // a lost lease is no end — that conversation is exactly the one a restart resumes.
+        if (!execution.leaseLost && !opts.signal?.aborted) forgetConversation()
       } catch (error) {
         if (ticketRun) await ticketRun.block().catch(() => undefined)
         throw error

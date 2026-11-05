@@ -1,15 +1,17 @@
 import {AUTOMATOR_GIT_IDENTITY} from './git-identity'
 import {spawn as nodeSpawn} from 'node:child_process'
 import {spawnSync} from 'node:child_process'
-import {createHash} from 'node:crypto'
+import {createHash, randomUUID} from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import {StringDecoder} from 'node:string_decoder'
 import {type Action} from './schema'
-import {buildClaudeArgv, CLAUDE_BIN} from './claude'
+import {buildClaudeArgv, type ClaudeArgvOptions, CLAUDE_BIN} from './claude'
 import {createClaudeStreamReader} from './claude-stream'
-import {buildCodexArgv, CODEX_BIN} from './codex'
+import {buildCodexArgv, type CodexArgvOptions, CODEX_BIN, readCodexEvent} from './codex'
+import {type AgentConversation} from './agent-conversation'
+import {gitAdminDirectory} from './busy-marker'
 import {evaluateAction} from './command-policy'
 import {openLog} from './logger'
 import {ErrorCodes} from '../errors/error-codes'
@@ -171,6 +173,16 @@ export interface RunContext {
    * the session: a throwing handler is ignored.
    */
   onStreamEvent?: (event: Record<string, unknown>) => void
+  /**
+   * CYAU-285 — the conversation an agent session starts (with the name Claude is given) or resumes. Codex
+   * honours it only in a phase skill session, where its `--json` events carry the name it chose.
+   */
+  conversation?: AgentConversation
+  /**
+   * CYAU-285 — receives the conversation name Codex announces in its first event, so it is recorded before the work
+   * goes on. Like `onStreamEvent` it informs and cannot fail the session.
+   */
+  onConversationStarted?: (id: string) => void
 }
 
 function quote(arg: string): string {
@@ -223,7 +235,7 @@ export function buildCommand(
   playbookDir: string,
   guardrailsSettings: string = guardrailsSettingsPath(),
   authorizedCwd?: string,
-  options: {stream?: boolean} = {},
+  options: ClaudeArgvOptions & CodexArgvOptions = {},
 ): BuiltCommand {
   let cmd: string
   let args: string[]
@@ -234,7 +246,7 @@ export function buildCommand(
     args = buildClaudeArgv(action, guardrailsSettings, cwd, options)
   } else if (action.type === 'codex') {
     cmd = CODEX_BIN
-    args = buildCodexArgv(action, guardrailsSettings, cwd)
+    args = buildCodexArgv(action, guardrailsSettings, cwd, options)
   } else {
     cmd = 'sh'
     args = ['-c', action.run]
@@ -417,6 +429,8 @@ function spawnCollect(
     containmentMaxCleanupMs?: number
     /** stdout is a Claude stream-json: events go here, only the result line goes on as stdout (CYAU-282). */
     streamEvents?: (event: Record<string, unknown>) => void
+    /** The stream events are written to the log too (Codex `--json`, CYAU-285). */
+    logStreamEvents?: boolean
   } = {},
 ): Promise<SpawnOutcome> {
   return new Promise((resolve) => {
@@ -581,6 +595,9 @@ function spawnCollect(
       ? createClaudeStreamReader({
         onOutput: (text) => capture(text, 'stdout'),
         onEvent: (event) => {
+          // CYAU-285 — Codex events stay in the log: they are its narration, and its errors (a quota limit among
+          // them) are read back from there. Never in stdout, which carries only the result.
+          if (options.logStreamEvents) capture(`${JSON.stringify(event)}\n`, 'stderr')
           try {
             streamEvents(event)
           } catch {
@@ -662,6 +679,42 @@ function spawnCollect(
 }
 
 /**
+ * CYAU-285 — where a Codex phase session leaves its result. In the Git administrative directory of the session
+ * folder, like the busy marker: never in the working tree, where a commit could stage it, and on the paths a
+ * contained session shares with the host. Outside a Git checkout, the temporary directory.
+ */
+function codexLastMessageFile(cwd: string): string {
+  return path.join(gitAdminDirectory(cwd) ?? os.tmpdir(), `closeyourit-codex-result-${randomUUID()}.txt`)
+}
+
+/**
+ * The result of a Codex `--json` session: the file it wrote, else its last agent message, else whatever non-event
+ * text reached stdout. The file is removed once read: it holds the session's output, which belongs in the log.
+ */
+function codexResult(file: string, lastMessage: string | undefined, stdout: string): {text: string; truncated: boolean} {
+  let written = ''
+  let truncated = false
+  try {
+    const bytes = fs.readFileSync(file)
+    truncated = bytes.length > OUTPUT_MAX_BYTES
+    written = boundUtf8(bytes.toString('utf8'), OUTPUT_MAX_BYTES)
+  } catch {
+    // No file: the session ended before writing it, or could not write there.
+  }
+  fs.rmSync(file, {force: true})
+  if (written.trim() !== '') return {text: written, truncated}
+  if (lastMessage !== undefined && lastMessage.trim() !== '') {
+    return {text: boundUtf8(lastMessage, OUTPUT_MAX_BYTES), truncated: Buffer.byteLength(lastMessage) > OUTPUT_MAX_BYTES}
+  }
+  return {text: stdout, truncated: false}
+}
+
+/** The Codex home the agent sessions run with: the one holding the managed rules, where their conversations stay. */
+export function agentCodexHome(managed: ReturnType<typeof activeManagedGuardrailPaths> = activeManagedGuardrailPaths()): string {
+  return managed.codexRulesPath ? path.dirname(path.dirname(managed.codexRulesPath)) : codexHomeDir()
+}
+
+/**
  * Generic engine: builds the argv from `action` (via `buildCommand`, multi-type) and runs it. The downgrade
  * of an exit-0 to failure is driven by the `ctx.isError` predicate (claude: `is_error`) — no knowledge of the
  * claude provider in this module. The guardrail gate and the output interpretation live in ClaudeRuntime.
@@ -672,14 +725,18 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
   let built: BuiltCommand
   let managedGuardrails: ReturnType<typeof activeManagedGuardrailPaths>
   const stream = action.type === 'claude' && ctx.onStreamEvent !== undefined
+  // CYAU-285 — a Codex phase session with a conversation reports in events and leaves its result in a file.
+  const codexConversation = action.type === 'codex' && action.skill !== undefined && ctx.conversation !== undefined
+  let lastMessageFile: string | undefined
   try {
     managedGuardrails = activeManagedGuardrailPaths()
+    if (codexConversation) lastMessageFile = codexLastMessageFile(resolveActionCwd(action, ctx.playbookDir, ctx.authorizedCwd))
     built = buildCommand(
       action,
       ctx.playbookDir,
       managedGuardrails.settingsPath ?? guardrailsSettingsPath(),
       ctx.authorizedCwd,
-      {stream},
+      {stream, conversation: ctx.conversation, ...(lastMessageFile ? {lastMessageFile} : {})},
     )
     built.cwd = ctx.authorizeCwd
       ? ctx.authorizeCwd(built.cwd)
@@ -716,9 +773,7 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
   if (ctx.testSlot) env.TEST_SLOT = ctx.testSlot
   // Sanitization AFTER every merge.
   env.PATH = process.env.PATH
-  env.CODEX_HOME = managedGuardrails.codexRulesPath
-    ? path.dirname(path.dirname(managedGuardrails.codexRulesPath))
-    : codexHomeDir()
+  env.CODEX_HOME = agentCodexHome(managedGuardrails)
   // Inside the OS-level sandbox the network goes out through an HTTP proxy with an allowlist (SANDBOX_ALLOWED_DOMAINS).
   // `curl` and `git` honour the environment proxy variables; Node's `fetch` does NOT, unless told
   // to. Without this line `cyi` — which is a Node CLI — fails with `fetch failed` although closeyour.it
@@ -792,12 +847,29 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
 
   const startedAt = clock()
   const executed = containment?.command ?? built
+  let codexThread: string | undefined
+  let codexLastMessage: string | undefined
+  const codexEvents = (event: Record<string, unknown>): void => {
+    const read = readCodexEvent(event)
+    if (read.lastMessage !== undefined) codexLastMessage = read.lastMessage
+    if (read.threadId && !codexThread) {
+      codexThread = read.threadId
+      ctx.onConversationStarted?.(read.threadId)
+    }
+  }
+  const streamEvents = stream ? ctx.onStreamEvent : lastMessageFile ? codexEvents : undefined
   // A backend that carries the environment itself (VM) spawns its wrapper without the session's secrets.
   const outcome = await spawnCollect(spawnFn, executed, containment?.command.env ?? env, timeoutMs, (chunk, source, truncated) => {
     if (truncated) log.truncate()
     log.write(chunk, source)
-  }, ctx.signal, {...ctx, containment, streamEvents: stream ? ctx.onStreamEvent : undefined})
+  }, ctx.signal, {...ctx, containment, streamEvents, logStreamEvents: lastMessageFile !== undefined})
   const durationMs = clock() - startedAt
+  if (lastMessageFile) {
+    const result = codexResult(lastMessageFile, codexLastMessage, outcome.stdout)
+    outcome.stdout = result.text
+    outcome.stdoutTruncated ||= result.truncated
+    if (result.text !== '') log.write(result.text.endsWith('\n') ? result.text : `${result.text}\n`, 'stdout')
+  }
   const safeStdout = outcome.stdoutTruncated
     ? boundTruncatedStdout(redactSecretsAtTruncation(outcome.stdout), OUTPUT_MAX_BYTES)
     : boundUtf8(redactSecrets(outcome.stdout), OUTPUT_MAX_BYTES)
