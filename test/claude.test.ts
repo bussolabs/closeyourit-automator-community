@@ -13,6 +13,7 @@ import {
   skillTools,
 } from '../src/lib/claude'
 import {EXECUTION_PHASES, phaseProfile} from '../src/lib/phase-profile'
+import {CONVERSATION_RESUME_PROMPT} from '../src/lib/agent-conversation'
 import {type ClaudeActionT, PlaybookSchema} from '../src/lib/schema'
 
 const directory = mkdtempSync(join(tmpdir(), 'claude-settings-'))
@@ -132,6 +133,40 @@ describe('buildClaudeArgv skill mode', () => {
       '--setting-sources',
       '',
     ])
+  })
+
+  // CYAU-285 — the automator names the conversation before the work starts, and resumes it by that name.
+  const conversationId = '6f1c2b7e-3d4a-4e5f-8a9b-0c1d2e3f4a5b'
+  const triage = {command: '/closeyourit-skills:triage', args: 'CYRA-132', plugin_dir: '/d'}
+
+  it('a new conversation starts under the name the automator chose', () => {
+    const args = buildClaudeArgv(claudeAction({run: 'x', skill: triage}), guardrails, undefined,
+      {conversation: {mode: 'new', id: conversationId}})
+    expect(args.slice(0, 4)).toEqual(['-p', '/closeyourit-skills:triage CYRA-132', '--session-id', conversationId])
+    expect(args).not.toContain('--resume')
+    expect(args).toContain('--plugin-dir')
+  })
+
+  it('a resumed conversation continues by name and is asked to carry on, under the same guardrails', () => {
+    const args = buildClaudeArgv(claudeAction({run: 'x', skill: triage}), guardrails, undefined,
+      {conversation: {mode: 'resume', id: conversationId}})
+    expect(args.slice(0, 4)).toEqual(['-p', CONVERSATION_RESUME_PROMPT, '--resume', conversationId])
+    expect(args).not.toContain('--session-id')
+    expect(args.slice(-4)).toEqual(['--settings', JSON.stringify(baseSettings), '--setting-sources', ''])
+  })
+
+  it('a prompt-mode session takes the same flags', () => {
+    expect(buildClaudeArgv(claudeAction({run: '/audit'}), guardrails, undefined, {conversation: {mode: 'new', id: conversationId}})
+      .slice(0, 4)).toEqual(['-p', '/audit', '--session-id', conversationId])
+    expect(buildClaudeArgv(claudeAction({run: '/audit'}), guardrails, undefined, {conversation: {mode: 'resume', id: conversationId}})
+      .slice(0, 4)).toEqual(['-p', CONVERSATION_RESUME_PROMPT, '--resume', conversationId])
+  })
+
+  it('without a usable name nothing changes: an unnamed or malformed conversation starts as before', () => {
+    const plain = buildClaudeArgv(claudeAction({run: 'x', skill: triage}), guardrails)
+    expect(buildClaudeArgv(claudeAction({run: 'x', skill: triage}), guardrails, undefined, {conversation: {mode: 'new'}})).toEqual(plain)
+    expect(buildClaudeArgv(claudeAction({run: 'x', skill: triage}), guardrails, undefined,
+      {conversation: {mode: 'resume', id: '--dangerously-skip-permissions'}})).toEqual(plain)
   })
 
   it('without args: only the slash-command in -p', () => {

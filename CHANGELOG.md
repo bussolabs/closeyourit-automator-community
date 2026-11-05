@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.49.1] - 2026-11-05
+
+### Fixed
+
+- **Il rapporto dell'agente con `"version": 2` non viene più scartato.** Prima finiva fra i risultati non interpretabili e il lavoro fatto andava perso; ora vale come `contract_version: 2`.
+
+## [0.49.0] - 2026-11-05
+
+### Added
+
+- **Dopo un riavvio l'agente riprende la conversazione da dove si era fermato.** Prima di avviare una fase la macchina dà un nome alla conversazione (Claude) o lo legge appena l'agente lo comunica (Codex) e lo annota per ticket e fase. Se la stessa fase riparte sulla stessa macchina, con la stessa istruzione, nella stessa cartella e con il file della conversazione ancora presente, l'agente continua invece di rifare il lavoro. In tutti gli altri casi si riparte da zero e il motivo finisce nel registro della lavorazione; una ripresa che si rompe viene scartata e la fase riparte subito da zero. A fine fase la voce si cancella sempre. (CYAU-285)
+
+## [0.48.5] - 2026-11-05
+
+### Fixed
+
+- **Prima di ogni tentativo il ramo del ticket si allinea a quello su GitHub.** Se altri hanno pubblicato commit sul ramo, la macchina li scarica e ci lavora sopra; i commit locali non ancora pubblicati restano, e se le due versioni cambiano le stesse righe il tentativo si ferma dicendo perché, senza toccare la copia locale. (CYAU-270)
+
 ## [0.48.4] - 2026-11-05
 
 ### Fixed

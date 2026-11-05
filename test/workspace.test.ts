@@ -178,24 +178,28 @@ function fakeGit(
     fetchFails?: boolean
     defaultRemoteBranch?: string | null
     ghBinary?: string | null
+    alignFails?: boolean
   } = {},
 ): {
   git: import('../src/lib/workspace').WorkspaceGit
   clones: Array<{url: string; dest: string}>
   worktrees: Array<{repoDir: string; worktreeDir: string; branch: string; createBranch: boolean; startPoint?: string}>
   fetched: string[]
+  aligned: Array<{worktreeDir: string; branch: string}>
   localConfig: Map<string, string>
   managedIgnore: string[]
 } {
   const clones: Array<{url: string; dest: string}> = []
   const worktrees: Array<{repoDir: string; worktreeDir: string; branch: string; createBranch: boolean; startPoint?: string}> = []
   const fetched: string[] = []
+  const aligned: Array<{worktreeDir: string; branch: string}> = []
   const localConfig = new Map<string, string>(Object.entries(state.localConfig ?? {}))
   const managedIgnore: string[] = []
   return {
     clones,
     worktrees,
     fetched,
+    aligned,
     localConfig,
     managedIgnore,
     git: {
@@ -211,6 +215,11 @@ function fakeGit(
       defaultRemoteBranch: () => (state.defaultRemoteBranch === undefined ? 'origin/main' : state.defaultRemoteBranch),
       addWorktree: (repoDir, worktreeDir, branch, createBranch, startPoint) =>
         worktrees.push({repoDir, worktreeDir, branch, createBranch, startPoint}),
+      alignTicketBranch: (worktreeDir, branch) => {
+        if (state.alignFails) throw new AutomatorError(ErrorCodes.Workspace.diverged, 'conflitto', 1)
+        aligned.push({worktreeDir, branch})
+        return 'up-to-date'
+      },
       remoteUrl: () => 'https://github.com/acme/widget.git',
       worktreeInfo: () => ({branch: 'ticket/CYAU-11', detached: false}),
       currentBranch: () => 'ticket/CYAU-11',
@@ -365,9 +374,9 @@ describe('prepareWorkspace (orchestration with fake git)', () => {
       expect(f.worktrees[0].startPoint).toBe('origin/main')
     })
 
-    // Resuming a run: the branch already exists and must be reused as is. A start point here
-    // would be an error, not an improvement — it would move work already done.
-    it('an already existing branch is reused, without start point nor fetch', () => {
+    // Resuming a run: the branch already exists and is reused, without a start point — that would move work
+    // already done. But it is fetched and aligned (CYAU-270): someone else may have pushed on it meanwhile.
+    it('an already existing branch is reused without start point, fetched and aligned with GitHub', () => {
       const f = fakeGit({hasBranch: true})
       prepareWorkspace(
         {fullName: 'acme/widget', projectKey: 'ACME', ticket: 'CYAU-11', reposBase: '/r', worktreesBase: '/w'},
@@ -375,7 +384,39 @@ describe('prepareWorkspace (orchestration with fake git)', () => {
       )
 
       expect(f.worktrees[0]).toMatchObject({createBranch: false, startPoint: undefined})
-      expect(f.fetched).toEqual([])
+      expect(f.fetched).toEqual(['/r/acme/widget'])
+      expect(f.aligned).toEqual([{worktreeDir: '/w/ACME/CYAU-11', branch: 'ticket/CYAU-11'}])
+    })
+
+    it('an already present worktree is fetched and aligned at every attempt', () => {
+      const f = fakeGit({repoExists: true, repoIsGit: true})
+      prepareWorkspace(
+        {fullName: 'acme/widget', projectKey: 'ACME', ticket: 'CYAU-11', reposBase: '/r', worktreesBase: '/w'},
+        f.git,
+      )
+
+      expect(f.worktrees).toEqual([])
+      expect(f.fetched).toEqual(['/r/acme/widget'])
+      expect(f.aligned).toEqual([{worktreeDir: '/w/ACME/CYAU-11', branch: 'ticket/CYAU-11'}])
+    })
+
+    it('a resumed branch is still aligned when the network does not answer (last known GitHub state)', () => {
+      const f = fakeGit({repoExists: true, repoIsGit: true, fetchFails: true})
+      prepareWorkspace(
+        {fullName: 'acme/widget', projectKey: 'ACME', ticket: 'CYAU-11', reposBase: '/r', worktreesBase: '/w'},
+        f.git,
+      )
+
+      expect(f.aligned).toHaveLength(1)
+    })
+
+    it('a branch that cannot be aligned stops the preparation with its own reason', () => {
+      const f = fakeGit({repoExists: true, repoIsGit: true, alignFails: true})
+
+      expect(() => prepareWorkspace(
+        {fullName: 'acme/widget', projectKey: 'ACME', ticket: 'CYAU-11', reposBase: '/r', worktreesBase: '/w'},
+        f.git,
+      )).toThrowError(expect.objectContaining({code: ErrorCodes.Workspace.diverged}))
     })
   })
 
@@ -625,6 +666,217 @@ describe('prepareWorkspace / defaultWorkspaceGit (real git)', () => {
 
     expect(res.worktreeAction).toBe('add')
     expect(currentBranch(res.worktreePath)).toBe('ticket/CYAU-11')
+  })
+
+  // CYAU-270 — the ticket branch is aligned with GitHub before every attempt. "GitHub" is the local origin;
+  // "someone else" is a separate clone pushing on the same ticket branch.
+  describe('alignment of the ticket branch with GitHub', () => {
+    const BRANCH = 'ticket/CYAU-11'
+
+    function sha(dir: string, ref = 'HEAD'): string {
+      return spawnSync('git', ['-C', dir, 'rev-parse', ref], {encoding: 'utf8'}).stdout.trim()
+    }
+
+    function commit(dir: string, file: string, content: string, message: string): void {
+      fs.writeFileSync(path.join(dir, file), content)
+      git(['-C', dir, 'add', '.'])
+      git(['-C', dir, '-c', 'user.email=t@e.st', '-c', 'user.name=Test', 'commit', '-qm', message])
+    }
+
+    // First attempt: worktree created, one commit published on the ticket branch. The managed repository gets
+    // an identity, as on the real host: replaying local commits writes new ones.
+    function firstAttempt(): ReturnType<typeof prepareWorkspace> {
+      const first = prepare('CYAU-11')
+      git(['-C', first.repoPath, 'config', 'user.email', 'bot@e.st'])
+      git(['-C', first.repoPath, 'config', 'user.name', 'Bot'])
+      commit(first.worktreePath, 'work.txt', 'primo tentativo\n', 'first attempt')
+      git(['-C', first.worktreePath, 'push', '-q', 'origin', BRANCH])
+      return first
+    }
+
+    function publishFromElsewhere(file: string, content: string): string {
+      const other = fs.mkdtempSync(path.join(root, 'other-'))
+      git(['clone', '-q', '--branch', BRANCH, '--', origin, other])
+      commit(other, file, content, `remote ${file}`)
+      git(['-C', other, 'push', '-q', 'origin', BRANCH])
+      return sha(other)
+    }
+
+    function rebaseInProgress(worktreeDir: string): boolean {
+      const rel = spawnSync('git', ['-C', worktreeDir, 'rev-parse', '--git-path', 'rebase-merge'], {encoding: 'utf8'}).stdout.trim()
+      return fs.existsSync(path.isAbsolute(rel) ? rel : path.join(worktreeDir, rel))
+    }
+
+    it('a commit published on GitHub after the previous attempt is in the local copy at the next one', () => {
+      const first = firstAttempt()
+      const remoteHead = publishFromElsewhere('review-fix.txt', 'dalla revisione\n')
+      // An interrupted attempt left an uncommitted file: the fast-forward keeps it.
+      fs.writeFileSync(path.join(first.worktreePath, 'wip.txt'), 'non salvato\n')
+
+      const second = prepare('CYAU-11')
+
+      expect(second.worktreeAction).toBe('reuse')
+      expect(sha(second.worktreePath)).toBe(remoteHead)
+      expect(fs.readFileSync(path.join(second.worktreePath, 'review-fix.txt'), 'utf8')).toBe('dalla revisione\n')
+      expect(fs.readFileSync(path.join(second.worktreePath, 'wip.txt'), 'utf8')).toBe('non salvato\n')
+    })
+
+    it('also aligns a resumed branch whose worktree had been removed', () => {
+      const first = firstAttempt()
+      const remoteHead = publishFromElsewhere('review-fix.txt', 'dalla revisione\n')
+      git(['-C', first.repoPath, 'worktree', 'remove', '--force', first.worktreePath])
+
+      const second = prepare('CYAU-11')
+
+      expect(second.worktreeAction).toBe('add')
+      expect(sha(second.worktreePath)).toBe(remoteHead)
+    })
+
+    it('local commits not yet published stay as they are', () => {
+      const first = firstAttempt()
+      commit(first.worktreePath, 'local.txt', 'non pubblicato\n', 'local only')
+      const localHead = sha(first.worktreePath)
+
+      const second = prepare('CYAU-11')
+
+      expect(sha(second.worktreePath)).toBe(localHead)
+      expect(fs.readFileSync(path.join(second.worktreePath, 'local.txt'), 'utf8')).toBe('non pubblicato\n')
+      expect(defaultWorkspaceGit().alignTicketBranch(second.worktreePath, BRANCH)).toBe('ahead')
+    })
+
+    it('when both sides moved, the local commits are replayed on top of GitHub and the push is accepted', () => {
+      const first = firstAttempt()
+      commit(first.worktreePath, 'local.txt', 'non pubblicato\n', 'local only')
+      const remoteHead = publishFromElsewhere('review-fix.txt', 'dalla revisione\n')
+
+      const second = prepare('CYAU-11')
+
+      expect(sha(second.worktreePath, 'HEAD~1')).toBe(remoteHead)
+      expect(fs.readFileSync(path.join(second.worktreePath, 'local.txt'), 'utf8')).toBe('non pubblicato\n')
+      expect(fs.readFileSync(path.join(second.worktreePath, 'review-fix.txt'), 'utf8')).toBe('dalla revisione\n')
+      // Not a force push: GitHub accepts it because its commits are already underneath.
+      git(['-C', second.worktreePath, 'push', '-q', 'origin', BRANCH])
+      expect(sha(origin, `refs/heads/${BRANCH}`)).toBe(sha(second.worktreePath))
+    })
+
+    it('a conflict stops the attempt with its reason and leaves the local copy as it was', () => {
+      const first = firstAttempt()
+      commit(first.worktreePath, 'work.txt', 'versione locale\n', 'local edit')
+      const localHead = sha(first.worktreePath)
+      publishFromElsewhere('work.txt', 'versione remota\n')
+
+      expect(() => prepare('CYAU-11')).toThrowError(expect.objectContaining({
+        code: ErrorCodes.Workspace.diverged,
+        message: expect.stringContaining('conflitto'),
+      }))
+      expect(sha(first.worktreePath)).toBe(localHead)
+      expect(currentBranch(first.worktreePath)).toBe(BRANCH)
+      expect(rebaseInProgress(first.worktreePath)).toBe(false)
+      expect(fs.readFileSync(path.join(first.worktreePath, 'work.txt'), 'utf8')).toBe('versione locale\n')
+    })
+
+    // Unpublished local history with a merge that carries changes of its own (as a hand-made conflict resolution
+    // does): `side.txt` comes from the merged branch, `merge-only.txt` exists only in the merge commit.
+    function localMergeWithOwnChanges(worktreeDir: string): string {
+      git(['-C', worktreeDir, 'checkout', '-q', '-b', 'side'])
+      commit(worktreeDir, 'side.txt', 'dal ramo laterale\n', 'side work')
+      git(['-C', worktreeDir, 'checkout', '-q', BRANCH])
+      commit(worktreeDir, 'local.txt', 'non pubblicato\n', 'local only')
+      git(['-C', worktreeDir, 'merge', '-q', '--no-ff', '--no-commit', 'side'])
+      fs.writeFileSync(path.join(worktreeDir, 'merge-only.txt'), 'solo nel merge\n')
+      git(['-C', worktreeDir, 'add', '.'])
+      git(['-C', worktreeDir, 'commit', '-qm', 'local merge'])
+      return sha(worktreeDir)
+    }
+
+    it('local history with a merge is joined to GitHub with a merge commit, keeping what only the merge carried', () => {
+      const first = firstAttempt()
+      const localHead = localMergeWithOwnChanges(first.worktreePath)
+      const remoteHead = publishFromElsewhere('review-fix.txt', 'dalla revisione\n')
+
+      const second = prepare('CYAU-11')
+
+      // Nothing rewritten: the local merge is the first parent, GitHub's head the second.
+      expect(sha(second.worktreePath, 'HEAD^1')).toBe(localHead)
+      expect(sha(second.worktreePath, 'HEAD^2')).toBe(remoteHead)
+      expect(fs.readFileSync(path.join(second.worktreePath, 'merge-only.txt'), 'utf8')).toBe('solo nel merge\n')
+      expect(fs.readFileSync(path.join(second.worktreePath, 'side.txt'), 'utf8')).toBe('dal ramo laterale\n')
+      expect(fs.readFileSync(path.join(second.worktreePath, 'local.txt'), 'utf8')).toBe('non pubblicato\n')
+      expect(fs.readFileSync(path.join(second.worktreePath, 'review-fix.txt'), 'utf8')).toBe('dalla revisione\n')
+      git(['-C', second.worktreePath, 'push', '-q', 'origin', BRANCH])
+      expect(sha(origin, `refs/heads/${BRANCH}`)).toBe(sha(second.worktreePath))
+    })
+
+    it('a conflict with local history containing a merge stops the attempt and leaves the local copy as it was', () => {
+      const first = firstAttempt()
+      commit(first.worktreePath, 'work.txt', 'versione locale\n', 'local edit')
+      const localHead = localMergeWithOwnChanges(first.worktreePath)
+      publishFromElsewhere('work.txt', 'versione remota\n')
+
+      expect(() => prepare('CYAU-11')).toThrowError(expect.objectContaining({
+        code: ErrorCodes.Workspace.diverged,
+        message: expect.stringContaining('conflitto'),
+      }))
+      expect(sha(first.worktreePath)).toBe(localHead)
+      expect(spawnSync('git', ['-C', first.worktreePath, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD']).status).not.toBe(0)
+      expect(spawnSync('git', ['-C', first.worktreePath, 'status', '--porcelain'], {encoding: 'utf8'}).stdout).toBe('')
+      expect(fs.readFileSync(path.join(first.worktreePath, 'work.txt'), 'utf8')).toBe('versione locale\n')
+    })
+
+    it('diverged sides with uncommitted changes stop the attempt without touching them', () => {
+      const first = firstAttempt()
+      commit(first.worktreePath, 'local.txt', 'non pubblicato\n', 'local only')
+      const localHead = sha(first.worktreePath)
+      publishFromElsewhere('review-fix.txt', 'dalla revisione\n')
+      fs.writeFileSync(path.join(first.worktreePath, 'work.txt'), 'modifica non salvata\n')
+
+      expect(() => prepare('CYAU-11')).toThrowError(expect.objectContaining({code: ErrorCodes.Workspace.diverged}))
+      expect(sha(first.worktreePath)).toBe(localHead)
+      expect(fs.readFileSync(path.join(first.worktreePath, 'work.txt'), 'utf8')).toBe('modifica non salvata\n')
+    })
+
+    it('a fast-forward that would overwrite uncommitted changes stops without touching them', () => {
+      const first = firstAttempt()
+      const localHead = sha(first.worktreePath)
+      publishFromElsewhere('work.txt', 'versione remota\n')
+      fs.writeFileSync(path.join(first.worktreePath, 'work.txt'), 'modifica non salvata\n')
+
+      expect(() => prepare('CYAU-11')).toThrowError(expect.objectContaining({code: ErrorCodes.Workspace.diverged}))
+      expect(sha(first.worktreePath)).toBe(localHead)
+      expect(fs.readFileSync(path.join(first.worktreePath, 'work.txt'), 'utf8')).toBe('modifica non salvata\n')
+    })
+
+    it('merge.autoStash does not let a fast-forward go on with conflicted files', () => {
+      const first = firstAttempt()
+      git(['-C', first.repoPath, 'config', 'merge.autoStash', 'true'])
+      const localHead = sha(first.worktreePath)
+      publishFromElsewhere('work.txt', 'versione remota\n')
+      fs.writeFileSync(path.join(first.worktreePath, 'work.txt'), 'modifica non salvata\n')
+
+      expect(() => prepare('CYAU-11')).toThrowError(expect.objectContaining({code: ErrorCodes.Workspace.diverged}))
+      expect(sha(first.worktreePath)).toBe(localHead)
+      expect(fs.readFileSync(path.join(first.worktreePath, 'work.txt'), 'utf8')).toBe('modifica non salvata\n')
+      expect(spawnSync('git', ['-C', first.worktreePath, 'diff', '--name-only', '--diff-filter=U'], {encoding: 'utf8'}).stdout).toBe('')
+    })
+
+    it('without network the attempt goes on with the last known GitHub state', () => {
+      const first = firstAttempt()
+      const localHead = sha(first.worktreePath)
+      // GitHub unreachable: the origin disappears, the remote URL stays the expected one.
+      const away = path.join(root, 'origin-away')
+      fs.renameSync(origin, away)
+      try {
+        const second = prepare('CYAU-11')
+        expect(sha(second.worktreePath)).toBe(localHead)
+      } finally {
+        fs.renameSync(away, origin)
+      }
+    })
+
+    it('a branch never published is left as is', () => {
+      const first = prepare('CYAU-11')
+      expect(defaultWorkspaceGit().alignTicketBranch(first.worktreePath, BRANCH)).toBe('no-remote')
+    })
   })
 
   it('repository path occupied by a non-git directory → error, folder preserved', () => {

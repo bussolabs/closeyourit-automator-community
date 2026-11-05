@@ -527,3 +527,21 @@ describe('release commit (CYRA-606)', () => {
     expect(parseWorkflowResult(fermo, 'closer_production')).not.toBeNull()
   })
 })
+
+describe('v2 declared as "version" instead of "contract_version"', () => {
+  const blocked = {
+    version: 2, code: 'DMRA-166', state: 'blocked', cycles: 0, security_findings: [],
+    failure: {category: 'merge_conflict', summary: 'main conflicts', retryable: false, human_action: 'decide'},
+  }
+
+  it('reads it as v2 and sends contract_version to the server', () => {
+    const value = parseWorkflowResult(JSON.stringify(blocked), 'autopilot')
+    expect(value).not.toBeNull()
+    expect(value?.contract_version).toBe(2)
+    expect(value?.version).toBeUndefined()
+  })
+
+  it('leaves a result that declares both fields to contract_version', () => {
+    expect(parseWorkflowResult(JSON.stringify({...blocked, contract_version: 3}), 'autopilot')).toBeNull()
+  })
+})

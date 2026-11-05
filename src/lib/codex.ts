@@ -8,6 +8,7 @@ import {extractRetryFindings} from './claude'
 import {FLOW_STEPS, SKILL_PLUGIN} from './flow-engine'
 import {sandboxAllowedDomains} from './guardrails'
 import {guardrailsSettingsPath} from './paths'
+import {type AgentConversation, CONVERSATION_RESUME_PROMPT, isConversationId} from './agent-conversation'
 
 // Codex provider-specific logic (CYAU-4), twin of claude.ts: building the `codex exec` argv.
 // The execution ENGINE (spawn/timeout/log/on_failure) stays generic in executor.ts;
@@ -53,8 +54,9 @@ export function buildCodexArgv(
   action: CodexActionT,
   guardrailsSettings: string = guardrailsSettingsPath(),
   cwd?: string,
+  options: CodexArgvOptions = {},
 ): string[] {
-  if (action.skill) return buildCodexSkillArgv(action, action.skill, guardrailsSettings, cwd)
+  if (action.skill) return buildCodexSkillArgv(action, action.skill, guardrailsSettings, cwd, options)
   const args = [
     '--ask-for-approval',
     'never',
@@ -101,6 +103,7 @@ function buildCodexSkillArgv(
   skill: NonNullable<CodexActionT['skill']>,
   guardrailsSettings: string,
   cwd: string | undefined,
+  options: CodexArgvOptions,
 ): string[] {
   const step = skillStep(skill.command)
   const gitRoots = action.sandbox === 'workspace-write' ? ticketGitWritableRoots(cwd) : []
@@ -110,10 +113,15 @@ function buildCodexSkillArgv(
   const retryFindings = extractRetryFindings(action.run)
   const prompt = retryFindings ? `${invocation}\n\n${retryFindings}` : invocation
   const domains = sandboxAllowedDomains().map((domain) => `${JSON.stringify(domain)}="allow"`).join(', ')
+  const conversation = options.lastMessageFile ? options.conversation : undefined
+  const resumeId = conversation?.mode === 'resume' && isConversationId(conversation.id) ? conversation.id : undefined
   return [
     '--ask-for-approval', 'never',
     '--dangerously-bypass-hook-trust',
     'exec',
+    ...(resumeId ? ['resume'] : []),
+    // CYAU-285 — the events on stdout carry the conversation name (`thread.started`), so the result moves to a file.
+    ...(conversation && options.lastMessageFile ? ['--json', '--output-last-message', options.lastMessageFile] : []),
     '--ignore-user-config',
     '--ignore-rules',
     '-c', 'features.hooks=true',
@@ -126,8 +134,39 @@ function buildCodexSkillArgv(
     // The executor already builds the session env (cyi credential, no managed secrets): the skill scripts need it.
     '-c', 'shell_environment_policy.inherit="all"',
     '--model', action.model ?? CODEX_MODEL,
-    '--', prompt,
+    // A resumed conversation already holds the original instruction: it is asked to carry on, not to start over.
+    ...(resumeId ? ['--', resumeId, CONVERSATION_RESUME_PROMPT] : ['--', prompt]),
   ]
+}
+
+export interface CodexArgvOptions {
+  /**
+   * CYAU-285 — the conversation of a phase skill session. Codex does not take a name from outside: a new
+   * conversation announces its own in the first event, so the session runs with `--json` and its result is read
+   * from `lastMessageFile`. Both are needed; without the file the session runs as before.
+   */
+  conversation?: AgentConversation
+  lastMessageFile?: string
+}
+
+/** What a Codex `--json` session told about itself: its conversation name and its last message. */
+export interface CodexEventSummary {
+  threadId?: string
+  lastMessage?: string
+}
+
+/**
+ * Reads one `--json` event. Returns the conversation name of `thread.started` (only a UUID) and the text of a
+ * completed agent message, which is the session's result when it is the last one.
+ */
+export function readCodexEvent(event: Record<string, unknown>): CodexEventSummary {
+  if (event.type === 'thread.started' && isConversationId(event.thread_id)) return {threadId: event.thread_id}
+  const item = event.item
+  if (event.type === 'item.completed' && typeof item === 'object' && item !== null && !Array.isArray(item)) {
+    const {type, text} = item as {type?: unknown; text?: unknown}
+    if (type === 'agent_message' && typeof text === 'string') return {lastMessage: text}
+  }
+  return {}
 }
 
 /**

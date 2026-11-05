@@ -109,6 +109,15 @@ export function runsDir(): string {
 }
 
 /**
+ * Directory of the agent conversations of the ticket phases (CYAU-285): one `<ticket>--<phase>.json` file names the
+ * conversation a phase session is having, so a restart can resume it. Keyed by ticket and phase, not by run: a
+ * restart claims the ticket with a new run identity, and the read-only phases have no run record at all.
+ */
+export function agentConversationsDir(): string {
+  return path.join(stateDir(), 'conversations')
+}
+
+/**
  * Directory of the active leases held by this host (CYAU-14): one `leases/<ticket>.json` file per locked
  * ticket. The `lease` command writes/removes them; the daemon renews them at the beat. File per ticket (like the
  * `runs/`) → whoever acquires and whoever renews write different files, no lost update.

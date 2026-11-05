@@ -2,6 +2,7 @@ import {sessionSettings} from './session-settings'
 import {type ClaudeActionT} from './schema'
 import {guardrailsSettingsPath} from './paths'
 import {CLAUDE_MODEL} from './models'
+import {type AgentConversation, CONVERSATION_RESUME_PROMPT, isConversationId} from './agent-conversation'
 
 // Claude provider-specific logic, extracted from executor.ts (CYAU-3): building the `claude` argv
 // and interpreting the JSON output. The execution ENGINE (spawn/timeout/log/on_failure) stays
@@ -56,6 +57,25 @@ function outputFormatArgs(options: {stream?: boolean}): string[] {
   return options.stream ? ['--output-format', 'stream-json', '--verbose'] : ['--output-format', 'json']
 }
 
+export interface ClaudeArgvOptions {
+  stream?: boolean
+  /**
+   * CYAU-285 — the conversation the session belongs to. `new` with an id names it (`--session-id`), so the
+   * automator knows the name before the work starts; `resume` continues it (`--resume`) with a prompt that asks to
+   * carry on instead of repeating the original instruction.
+   */
+  conversation?: AgentConversation
+}
+
+/** The prompt and the conversation flags: a resumed conversation already holds the original instruction. */
+function conversationArgs(prompt: string, conversation: AgentConversation | undefined): string[] {
+  if (conversation?.mode === 'resume' && isConversationId(conversation.id)) {
+    return ['-p', CONVERSATION_RESUME_PROMPT, '--resume', conversation.id]
+  }
+  if (conversation?.mode === 'new' && isConversationId(conversation.id)) return ['-p', prompt, '--session-id', conversation.id]
+  return ['-p', prompt]
+}
+
 /**
  * Argv for a claude action (without the binary). Two modes:
  *  - inline prompt: `-p <run> --tools <file-tool>` (Bash structurally denied);
@@ -68,12 +88,12 @@ export function buildClaudeArgv(
   action: ClaudeActionT,
   guardrailsSettings: string = guardrailsSettingsPath(),
   cwd: string = process.cwd(),
-  options: {stream?: boolean} = {},
+  options: ClaudeArgvOptions = {},
 ): string[] {
   if (action.skill) return buildClaudeSkillArgv(action, action.skill, guardrailsSettings, cwd, options)
   // The CLI never receives Bash in prompt-mode: the boundary is structural, so wrappers, interpreters, scripts and
   // expansions cannot bypass a textual denylist. The hooks stay a fail-closed second line.
-  const args = ['-p', action.run, ...outputFormatArgs(options), '--tools', CLAUDE_FILE_TOOLS.join(',')]
+  const args = [...conversationArgs(action.run, options.conversation), ...outputFormatArgs(options), '--tools', CLAUDE_FILE_TOOLS.join(',')]
   if (action.permission_mode) args.push('--permission-mode', action.permission_mode)
   const allowedTools = action.allowed_tools?.filter((tool) => CLAUDE_FILE_TOOLS.includes(tool as typeof CLAUDE_FILE_TOOLS[number]))
   if (allowedTools && allowedTools.length > 0) args.push('--allowed-tools', ...allowedTools)
@@ -98,12 +118,12 @@ function buildClaudeSkillArgv(
   skill: NonNullable<ClaudeActionT['skill']>,
   guardrailsSettings: string,
   cwd: string,
-  options: {stream?: boolean},
+  options: ClaudeArgvOptions,
 ): string[] {
   const invocation = skill.args ? `${skill.command} ${skill.args}` : skill.command
   const retryFindings = extractRetryFindings(action.run)
   const prompt = retryFindings ? `${invocation}\n\n${retryFindings}` : invocation
-  const args = ['-p', prompt, ...outputFormatArgs(options), '--plugin-dir', skill.plugin_dir, '--tools', skillTools(action.allowed_tools)]
+  const args = [...conversationArgs(prompt, options.conversation), ...outputFormatArgs(options), '--plugin-dir', skill.plugin_dir, '--tools', skillTools(action.allowed_tools)]
   if (action.permission_mode) args.push('--permission-mode', action.permission_mode)
   args.push('--model', action.model ?? CLAUDE_MODEL)
   args.push('--settings', JSON.stringify(sessionSettings(guardrailsSettings, action, cwd)), '--setting-sources', '')

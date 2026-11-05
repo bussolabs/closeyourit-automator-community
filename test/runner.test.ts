@@ -4,7 +4,13 @@ import * as path from 'node:path'
 import {spawnSync} from 'node:child_process'
 import {afterAll, afterEach, describe, expect, it, vi} from 'vitest'
 import {runOnce} from '../src/lib/runner'
-import {type RunResult, type SpawnFn} from '../src/lib/executor'
+import {type RunContext, type RunResult, type SpawnFn} from '../src/lib/executor'
+import {
+  conversationFingerprint,
+  type ConversationStore,
+  readConversationEntry,
+  recordConversation,
+} from '../src/lib/agent-conversation'
 import {type AgentRuntime} from '../src/lib/runtime'
 import {acquire} from '../src/lib/lock'
 import {loadState, saveState, updateAction, emptyState} from '../src/lib/state'
@@ -1723,4 +1729,237 @@ describe('runOnce · corrupted state (CYAU-12)', () => {
 
   })
 
+})
+
+// CYAU-285 — a phase interrupted by a restart resumes its agent conversation; anything else starts over and says why.
+describe('runOnce — agent conversations of the ticket phases (CYAU-285)', () => {
+  const ID = '6f1c2b7e-3d4a-4e5f-8a9b-0c1d2e3f4a5b'
+  const THREAD = '0192f0c4-5d8a-7f7e-9a3c-2f1e8c3b9d10'
+  const TRIAGE = JSON.stringify({
+    code: 'CYAU-285', category: 'backend', capabilities: ['backend'], risk: 'low',
+    requires_human_approval: false, reasons: ['Area: backend'], state: 'workable',
+  })
+  const skill = {command: '/closeyourit-skills:triage', args: 'CYAU-285', plugin_dir: '/skills'}
+  const phasePlaybook = (type: 'claude' | 'codex') => PlaybookSchema.parse({
+    version: 1, actions: {work: {schedule: 'every 1m', type, run: 'phase prompt', containment: 'strong', skill}},
+  })
+  const approving: AgentRuntime = {
+    id: 'reviewer', healthCheck: async () => ({available: true}),
+    execute: () => ({
+      result: Promise.resolve<RunResult>({
+        status: 'success', exitCode: 0, errorCode: null, durationMs: 1, logPath: '',
+        stdout: '{"status":"accepted","summary":"Conforme"}', stdoutTruncated: false,
+      }),
+      cancel: () => undefined,
+    }),
+  }
+
+  type Step = (ctx: RunContext, store: ConversationStore) => Partial<RunResult>
+  type Seed = (store: ConversationStore, target: {ticket: string; phase: string; engine: 'claude' | 'codex'; cwd: string; fingerprint: string}) => void
+
+  async function phase(opts: {
+    engine?: 'claude' | 'codex'
+    steps?: Step[]
+    exists?: boolean
+    seed?: Seed
+    retryPrompt?: string
+    signal?: AbortSignal
+    registry?: (base: string) => string
+  }) {
+    const p = paths()
+    const base = path.dirname(p.stateFile)
+    const engine = opts.engine ?? 'claude'
+    const book = phasePlaybook(engine)
+    saveState(p.stateFile, updateAction(emptyState(), 'work', {last_run: '2026-07-07T09:00:00.000Z', last_status: 'success'}))
+    fs.mkdirSync(p.logDir, {recursive: true})
+    const logPath = path.join(p.logDir, 'work-CYAU-285.log')
+    fs.writeFileSync(logPath, '# azione: work\n')
+    const store: ConversationStore = {
+      dir: opts.registry ? opts.registry(base) : path.join(base, 'conversations'),
+      sessionExists: () => opts.exists ?? true,
+    }
+    opts.seed?.(store, {ticket: 'CYAU-285', phase: 'triage', engine, cwd: dir, fingerprint: conversationFingerprint(book.actions.work)})
+    const steps = [...(opts.steps ?? [])]
+    const seen: RunContext[] = []
+    const implementer: AgentRuntime = {
+      id: engine, healthCheck: async () => ({available: true}),
+      execute: (_name, _action, ctx) => {
+        seen.push(ctx)
+        const extra = steps.shift()?.(ctx, store) ?? {}
+        return {
+          result: Promise.resolve<RunResult>({
+            status: 'success', exitCode: 0, errorCode: null, durationMs: 1, logPath, stdout: TRIAGE, stdoutTruncated: false, ...extra,
+          }),
+          cancel: () => undefined,
+        }
+      },
+    }
+    const deliver = vi.fn(async () => ({outcome: 'ok' as const, status: 200}))
+    const result = await runOnce({
+      playbook: book, playbookDir: dir, now, ...p, conversations: store, authorizedCwds: {work: dir}, signal: opts.signal,
+      claudeRuntime: engine === 'claude' ? implementer : approving,
+      codexRuntime: engine === 'codex' ? implementer : approving,
+      preflight: async () => ({
+        outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+        executionLease: {renewEveryMs: 60_000, renew: async () => true, release: async () => undefined},
+        ...(opts.retryPrompt ? {ticketRun: {
+          runId: 'run-1', authorizedCwd: dir, branch: 'ticket/CYAU-285', retryPrompt: opts.retryPrompt,
+          beforeRuntime: async () => undefined,
+          afterRuntime: async () => ({outcome: 'complete' as const, runStatus: 'success' as const, errorCode: null}),
+          block: async () => undefined,
+        }} : {}),
+        workflowDelivery: {executionPhase: 'triage', attemptId: 'attempt-1', ticketCode: 'CYAU-285', deliver},
+      }),
+    })
+    return {
+      result, seen, store, deliver,
+      log: fs.readFileSync(logPath, 'utf8'),
+      entry: () => readConversationEntry(store.dir, 'CYAU-285', 'triage'),
+    }
+  }
+
+  it('Claude: the conversation is named and recorded before the session starts, and forgotten when the phase ends', async () => {
+    let atStart: unknown
+    const run = await phase({steps: [(_ctx, store) => (atStart = readConversationEntry(store.dir, 'CYAU-285', 'triage'), {})]})
+    const conversation = run.seen[0].conversation
+    expect(conversation?.mode).toBe('new')
+    expect(conversation?.id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(atStart).toMatchObject({status: 'ok', entry: {engine: 'claude', conversation_id: conversation?.id, cwd: dir, phase: 'triage'}})
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.entry()).toEqual({status: 'missing'})
+    expect(run.log).toContain('# conversation: new')
+    expect(run.log).toContain(`# conversation_id: ${conversation?.id}`)
+    expect(run.log).not.toContain('conversation_reason')
+  })
+
+  it('Claude: after a restart the same phase resumes the recorded conversation', async () => {
+    const run = await phase({seed: (store, target) => recordConversation(store.dir, target, ID, now)})
+    expect(run.seen).toHaveLength(1)
+    expect(run.seen[0].conversation).toEqual({mode: 'resume', id: ID})
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.log).toContain('# conversation: resume')
+    expect(run.entry()).toEqual({status: 'missing'})
+  })
+
+  it('the conversation file is gone: starts over and writes why in the run log', async () => {
+    const run = await phase({exists: false, seed: (store, target) => recordConversation(store.dir, target, ID, now)})
+    expect(run.seen[0].conversation?.mode).toBe('new')
+    expect(run.seen[0].conversation?.id).not.toBe(ID)
+    expect(run.log).toContain('# conversation_reason: conversation file no longer on this machine')
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+  })
+
+  it('a conversation recorded for another instruction is not resumed', async () => {
+    const run = await phase({seed: (store, target) => recordConversation(store.dir, {...target, fingerprint: 'other'}, ID, now)})
+    expect(run.seen[0].conversation?.mode).toBe('new')
+    expect(run.log).toContain('# conversation_reason: conversation recorded for a different instruction')
+  })
+
+  it('review corrections always start a new conversation', async () => {
+    const run = await phase({retryPrompt: 'Fix the failing check', seed: (store, target) => recordConversation(store.dir, target, ID, now)})
+    expect(run.seen[0].conversation?.mode).toBe('new')
+    expect(run.log).toContain('# conversation_reason: review corrections to apply')
+    expect(run.entry()).toEqual({status: 'missing'})
+  })
+
+  it('a resumed conversation that fails is dropped and the phase starts over in the same round', async () => {
+    const run = await phase({
+      seed: (store, target) => recordConversation(store.dir, target, ID, now),
+      steps: [() => ({status: 'failure', exitCode: 1, errorCode: 'C500-EXEC-002', stdout: ''}), () => ({})],
+    })
+    expect(run.seen).toHaveLength(2)
+    expect(run.seen[0].conversation).toEqual({mode: 'resume', id: ID})
+    expect(run.seen[1].conversation?.mode).toBe('new')
+    expect(run.seen[1].conversation?.id).not.toBe(ID)
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.result.executed[0].status).toBe('success')
+    expect(run.log).toContain('# conversation_resume: failed, starting a new conversation')
+    expect(run.log).toContain('# conversation_reason: resumed conversation failed (C500-EXEC-002)')
+    expect(run.entry()).toEqual({status: 'missing'})
+  })
+
+  it('a resumed conversation with an unreadable result is treated the same way', async () => {
+    const run = await phase({
+      seed: (store, target) => recordConversation(store.dir, target, ID, now),
+      steps: [() => ({stdout: 'I lost track of the task'}), () => ({})],
+    })
+    expect(run.seen).toHaveLength(2)
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.log).toContain('# conversation_reason: resumed conversation failed (unreadable result)')
+  })
+
+  it('a resumed conversation that times out is the phase outcome, not a reason to start over', async () => {
+    const run = await phase({
+      seed: (store, target) => recordConversation(store.dir, target, ID, now),
+      steps: [() => ({status: 'timeout', exitCode: null, errorCode: 'C504-EXEC-003'})],
+    })
+    expect(run.seen).toHaveLength(1)
+    expect(run.deliver).not.toHaveBeenCalled()
+    expect(run.entry()).toEqual({status: 'missing'})
+  })
+
+  it('a new conversation that fails is the phase outcome: no second session', async () => {
+    const run = await phase({steps: [() => ({status: 'failure', exitCode: 1, errorCode: 'C500-EXEC-002'})]})
+    expect(run.seen).toHaveLength(1)
+    expect(run.entry()).toEqual({status: 'missing'})
+  })
+
+  it('a shutdown during the session keeps the entry: that is the conversation a restart resumes', async () => {
+    const controller = new AbortController()
+    const run = await phase({
+      signal: controller.signal,
+      steps: [() => (controller.abort(), {status: 'failure', exitCode: null, errorCode: 'C499-EXEC-001'})],
+    })
+    expect(run.seen).toHaveLength(1)
+    const entry = run.entry()
+    expect(entry.status).toBe('ok')
+    expect(entry.status === 'ok' && entry.entry.conversation_id).toBe(run.seen[0].conversation?.id)
+  })
+
+  it('Codex: the name it announces is recorded during the session, and the phase resumes it later', async () => {
+    let during: unknown
+    const run = await phase({
+      engine: 'codex',
+      steps: [(ctx, store) => {
+        ctx.onConversationStarted?.(THREAD)
+        during = readConversationEntry(store.dir, 'CYAU-285', 'triage')
+        return {}
+      }],
+    })
+    expect(run.seen[0].conversation).toEqual({mode: 'new'})
+    expect(during).toMatchObject({status: 'ok', entry: {engine: 'codex', conversation_id: THREAD}})
+    expect(run.log).toContain(`# conversation_id: ${THREAD}`)
+    expect(run.entry()).toEqual({status: 'missing'})
+
+    const resumed = await phase({engine: 'codex', seed: (store, target) => recordConversation(store.dir, target, THREAD, now)})
+    expect(resumed.seen[0].conversation).toEqual({mode: 'resume', id: THREAD})
+    expect(resumed.seen[0].onConversationStarted).toBeUndefined()
+  })
+
+  it('an unusable registry costs the resume, never the session', async () => {
+    const run = await phase({registry: (base) => {
+      const file = path.join(base, 'not-a-directory')
+      fs.writeFileSync(file, '')
+      return file
+    }})
+    expect(run.seen).toHaveLength(1)
+    expect(run.seen[0].conversation).toBeUndefined()
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.log).toContain('# conversation_reason: conversation registry not writable')
+  })
+
+  it('without a registry the sessions run as before', async () => {
+    const p = paths()
+    saveState(p.stateFile, updateAction(emptyState(), 'work', {last_run: '2026-07-07T09:00:00.000Z', last_status: 'success'}))
+    const seen: RunContext[] = []
+    const runtime: AgentRuntime = {
+      id: 'claude', healthCheck: async () => ({available: true}),
+      execute: (_name, _action, ctx) => (seen.push(ctx), {
+        result: Promise.resolve<RunResult>({status: 'success', exitCode: 0, errorCode: null, durationMs: 1, logPath: '', stdout: '', stdoutTruncated: false}),
+        cancel: () => undefined,
+      }),
+    }
+    await runOnce({playbook: phasePlaybook('claude'), playbookDir: dir, now, ...p, claudeRuntime: runtime})
+    expect(seen[0].conversation).toBeUndefined()
+  })
 })
