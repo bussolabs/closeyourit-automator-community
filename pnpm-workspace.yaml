@@ -48,6 +48,9 @@ allowBuilds:
 # allowlist can be read. Transitive dependency via vitest (test toolchain),
 # the only one in the lockfile (5.4.21); forces the fixed version 6.4.3, the major jump
 # also upgrades esbuild 0.21.5 -> 0.25.x (used only by vite). See CYAU-152.
+# That fix is not enough: 6.4.3 remains exposed to CVE-2026-112942 (GHSA-587h-7wmj-h5pm,
+# high, CWE-77): in the bundled launch-editor the `fs.existsSync()` existence check can be
+# bypassed on Windows. Forces the fixed 6.4.4, a patch of the same 6.4.x series. See CYAU-267.
 #
 # source-map-js < 1.2.2 is vulnerable to an event-loop DoS via unvalidated section offsets
 # in indexed source maps (CVE-2026-93749, GHSA-68fv-2mgg-jv7q, high, CWE-1284).
@@ -72,4 +75,4 @@ overrides:
   "postcss@<8.5.23": "8.5.23"
   "source-map-js@<1.2.2": "1.2.2"
   "tinypool@<2.1.2": "2.1.2"
-  "vite@<6.4.3": "6.4.3"
+  "vite@<6.4.4": "6.4.4"
