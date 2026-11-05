@@ -1,8 +1,9 @@
 import {describe, expect, it, vi} from 'vitest'
 import {type Secrets} from '../src/lib/config'
 import {
-  buildSupporterPlanPrompt, buildSupporterPrompt, makeSupporterPass, parseSupporterAnswers, parseSupporterPlanVerdict,
-  type SupporterPlanRound, type SupporterRound, type SupporterRun,
+  buildSupporterConsultPrompt, buildSupporterPlanPrompt, buildSupporterPrompt, makeSupporterPass, parseSupporterAnswers,
+  parseSupporterConsultVerdict, parseSupporterPlanVerdict, SUPPORTER_CONSULTS_PER_PASS,
+  type SupporterConsultRound, type SupporterPlanRound, type SupporterRound, type SupporterRun,
 } from '../src/lib/supporter'
 
 // CYAU-235 — the machine runs the supporter on one open round and sends the proposed answers; the server decides.
@@ -89,7 +90,8 @@ describe('makeSupporterPass', () => {
     await makeSupporterPass(secrets, {fetchFn, run})?.()
 
     expect(run).not.toHaveBeenCalled()
-    expect(calls.map((call) => call.url)).toEqual(['https://cyi.test/api/v1/agent_host/supporter_round', 'https://cyi.test/api/v1/agent_host/supporter_plan'])
+    expect(calls.map((call) => call.url)).toEqual(['https://cyi.test/api/v1/agent_host/supporter_round',
+      'https://cyi.test/api/v1/agent_host/supporter_plan', 'https://cyi.test/api/v1/agent_host/supporter_consult'])
   })
 
   it('sends no answers when the session fails, so the round stays with a person', async () => {
@@ -299,5 +301,98 @@ describe('makeSupporterPass on plans', () => {
     await makeSupporterPass(secrets, {fetchFn, run: vi.fn<SupporterRun>()})?.(controller.signal)
 
     expect(calls.some((call) => call.url.endsWith('/supporter_plan'))).toBe(false)
+  })
+})
+
+// CYRA-1197 — another agent looks at a stopped workflow before a person is called; the server decides.
+const consultRound: SupporterConsultRound = {
+  workflow_id: 'wf-9',
+  digest: 'sha256:stop',
+  engine: 'codex',
+  project_key: 'LAB',
+  ticket: {code: 'LAB-9', title: 'Sort the list', description: 'Sort by name.'},
+  stop: {kind: 'agent_blocked', phase: 'autopilot', reason: 'agent_blocked: the test helper is missing',
+    attempts: [{status: 'failed', failure_reason: 'tests red', review_findings: [], summary: ''}]},
+  autonomous_max: 6,
+}
+
+const consultVerdict = {
+  recommendation: 'retry', guidance: 'Use the factory in spec/factories/items.rb.', risk_score: 3, confidence: 'high',
+  bypass_signals: [], sources: ['spec/factories/items.rb'], rationale: 'r', reasons_against: 'a', assumptions: 's', undo: 'u',
+}
+
+function consultServer(body: unknown, status = 200) {
+  const calls: Array<{url: string; init?: RequestInit}> = []
+  const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({url: String(url), init})
+    if (String(url).endsWith('/supporter_consult')) {
+      return new Response(status === 204 ? null : JSON.stringify({data: body}), {status})
+    }
+    if (String(url).endsWith('/verdict')) return new Response(JSON.stringify({data: {outcome: 'retried'}}), {status: 200})
+    return new Response(null, {status: 204})
+  })
+  return {fetchFn: fetchFn as unknown as typeof globalThis.fetch, calls}
+}
+
+describe('supporter safety rule', () => {
+  it('is in every prompt: questions, plans and stops', () => {
+    for (const prompt of [buildSupporterPrompt(round), buildSupporterPlanPrompt(planRound), buildSupporterConsultPrompt(consultRound)]) {
+      expect(prompt).toContain('kamal deploy')
+      expect(prompt).toContain('--no-verify')
+    }
+    expect(buildSupporterPlanPrompt(planRound)).toContain('set recommendation to "stop"')
+  })
+
+  it('reads a plan verdict that stops the workflow', () => {
+    expect(parseSupporterPlanVerdict(JSON.stringify({verdict: {...verdict, recommendation: 'stop'}}))?.recommendation).toBe('stop')
+  })
+})
+
+describe('parseSupporterConsultVerdict', () => {
+  it('reads the verdict, even after prose', () => {
+    expect(parseSupporterConsultVerdict(`Looked at it.\n${JSON.stringify({verdict: consultVerdict})}`)).toEqual(consultVerdict)
+  })
+
+  it('returns null without a known recommendation, a score from 1 to 10 or a known confidence', () => {
+    expect(parseSupporterConsultVerdict(JSON.stringify({verdict: {...consultVerdict, recommendation: 'approve'}}))).toBeNull()
+    expect(parseSupporterConsultVerdict(JSON.stringify({verdict: {...consultVerdict, risk_score: 0}}))).toBeNull()
+    expect(parseSupporterConsultVerdict(JSON.stringify({verdict: {...consultVerdict, confidence: 'sure'}}))).toBeNull()
+  })
+})
+
+describe('makeSupporterPass on stopped workflows', () => {
+  it('looks at the stop in the project checkout and sends the verdict with its digest', async () => {
+    const {fetchFn, calls} = consultServer(consultRound)
+    const run = vi.fn<SupporterRun>(async () => ({ok: true, text: JSON.stringify({verdict: consultVerdict})}))
+    const log = vi.fn()
+
+    await makeSupporterPass(secrets, {fetchFn, run, log})?.()
+
+    expect(run).toHaveBeenCalledWith('codex', expect.objectContaining({cwd: '/repos/lab'}))
+    expect(run.mock.calls[0][1].prompt).toContain('the test helper is missing')
+    const posts = calls.filter((call) => call.url.endsWith('/verdict'))
+    expect(posts).toHaveLength(SUPPORTER_CONSULTS_PER_PASS)
+    expect(posts[0].url).toBe('https://cyi.test/api/v1/agent_host/supporter_consults/wf-9/verdict')
+    expect(JSON.parse(String(posts[0].init?.body))).toEqual({digest: 'sha256:stop', verdict: consultVerdict})
+    expect(log).toHaveBeenCalledWith('supporter: LAB-9 stop engine=codex outcome=retried')
+  })
+
+  it('sends nothing when the session gives no readable verdict, so the stop stays with a person', async () => {
+    const {fetchFn, calls} = consultServer(consultRound)
+    const run = vi.fn<SupporterRun>(async () => ({ok: true, text: 'not sure'}))
+
+    await makeSupporterPass(secrets, {fetchFn, run})?.()
+
+    expect(calls.some((call) => call.url.endsWith('/verdict'))).toBe(false)
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('does nothing when no workflow is stopped, including a server that does not know the route', async () => {
+    for (const status of [204, 404]) {
+      const {fetchFn} = consultServer(null, status)
+      const run = vi.fn<SupporterRun>()
+      await makeSupporterPass(secrets, {fetchFn, run})?.()
+      expect(run).not.toHaveBeenCalled()
+    }
   })
 })
