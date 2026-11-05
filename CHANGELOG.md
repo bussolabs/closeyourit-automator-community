@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-11-05
+
+### Added
+
+- **Un agente fermo viene guardato da un altro agente prima di chiamare te.** Il supporter legge perché il lavoro si è fermato e propone di riprovare con le sue indicazioni, di lasciarlo a te, o di fermarlo per sicurezza se l'agente ha provato ad aggirare i controlli o a toccare la produzione. Decide il server. (CYRA-1197)
+
+## [0.50.0] - 2026-11-05
+
+### Added
+
+- **La sessione riceve la nota dei ticket fratelli già approvati.** Se il server manda l'elenco facoltativo `approved_siblings`, la macchina tiene solo le voci complete (al massimo 5 fratelli, 20 file ciascuno, descrizioni di 300 caratteri) e le passa come blocco non fidato, con l'ordine di usarle solo per allinearsi ai nomi nuovi verificando sul codice. Senza elenco le istruzioni restano identiche. (CYAU-297)
+
 ## [0.49.2] - 2026-11-05
 
 ### Fixed

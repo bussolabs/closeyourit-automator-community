@@ -72,6 +72,16 @@ export interface ClaimedTicketCandidate {
   comments?: Array<{id?: string; body?: string; author?: {id?: string; name?: string}; created_at?: string; updated_at?: string}>
   /** CYAU-240 — answered clarification questions, oldest first. Missing on older servers. */
   answered_questions?: Array<{question?: string; answer?: string}>
+  /**
+   * CYAU-297 — the tickets of the same group already approved, with the files each one changes. Written by a
+   * machine, so the client reads it strictly and caps it. Missing on servers that do not send it yet.
+   */
+  approved_siblings?: Array<{
+    code?: string
+    title?: string
+    approved_at?: string
+    changed_files?: Array<{path?: string; kind?: 'code' | 'table' | 'route'; summary?: string}>
+  }>
   workflow: {
     id: string
     phase: string

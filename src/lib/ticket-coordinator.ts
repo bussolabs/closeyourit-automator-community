@@ -74,6 +74,14 @@ export interface PreviousReviewFinding {
   detail: string
 }
 
+/** A ticket of the same group already approved, and the files it changes (CYAU-297). */
+export interface ApprovedSibling {
+  code: string
+  title: string
+  approvedAt: string
+  changedFiles: Array<{path: string; kind: 'code' | 'table' | 'route'; summary: string}>
+}
+
 export interface TicketDetail extends TicketContent {
   project: string
   code: string
@@ -117,6 +125,11 @@ export interface TicketDetail extends TicketContent {
    * the authoritative order around it. Without it a retry found its own open PR and declared the work done.
    */
   reworkFindings?: string
+  /**
+   * CYAU-297 — the tickets of the same group already approved, already filtered and capped. Untrusted: written by a
+   * machine, it reaches the session only inside a delimited block.
+   */
+  approvedSiblings?: ApprovedSibling[]
   /** CYAU-237 — the same findings, structured and numbered, for the reviewer of the new attempt. */
   previousReviewFindings?: PreviousReviewFinding[]
   /**
