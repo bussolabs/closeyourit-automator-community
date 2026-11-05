@@ -2,11 +2,17 @@
 
 ## [Unreleased]
 
-## [0.48.3] - 2026-11-05
+## [0.48.4] - 2026-11-05
 
 ### Fixed
 
 - **Codex risolve di nuovo i conflitti con main.** Durante la risoluzione poteva leggere main ma non aggiornarne la copia locale, e ogni tentativo si fermava. (CYRA-1193)
+
+## [0.48.3] - 2026-11-05
+
+### Security
+
+- **Corretta una vulnerabilità nella libreria che fa girare lo strumento dei test.** La libreria, usata solo dallo strumento che esegue i test, passa alla versione che chiude il difetto segnalato; il programma installato sulle macchine non cambia. (CYAU-267)
 
 ## [0.48.2] - 2026-11-04
 
