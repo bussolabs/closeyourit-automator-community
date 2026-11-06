@@ -88,7 +88,7 @@ export interface SupporterConsultRound {
     kind: string
     phase: string
     reason: string
-    attempts: Array<{status: string; failure_reason: string; review_findings: string[]; summary: string}>
+    attempts: Array<{status: string; failure_reason: string; review_findings: string[]; review_summary?: string; summary: string}>
   }
   autonomous_max: number
 }
@@ -198,6 +198,8 @@ export function buildSupporterConsultPrompt(round: SupporterConsultRound): strin
     '- "retry": only when the stop is a technical problem the agent can solve itself with clear guidance (a missing',
     '  file, a wrong command, a test to fix, main to bring in). Write that guidance in "guidance": concrete steps,',
     '  files and commands, in plain words. The next attempt of the agent reads it.',
+    '- A plan or a delivery the reviewer rejected: read review_summary and review_findings. When the reviewer asks for',
+    '  changes the agent can make (a missing case, a wrong step, a test), "retry" with those changes as the guidance.',
     '- "escalate": when a decision belongs to a person (scope, product, money, data, access), when the ticket is',
     '  unclear, or when you cannot tell what went wrong.',
     ...SAFETY_RULES,
