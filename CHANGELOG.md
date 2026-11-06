@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.51.7] - 2026-11-06
+
+### Fixed
+
+- **Il supporter non dà più rischio massimo a ogni modifica visibile ai clienti.** Un ritocco a schermate o testi chiesto dal ticket è lavoro normale. Prima quasi tutti i piani restavano a te. (CYRA-1197)
+
 ## [0.51.6] - 2026-11-06
 
 ### Fixed
