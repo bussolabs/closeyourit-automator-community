@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.51.2] - 2026-11-06
+
+### Fixed
+
+- **Un ramo che non si combina con GitHub non ferma più il lavoro.** La macchina salva i suoi commit in un backup locale e riparte dalla copia su GitHub, senza riscriverla. Prima il tentativo si perdeva e il ticket si bloccava. (CYRA-1197)
+
 ## [0.51.1] - 2026-11-06
 
 ### Fixed

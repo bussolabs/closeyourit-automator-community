@@ -109,7 +109,7 @@ export interface WorkspaceState {
 }
 
 /** What the alignment of the ticket branch with its GitHub copy did (see `WorkspaceGit.alignTicketBranch`). */
-export type BranchAlignment = 'no-remote' | 'up-to-date' | 'ahead' | 'fast-forwarded' | 'rebased' | 'merged'
+export type BranchAlignment = 'no-remote' | 'up-to-date' | 'ahead' | 'fast-forwarded' | 'rebased' | 'merged' | 'reset-to-remote'
 
 export type RepoAction = 'clone' | 'reuse'
 export type WorktreeAction = 'add' | 'reuse'
@@ -546,6 +546,19 @@ export function defaultWorkspaceGit(
         1,
       )
 
+      // The local commits and GitHub's do not combine. GitHub's copy is what was delivered and reviewed; the local
+      // commits come from an attempt that never delivered them. They are kept in a backup ref (nothing is lost, and
+      // GitHub is never rewritten), and the branch starts again from GitHub's copy, so the next attempt can work
+      // instead of stopping on a conflict nobody asked for.
+      const followRemote = (): BranchAlignment => {
+        const backup = `refs/automator-backup/${branch}/${Date.now()}`
+        const saved = inWorktree(['update-ref', backup, 'HEAD'])
+        if (!saved.ok) throw diverged('i commit locali e quelli su GitHub non si combinano e il backup locale non riesce', saved.stderr.trim())
+        const reset = inWorktree(['reset', '--hard', '--quiet', remote])
+        if (!reset.ok) throw diverged('i commit locali e quelli su GitHub non si combinano e il ritorno alla copia di GitHub non riesce', reset.stderr.trim())
+        return 'reset-to-remote'
+      }
+
       // Never published (or the fetch never saw it): nothing to align with.
       if (!inWorktree(['rev-parse', '--verify', '--quiet', `${remote}^{commit}`]).ok) return 'no-remote'
 
@@ -574,7 +587,7 @@ export function defaultWorkspaceGit(
         const merge = inWorktree(['merge', '--no-ff', '--no-edit', '--no-autostash', '--quiet', remote])
         if (!merge.ok) {
           inWorktree(['merge', '--abort'])
-          throw diverged('i commit locali e quelli su GitHub non si combinano (conflitto), unione annullata', merge.stderr.trim())
+          return followRemote()
         }
 
         return 'merged'
@@ -582,9 +595,9 @@ export function defaultWorkspaceGit(
 
       const rebase = inWorktree(['rebase', '--no-autostash', '--quiet', remote])
       if (!rebase.ok) {
-        // Conflict (or anything else): undo, so the branch and its files are exactly as before.
+        // Conflict (or anything else): undo first, so nothing half-applied is left around.
         inWorktree(['rebase', '--abort'])
-        throw diverged('i commit locali e quelli su GitHub non si combinano (conflitto), unione annullata', rebase.stderr.trim())
+        return followRemote()
       }
 
       return 'rebased'
