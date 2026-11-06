@@ -1,7 +1,7 @@
 import {describe, expect, it, vi} from 'vitest'
 import {type Secrets} from '../src/lib/config'
 import {
-  buildSupporterConsultPrompt, buildSupporterPlanPrompt, buildSupporterPrompt, makeSupporterPass, parseSupporterAnswers,
+  buildSupporterConsultPrompt, claudeSupporterSandboxArgs, buildSupporterPlanPrompt, buildSupporterPrompt, makeSupporterPass, parseSupporterAnswers,
   parseSupporterConsultVerdict, parseSupporterPlanVerdict, SUPPORTER_CONSULTS_PER_PASS,
   type SupporterConsultRound, type SupporterPlanRound, type SupporterRound, type SupporterRun,
 } from '../src/lib/supporter'
@@ -406,5 +406,15 @@ describe('makeSupporterPass on stopped workflows', () => {
       await makeSupporterPass(secrets, {fetchFn, run})?.()
       expect(run).not.toHaveBeenCalled()
     }
+  })
+})
+
+describe('claudeSupporterSandboxArgs', () => {
+  it('names the permission profile on the command line, which Codex 0.162 requires (CYRA-1197)', () => {
+    const args = claudeSupporterSandboxArgs({codexPrefix: [], cwd: '/repo', reads: '"/repo" = "read"', scratch: '/tmp/s',
+      claudeCommand: 'claude', claudePrefix: []})
+    expect(args.slice(0, 5)).toEqual(['sandbox', '-C', '/repo', '--permission-profile', 'automator-supporter'])
+    expect(args).toContain('default_permissions="automator-supporter"')
+    expect(args[args.indexOf('--') + 1]).toBe('claude')
   })
 })
