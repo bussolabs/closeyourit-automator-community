@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.51.5] - 2026-11-06
+
+### Fixed
+
+- **Il supporter con Claude funziona di nuovo.** Codex 0.162 rifiuta il recinto se il profilo dei permessi non è indicato nel comando: ora l'automator lo indica. Prima ogni giudizio falliva e passava a te. (CYRA-1197)
+
 ## [0.51.4] - 2026-11-06
 
 ### Fixed

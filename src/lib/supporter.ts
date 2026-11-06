@@ -447,6 +447,25 @@ export function makeSupporterPass(
 }
 
 /**
+ * Claude inside the Codex sandbox. Codex 0.162 refuses `sandbox` without `--permission-profile`: the profile is
+ * named on the command line as well as in `default_permissions`, like the Claude review does.
+ */
+export function claudeSupporterSandboxArgs(opts: {
+  codexPrefix: string[]; cwd: string; reads: string; scratch: string; claudeCommand: string; claudePrefix: string[]
+}): string[] {
+  return [...opts.codexPrefix, 'sandbox', '-C', opts.cwd,
+    '--permission-profile', 'automator-supporter',
+    '-c', 'default_permissions="automator-supporter"',
+    '-c', `permissions.automator-supporter.filesystem={ ":minimal" = "read", ${opts.reads}, ${JSON.stringify(opts.scratch)} = "write" }`,
+    '-c', 'permissions.automator-supporter.network.enabled=true',
+    '-c', 'features.network_proxy=true',
+    '-c', 'permissions.automator-supporter.network.domains={ "**.anthropic.com" = "allow", "**.claude.ai" = "allow" }',
+    '--', opts.claudeCommand, ...opts.claudePrefix, '--print', '--output-format', 'json', '--permission-mode', 'plan',
+    '--tools', 'Read,Glob,Grep', '--safe-mode', '--disable-slash-commands', '--no-session-persistence',
+    '--strict-mcp-config', '--mcp-config', JSON.stringify({mcpServers: {}})]
+}
+
+/**
  * The real session. Every engine runs confined to the project's checkout: it reads the repository and its own
  * runtime files, writes nothing there and cannot reach the machine's credentials.
  *   - Codex: a permission profile with the checkout read-only and no network.
@@ -470,15 +489,8 @@ export const runSupporterSession: SupporterRun = async (engine, request) => {
     const reads = [...new Set([...codex.readPaths, ...(claude?.readPaths ?? []), request.cwd])]
       .map((path) => `${JSON.stringify(path)} = "read"`).join(', ')
     const args = claude
-      ? [...codex.prefix, 'sandbox', '-C', request.cwd,
-        '-c', 'default_permissions="automator-supporter"',
-        '-c', `permissions.automator-supporter.filesystem={ ":minimal" = "read", ${reads}, ${JSON.stringify(scratch)} = "write" }`,
-        '-c', 'permissions.automator-supporter.network.enabled=true',
-        '-c', 'features.network_proxy=true',
-        '-c', 'permissions.automator-supporter.network.domains={ "**.anthropic.com" = "allow", "**.claude.ai" = "allow" }',
-        '--', claude.command, ...claude.prefix, '--print', '--output-format', 'json', '--permission-mode', 'plan',
-        '--tools', 'Read,Glob,Grep', '--safe-mode', '--disable-slash-commands', '--no-session-persistence',
-        '--strict-mcp-config', '--mcp-config', JSON.stringify({mcpServers: {}})]
+      ? claudeSupporterSandboxArgs({codexPrefix: codex.prefix, cwd: request.cwd, reads, scratch,
+        claudeCommand: claude.command, claudePrefix: claude.prefix})
       : [...codex.prefix, 'exec', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '-C', request.cwd,
         '-c', 'approval_policy="never"',
         '-c', 'default_permissions="automator-supporter"',
