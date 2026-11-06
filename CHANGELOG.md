@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.51.4] - 2026-11-06
+
+### Fixed
+
+- **Il supporter può rimandare un piano al pianificatore.** Se il piano ha lacune correggibili, lo rimanda con le osservazioni invece di lasciarlo a te. Un aggiornamento di dipendenza per una vulnerabilità nota non conta più come decisione di sicurezza. (CYRA-1197)
+
 ## [0.51.3] - 2026-11-06
 
 ### Fixed
