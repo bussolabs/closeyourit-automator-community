@@ -96,6 +96,18 @@ describe('collectLocalGuidance — reads the canonical files in the hierarchy', 
   })
 })
 
+describe('collectLocalGuidance — README fallback (CYRA-1197)', () => {
+  it('uses the root README.md when the repository has no CLAUDE.md nor AGENTS.md', () => {
+    const sources = collectLocalGuidance('/repo', fakeFs({'/repo/README.md': '# ci templates'}, ['/repo']))
+    expect(sources.map((s) => s.path)).toEqual(['/repo/README.md'])
+  })
+
+  it('ignores README.md when a canonical guidance file exists', () => {
+    const files = {'/repo/README.md': '# readme', '/repo/CLAUDE.md': '# claude'}
+    expect(collectLocalGuidance('/repo', fakeFs(files, ['/repo'])).map((s) => s.path)).toEqual(['/repo/CLAUDE.md'])
+  })
+})
+
 describe('parseKbSearchJson — tolerant parsing of the cyi kb output (untrusted input)', () => {
   it('extracts the pages from {data:[…]} and maps snake_case → camelCase', () => {
     const raw = JSON.stringify({
