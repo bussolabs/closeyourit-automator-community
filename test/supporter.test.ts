@@ -343,6 +343,10 @@ describe('supporter safety rule', () => {
     expect(buildSupporterPlanPrompt(planRound)).toContain('set recommendation to "stop"')
   })
 
+  it('tells the supporter to retry a rejection with the reviewer\'s requests as guidance', () => {
+    expect(buildSupporterConsultPrompt(consultRound)).toContain('read review_summary and review_findings')
+  })
+
   it('reads a plan verdict that stops the workflow', () => {
     expect(parseSupporterPlanVerdict(JSON.stringify({verdict: {...verdict, recommendation: 'stop'}}))?.recommendation).toBe('stop')
   })

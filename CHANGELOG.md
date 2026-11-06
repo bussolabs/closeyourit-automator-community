@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.51.1] - 2026-11-06
+
+### Fixed
+
+- **Un piano bocciato torna all'agente con le richieste del revisore.** Il supporter legge cosa ha chiesto il revisore e lo passa come indicazione al tentativo successivo, invece di lasciare tutto a te. (CYRA-1197)
+
 ## [0.51.0] - 2026-11-05
 
 ### Added
