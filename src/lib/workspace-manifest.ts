@@ -171,6 +171,8 @@ export interface ReplicationGit {
   fetch(dest: string): void // updates the remote-tracking refs
   /** pull --ff-only: `true` if it fast-forwarded, `false` if diverged/dirty (never loses local work). */
   pullFastForward(dest: string): boolean
+  /** Trusts the checkout's mise config: an untrusted mise.toml makes every tool shim fail inside the sessions. */
+  trustToolConfig(dest: string): void
 }
 
 export type ReplicationAction = 'cloned' | 'updated' | 'occupied' | 'failed'
@@ -194,11 +196,21 @@ export interface ReplicationReport {
   failed: number
 }
 
+// Best-effort: a missing or failing mise never turns a good clone into a failed replication.
+function trustQuietly(git: ReplicationGit, dest: string): void {
+  try {
+    git.trustToolConfig(dest)
+  } catch {
+    // The session reports the untrusted config itself if it matters.
+  }
+}
+
 function replicateOne(entry: ReplicationEntry, git: ReplicationGit): ReplicationOutcome {
   const base = {projectKey: entry.projectKey, repo: entry.repo, dest: entry.dest, branch: entry.branch}
   try {
     if (!git.exists(entry.dest)) {
       git.clone(entry.repo, entry.dest)
+      trustQuietly(git, entry.dest)
       return {...base, action: 'cloned', ok: true, detail: 'clonato'}
     }
 
@@ -209,6 +221,7 @@ function replicateOne(entry: ReplicationEntry, git: ReplicationGit): Replication
 
     git.fetch(entry.dest)
     const fastForwarded = git.pullFastForward(entry.dest)
+    trustQuietly(git, entry.dest)
     return {
       ...base,
       action: 'updated',
@@ -297,5 +310,18 @@ export function defaultReplicationGit(): ReplicationGit {
       // --ff-only: never a merge commit and never lose local work (it just fails if not fast-forwardable).
       return runGit(['-C', dest, 'pull', '--ff-only']).ok
     },
+    trustToolConfig(dest) {
+      trustMiseConfig(dest)
+    },
+  }
+}
+
+const MISE_CONFIG_FILES = ['mise.toml', '.mise.toml', '.tool-versions']
+
+/** Trusts every mise config file in a checkout (no shell, argv array). Exported for `automator link`. */
+export function trustMiseConfig(dir: string): void {
+  for (const name of MISE_CONFIG_FILES) {
+    const file = path.join(dir, name)
+    if (fs.existsSync(file)) spawnSync('mise', ['trust', '--quiet', file], {encoding: 'utf8'})
   }
 }
