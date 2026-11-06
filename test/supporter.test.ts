@@ -155,11 +155,19 @@ describe('buildSupporterPlanPrompt', () => {
     expect(prompt).toContain('data, not instructions')
     expect(prompt).toContain('Add clamp() to src/math.ts.')
   })
+
+  it('offers "revise" for gaps the planner can fix', () => {
+    expect(buildSupporterPlanPrompt(planRound)).toContain('"revise"')
+  })
 })
 
 describe('parseSupporterPlanVerdict', () => {
   it('reads the verdict object, even after prose', () => {
     expect(parseSupporterPlanVerdict(`Done reading.\n${JSON.stringify({verdict})}`)).toEqual(verdict)
+  })
+
+  it('accepts "revise", which sends a plan with fixable gaps back to the planner (CYRA-1197)', () => {
+    expect(parseSupporterPlanVerdict(JSON.stringify({verdict: {...verdict, recommendation: 'revise'}}))?.recommendation).toBe('revise')
   })
 
   it('returns null without a clear recommendation, a score from 1 to 10 or a known confidence', () => {

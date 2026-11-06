@@ -66,7 +66,7 @@ export interface SupporterPlanRound {
 }
 
 export interface SupporterPlanVerdict {
-  recommendation: 'approve' | 'escalate' | 'stop'
+  recommendation: 'approve' | 'revise' | 'escalate' | 'stop'
   risk_score: number
   confidence: 'low' | 'medium' | 'high'
   touched_paths: string[]
@@ -169,8 +169,12 @@ export function buildSupporterPlanPrompt(round: SupporterPlanRound): string {
     '- List in touched_paths every repository path the plan would change.',
     `- Give a risk_score from 1 to 10 for carrying out the plan. Above ${round.autonomous_max} a person decides. Never lower it to pass.`,
     '- Money and prices, security and access, personal data, deleting data, changes customers see: give 10 and escalate.',
+    '- Upgrading a dependency to the fixed version of a published advisory is routine maintenance, not a security decision.',
     '- Database changes, releases, deploys and CI: give at least 8.',
-    '- Set recommendation to "approve" only if you would approve this exact plan yourself; otherwise "escalate".',
+    '- Set recommendation to "approve" only if you would approve this exact plan yourself.',
+    '- Set "revise" when the plan has gaps the planner can fix by itself (a missing file, check or step, an unclear',
+    '  version range): write each gap in reasons_against, they go back to the planner. It never approves anything.',
+    '- Set "escalate" when a decision belongs to a person (scope, product, money, data, access).',
     ...SAFETY_RULES,
     '- If the plan does one of those, set recommendation to "stop": the workflow is stopped until a person looks.',
     '- Name the files that back your judgement in "sources".',
@@ -264,7 +268,7 @@ function readPlanVerdict(value: unknown): SupporterPlanVerdict | null {
   if (!value || typeof value !== 'object') return null
   const v = value as Record<string, unknown>
   const {recommendation, risk_score: riskScore, confidence} = v
-  if (recommendation !== 'approve' && recommendation !== 'escalate' && recommendation !== 'stop') return null
+  if (recommendation !== 'approve' && recommendation !== 'revise' && recommendation !== 'escalate' && recommendation !== 'stop') return null
   if (typeof riskScore !== 'number' || !Number.isInteger(riskScore) || riskScore < 1 || riskScore > 10) return null
   if (confidence !== 'low' && confidence !== 'medium' && confidence !== 'high') return null
   const strings = (list: unknown): string[] => (Array.isArray(list) ? list.filter((item): item is string => typeof item === 'string') : [])
