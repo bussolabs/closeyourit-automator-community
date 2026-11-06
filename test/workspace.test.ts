@@ -759,20 +759,28 @@ describe('prepareWorkspace / defaultWorkspaceGit (real git)', () => {
       expect(sha(origin, `refs/heads/${BRANCH}`)).toBe(sha(second.worktreePath))
     })
 
-    it('a conflict stops the attempt with its reason and leaves the local copy as it was', () => {
+    function backups(repoDir: string): string[] {
+      return spawnSync('git', ['-C', repoDir, 'for-each-ref', '--format=%(refname)', 'refs/automator-backup/'], {encoding: 'utf8'})
+        .stdout.split('\n').filter(Boolean)
+    }
+
+    it('a conflict keeps the local commits in a backup ref and starts again from the GitHub copy', () => {
       const first = firstAttempt()
       commit(first.worktreePath, 'work.txt', 'versione locale\n', 'local edit')
       const localHead = sha(first.worktreePath)
-      publishFromElsewhere('work.txt', 'versione remota\n')
+      const remoteHead = publishFromElsewhere('work.txt', 'versione remota\n')
 
-      expect(() => prepare('CYAU-11')).toThrowError(expect.objectContaining({
-        code: ErrorCodes.Workspace.diverged,
-        message: expect.stringContaining('conflitto'),
-      }))
-      expect(sha(first.worktreePath)).toBe(localHead)
-      expect(currentBranch(first.worktreePath)).toBe(BRANCH)
-      expect(rebaseInProgress(first.worktreePath)).toBe(false)
-      expect(fs.readFileSync(path.join(first.worktreePath, 'work.txt'), 'utf8')).toBe('versione locale\n')
+      const second = prepare('CYAU-11')
+
+      expect(sha(second.worktreePath)).toBe(remoteHead)
+      expect(currentBranch(second.worktreePath)).toBe(BRANCH)
+      expect(rebaseInProgress(second.worktreePath)).toBe(false)
+      expect(fs.readFileSync(path.join(second.worktreePath, 'work.txt'), 'utf8')).toBe('versione remota\n')
+      // Nothing is lost: the local history stays reachable, and GitHub was never rewritten.
+      const [backup] = backups(first.repoPath)
+      expect(backup).toContain(BRANCH)
+      expect(sha(first.repoPath, backup)).toBe(localHead)
+      expect(sha(origin, `refs/heads/${BRANCH}`)).toBe(remoteHead)
     })
 
     // Unpublished local history with a merge that carries changes of its own (as a hand-made conflict resolution
@@ -807,20 +815,18 @@ describe('prepareWorkspace / defaultWorkspaceGit (real git)', () => {
       expect(sha(origin, `refs/heads/${BRANCH}`)).toBe(sha(second.worktreePath))
     })
 
-    it('a conflict with local history containing a merge stops the attempt and leaves the local copy as it was', () => {
+    it('a conflict with local history containing a merge is backed up too, and the branch follows GitHub', () => {
       const first = firstAttempt()
       commit(first.worktreePath, 'work.txt', 'versione locale\n', 'local edit')
       const localHead = localMergeWithOwnChanges(first.worktreePath)
-      publishFromElsewhere('work.txt', 'versione remota\n')
+      const remoteHead = publishFromElsewhere('work.txt', 'versione remota\n')
 
-      expect(() => prepare('CYAU-11')).toThrowError(expect.objectContaining({
-        code: ErrorCodes.Workspace.diverged,
-        message: expect.stringContaining('conflitto'),
-      }))
-      expect(sha(first.worktreePath)).toBe(localHead)
-      expect(spawnSync('git', ['-C', first.worktreePath, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD']).status).not.toBe(0)
-      expect(spawnSync('git', ['-C', first.worktreePath, 'status', '--porcelain'], {encoding: 'utf8'}).stdout).toBe('')
-      expect(fs.readFileSync(path.join(first.worktreePath, 'work.txt'), 'utf8')).toBe('versione locale\n')
+      const second = prepare('CYAU-11')
+
+      expect(sha(second.worktreePath)).toBe(remoteHead)
+      expect(spawnSync('git', ['-C', second.worktreePath, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD']).status).not.toBe(0)
+      expect(spawnSync('git', ['-C', second.worktreePath, 'status', '--porcelain'], {encoding: 'utf8'}).stdout).toBe('')
+      expect(sha(first.repoPath, backups(first.repoPath)[0])).toBe(localHead)
     })
 
     it('diverged sides with uncommitted changes stop the attempt without touching them', () => {
