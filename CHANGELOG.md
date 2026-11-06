@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.51.3] - 2026-11-06
+
+### Fixed
+
+- **I repository appena clonati sono subito lavorabili.** Dopo la clonazione o il collegamento la macchina rende fidato il `mise.toml` del repository. Prima ogni comando, compresa la rilettura, si fermava. (CYRA-1197)
+
 ## [0.51.2] - 2026-11-06
 
 ### Fixed

@@ -5,6 +5,7 @@ import {hasOperationalHostIdentity, loadSecrets, updateSecrets} from '../lib/con
 import {makeClient} from '../lib/client'
 import {autoLink, collectRepoTargets, defaultScanFs, readGitHubAliases, scanCheckouts, type AutoLinkResult} from '../lib/discover'
 import {AutomatorError, ErrorCodes} from '../errors/error-codes'
+import {trustMiseConfig} from '../lib/workspace-manifest'
 
 export default class Link extends BaseCommand {
   static description =
@@ -64,6 +65,8 @@ export default class Link extends BaseCommand {
         return {...current, hosts: result.hosts}
       })
       written = committed.updated
+      // A freshly linked checkout is useless to the sessions while its mise.toml is untrusted.
+      if (written) for (const m of result.matched) trustMiseConfig(m.cwd)
     }
 
     if (!this.jsonEnabled()) this.renderHuman(result, effectiveRoots, dryRun)

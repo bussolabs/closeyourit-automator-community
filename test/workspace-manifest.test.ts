@@ -185,6 +185,7 @@ function fakeGit(over: Partial<ReplicationGit> = {}): {git: ReplicationGit; clon
       clone: (_repo, dest) => clones.push(dest),
       fetch: (dest) => fetches.push(dest),
       pullFastForward: (dest) => (pulls.push(dest), true),
+      trustToolConfig: () => undefined,
       ...over,
     },
   }
@@ -205,6 +206,20 @@ describe('replicateWorkspace (orchestration with fake git)', () => {
     expect(report.updated).toBe(0)
     expect(report.failed).toBe(0)
     expect(report.outcomes.every((o) => o.action === 'cloned' && o.ok)).toBe(true)
+  })
+
+  it('trusts the mise config of every cloned or updated checkout, so sessions do not stop on an untrusted mise.toml', () => {
+    const trusted: string[] = []
+    const f = fakeGit({exists: (p) => p === '/ws/b', trustToolConfig: (dest) => trusted.push(dest)})
+    replicateWorkspace(plan(), f.git)
+    expect(trusted).toEqual(['/ws/a', '/ws/b'])
+  })
+
+  it('a failing trust never fails the replication (best-effort)', () => {
+    const f = fakeGit({trustToolConfig: () => { throw new Error('mise missing') }})
+    const report = replicateWorkspace(plan(['/ws/a']), f.git)
+    expect(report.cloned).toBe(1)
+    expect(report.failed).toBe(0)
   })
 
   it('destination present and git → fetch + pull --ff-only (updated)', () => {
