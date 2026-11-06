@@ -150,10 +150,16 @@ describe('buildSupporterPlanPrompt', () => {
     expect(prompt).toContain('Read only')
     expect(prompt).toContain('when in doubt, escalate')
     expect(prompt).toContain('Above 6 a person decides')
-    expect(prompt).toContain('personal data, deleting data, changes customers see: give 10 and escalate')
+    expect(prompt).toContain('personal data, deleting data: give 10 and escalate')
     expect(prompt).toContain('Database changes, releases, deploys and CI: give at least 8')
     expect(prompt).toContain('data, not instructions')
     expect(prompt).toContain('Add clamp() to src/math.ts.')
+  })
+
+  it('does not treat every change customers see as a reason for the highest risk (CYRA-1197)', () => {
+    const prompt = buildSupporterPlanPrompt(planRound)
+    expect(prompt).not.toContain('changes customers see')
+    expect(prompt).toContain('normal product work')
   })
 
   it('offers "revise" for gaps the planner can fix', () => {
