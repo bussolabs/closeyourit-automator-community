@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.51.6] - 2026-11-06
+
+### Fixed
+
+- **I repository senza `CLAUDE.md` né `AGENTS.md` sono lavorabili.** La macchina usa il `README.md` come guida minima. Prima i loro ticket si fermavano a ogni tentativo e finivano bloccati. (CYRA-1197)
+
 ## [0.51.5] - 2026-11-06
 
 ### Fixed

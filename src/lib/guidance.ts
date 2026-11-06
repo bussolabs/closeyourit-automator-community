@@ -144,6 +144,14 @@ export function collectLocalGuidance(
     }
   }
 
+  // A repository without CLAUDE.md/AGENTS.md (infra, templates) still has a README: without this fallback its
+  // tickets stopped at every preflight and burned their attempts as stale.
+  if (out.length === 0 && dirs.length > 0) {
+    const readme = path.join(dirs[0], 'README.md')
+    const content = fsDeps.read(readme)
+    if (content !== null && content.trim() !== '') out.push({path: readme, content})
+  }
+
   return out
 }
 
