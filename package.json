@@ -34,7 +34,7 @@
     "@oclif/plugin-help": "^6",
     "croner": "^8",
     "yaml": "^2",
-    "zod": "^3"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22",

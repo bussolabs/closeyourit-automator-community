@@ -37,7 +37,7 @@ const RuntimeSchema = z.object({
   pathEnv: z.string(),
   homeDir: AbsolutePath,
   workingDir: AbsolutePath,
-  env: z.record(z.string()),
+  env: z.record(z.string(), z.string()),
   configDir: AbsolutePath,
   codexHome: AbsolutePath,
 }).strict().refine(isServiceRuntimeSemanticallyValid, 'runtime servizio semanticamente non valido')

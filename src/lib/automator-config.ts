@@ -53,7 +53,7 @@ const AutomatorFlowConfigSchema = z
   .object({
     sequence: z.array(ExecutionPhaseSchema).min(1),
     concurrency: z
-      .record(z.number().int().positive())
+      .record(z.string(), z.number().int().positive())
       .refine((m) => Object.keys(m).every(isExecutionPhase), {message: 'concorrenza con una fase sconosciuta'})
       .optional(),
     max_age_seconds: z.number().int().nonnegative().optional(),
