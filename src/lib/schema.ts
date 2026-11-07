@@ -26,7 +26,7 @@ export const SandboxMode = z.enum(['read-only', 'workspace-write'])
  */
 export const ContainmentMode = z.enum(['process-group', 'strong'])
 
-const EnvVars = z.record(z.string()).superRefine((vars, ctx) => {
+const EnvVars = z.record(z.string(), z.string()).superRefine((vars, ctx) => {
   for (const key of Object.keys(vars)) {
     if (isManagedSecretEnv(key)) {
       ctx.addIssue({

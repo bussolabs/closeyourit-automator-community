@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.51.8] - 2026-11-07
+
+### Security
+
+- **Libreria di validazione aggiornata.** zod passa alla versione 4.6.7, che chiude una vulnerabilità grave. Il comportamento dell'automator non cambia. (CYAU-308)
+
 ## [0.51.7] - 2026-11-06
 
 ### Fixed

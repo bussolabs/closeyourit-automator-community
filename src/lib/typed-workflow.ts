@@ -528,8 +528,12 @@ function schemaFor(candidate: Record<string, unknown>, phase: ExecutionPhase): z
   return null
 }
 
-const formatIssue = (issue: z.ZodIssue): string =>
-  `${issue.path.length === 0 ? '(root)' : issue.path.join('.')}: ${issue.message}`
+// Zod 4 no longer names the received value in an enum issue: the rejection reason must keep it
+// (it tells the agent which invented value was refused), so it is added from `reportInput`.
+const formatIssue = (issue: z.ZodIssue): string => {
+  const received = issue.code === 'invalid_value' && typeof issue.input === 'string' ? `, received '${issue.input}'` : ''
+  return `${issue.path.length === 0 ? '(root)' : issue.path.join('.')}: ${issue.message}${received}`
+}
 
 export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhase): WorkflowParseOutcome {
   // Real wire result (CYAU-97): per-PHASE schema (signed in the claim), with the real skill contracts. The 5
@@ -543,7 +547,7 @@ export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhas
     const schema = schemaFor(object, phase)
     let issues: string[]
     if (schema) {
-      const parsed = schema.safeParse(object)
+      const parsed = schema.safeParse(object, {reportInput: true})
       if (parsed.success) return {value: parsed.data as Record<string, unknown>, issues: []}
       issues = [...new Set(parsed.error.issues.map(formatIssue))]
     } else {
