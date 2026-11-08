@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-11-08
+
+### Changed
+
+- **Il supporter giudica cosa fa un piano.** Testi su pagine di pagamento, commenti nella CI, versioni di librerie e colonne nuove nel database non valgono più rischio alto da soli. Restano a una persona addebiti, accessi più larghi, dati personali e cancellazioni. (CYRA-1197)
+
 ## [0.51.8] - 2026-11-07
 
 ### Security
