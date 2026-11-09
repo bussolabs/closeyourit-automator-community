@@ -13,7 +13,7 @@ import {appendLogFooter, boundedExcerpt, prune} from './logger'
 import {type SecretCapabilities} from './env-capabilities'
 import {type GithubTokenFetcher} from './github-token'
 import {ErrorCodes} from '../errors/error-codes'
-import {observedHeadSha} from './ticket-delivery'
+import {conflictsWithBase, observedHeadSha} from './ticket-delivery'
 import {
   type TicketRunAfterResult,
   type TicketRunLifecycle,
@@ -1100,8 +1100,14 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                   })
                   return
                 }
+                // CYRA-1197 — an agent that met a conflict with main and described it in the wrong shape left the
+                // ticket retrying the same session. The host measures the conflict itself: when it is real, the
+                // block says `merge_conflict` and the server starts the round that resolves it.
+                const mergeConflict = workflowDelivery.executionPhase === 'autopilot' && ticketRun !== undefined &&
+                  conflictsWithBase(ticketRun.authorizedCwd, 'origin/HEAD')
                 const synthetic = syntheticBlockedResult({
                   phase: workflowDelivery.executionPhase, code: ticketCode, issues: parsedResult.issues, stdout: raw.stdout,
+                  mergeConflict,
                 })
                 const observed = ticketRun ? observedHeadSha(ticketRun.authorizedCwd) : undefined
                 const delivered = await workflowDelivery.deliver({

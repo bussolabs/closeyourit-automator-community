@@ -10,6 +10,7 @@ import {
   defaultTicketDeliveryGit,
   knowledgeArtifactsFromResult,
   measureChangeset,
+  conflictsWithBase,
   observedHeadSha,
   runTicketDelivery,
   trustedPrBase,
@@ -377,5 +378,40 @@ describe('observedHeadSha', () => {
     expect(observedHeadSha('/qualsiasi', () => ({status: 128, stdout: 'a'.repeat(40), stderr: 'fatal'})))
       .toBeUndefined()
     expect(observedHeadSha('/qualsiasi', () => { throw new Error('git assente') })).toBeUndefined()
+  })
+})
+
+// CYRA-1197 — an unreadable result on a branch that really conflicts with main must reach the server as a
+// conflict, so it starts the resolution round. The host measures it with git instead of trusting the output.
+describe('conflictsWithBase', () => {
+  const git = (cwd: string, ...args: string[]) =>
+    spawnSync('git', ['-C', cwd, '-c', 'user.email=p@p', '-c', 'user.name=P', ...args], {encoding: 'utf8'})
+  const repoWithBranches = (ticketLine: string, mainLine: string): string => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-conflict-'))
+    dirs.push(repo)
+    spawnSync('git', ['init', '-q', '-b', 'main', repo])
+    fs.writeFileSync(path.join(repo, 'a.md'), 'base\n')
+    git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'base')
+    git(repo, 'checkout', '-q', '-b', 'ticket')
+    fs.writeFileSync(path.join(repo, 'a.md'), `${ticketLine}\n`)
+    git(repo, 'commit', '-q', '-am', 'ticket')
+    git(repo, 'checkout', '-q', 'main')
+    fs.writeFileSync(path.join(repo, mainLine === 'other-file' ? 'b.md' : 'a.md'), `${mainLine}\n`)
+    git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', 'main')
+    git(repo, 'checkout', '-q', 'ticket')
+    return repo
+  }
+
+  it('is true when the branch and the base change the same line differently', () => {
+    expect(conflictsWithBase(repoWithBranches('ticket side', 'main side'), 'main')).toBe(true)
+  })
+
+  it('is false when the two sides merge cleanly', () => {
+    expect(conflictsWithBase(repoWithBranches('ticket side', 'other-file'), 'main')).toBe(false)
+  })
+
+  it('is false when git cannot tell, so a conflict is never invented', () => {
+    expect(conflictsWithBase('/nowhere', 'main', () => ({status: 128, stdout: '', stderr: 'fatal'}))).toBe(false)
+    expect(conflictsWithBase('/nowhere', 'main', () => { throw new Error('spawn failed') })).toBe(false)
   })
 })

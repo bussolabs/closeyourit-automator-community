@@ -45,3 +45,18 @@ describe('syntheticBlockedResult — technical_detail', () => {
     expect(detail.length).toBeLessThan(UNPARSABLE_TECHNICAL_DETAIL_CHARS + 100)
   })
 })
+
+// CYRA-1197 — the host measured a real conflict with main: the block says so, and the server starts the round that
+// resolves it instead of retrying the same unreadable session.
+describe('syntheticBlockedResult — measured conflict with main', () => {
+  it('declares merge_conflict, not retryable, on the autopilot', () => {
+    const result = syntheticBlockedResult({phase: 'autopilot', code: 'STRA-47', issues: ['work_report.commit: Required'],
+                                           stdout: '{}', mergeConflict: true})
+    expect(result).toMatchObject({state: 'blocked', failure: {category: 'merge_conflict', retryable: false}})
+  })
+
+  it('keeps unknown and retryable without a measured conflict', () => {
+    const result = syntheticBlockedResult({phase: 'autopilot', code: 'STRA-47', issues: ['x: y'], stdout: '{}'})
+    expect(result).toMatchObject({failure: {category: 'unknown', retryable: true}})
+  })
+})

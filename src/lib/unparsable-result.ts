@@ -42,6 +42,11 @@ export interface SyntheticBlockedInput {
   issues: string[]
   /** The raw stdout of the session: it is redacted and truncated before leaving the machine. */
   stdout: string
+  /**
+   * CYRA-1197 — the host measured with git that the branch conflicts with main. The block then says
+   * `merge_conflict`, so the server starts the round that resolves it instead of retrying the same session.
+   */
+  mergeConflict?: boolean
 }
 
 /**
@@ -71,9 +76,9 @@ export function syntheticBlockedResult(input: SyntheticBlockedInput): Record<str
         code: input.code,
         state: 'blocked',
         failure: {
-          category: 'unknown',
+          category: input.mergeConflict ? 'merge_conflict' : 'unknown',
           summary: reason,
-          retryable: true,
+          retryable: !input.mergeConflict,
           human_action: UNPARSABLE_HUMAN_ACTION,
           technical_detail: technicalDetail(input.stdout),
         },

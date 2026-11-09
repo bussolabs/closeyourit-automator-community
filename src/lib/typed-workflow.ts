@@ -79,13 +79,25 @@ const Triage = z
 const Scenario = z.object({given: z.string(), when: z.string(), then: z.string(), expected: z.string()}).passthrough()
 const V2Source = z.object({path: NonEmpty, line: z.number().int().positive().optional(), reason: NonEmpty}).strict()
 const V2Risk = z.object({id: z.string().regex(/^R-[1-9][0-9]*$/u), title: NonEmpty, impact: NonEmpty, mitigation: NonEmpty}).strict()
-const V2Failure = z.object({
-  category: z.enum(['authentication', 'authorization', 'configuration', 'security', 'dependency', 'network', 'quality_gate', 'merge_conflict', 'invalid_plan', 'tooling', 'unknown']),
+const V2_FAILURE_CATEGORIES = ['authentication', 'authorization', 'configuration', 'security', 'dependency', 'network', 'quality_gate', 'merge_conflict', 'invalid_plan', 'tooling', 'unknown'] as const
+// CYRA-1197 — an invented category ("environment") threw the whole block away and the server only learnt the
+// result was unreadable. The category only labels the failure: it is read as `unknown`, with the declared value
+// kept in the summary, so the block still reaches the server with its reason.
+const withKnownCategory = (value: unknown): unknown => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
+  const failure = value as Record<string, unknown>
+  const category = failure.category
+  if (typeof category !== 'string' || (V2_FAILURE_CATEGORIES as readonly string[]).includes(category)) return value
+  const summary = typeof failure.summary === 'string' ? failure.summary : ''
+  return {...failure, category: 'unknown', summary: `${summary} (declared category: ${category.slice(0, 60)})`.trim()}
+}
+const V2Failure = z.preprocess(withKnownCategory, z.object({
+  category: z.enum(V2_FAILURE_CATEGORIES),
   summary: NonEmpty,
   retryable: z.boolean(),
   human_action: NonEmpty,
   technical_detail: z.string().optional(),
-}).strict()
+}).strict())
 const V2Plan = z.object({
   summary: NonEmpty,
   work_items: z.array(z.object({

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.52.1] - 2026-11-09
+
+### Fixed
+
+- **Un conflitto con main fa partire il giro che lo risolve.** Se l'agente descrive il conflitto nel formato sbagliato, la macchina lo verifica da sola. Una categoria d'errore inventata non butta più via tutta la risposta. (CYRA-1197)
+
 ## [0.52.0] - 2026-11-08
 
 ### Changed

@@ -97,10 +97,20 @@ describe('contract agent-result/v2', () => {
   // same. Here it weighs more, because the v2 bundle carries examples only for the two phases whose shape changed:
   // on the closed lists of the others there is no fixture acting as a net.
   describe('the closed lists hold exactly as much as in the contract', () => {
+    // CYRA-1197 — one deliberate exception: an invented `failure.category` is read as `unknown` (it only labels the
+    // failure), so the block still reaches the server. Tested on its own below.
     const casi = enumParityCases(manifest, (schema as unknown as {$defs: Record<string, unknown>}).$defs, readJson, (instance) => JSON.parse(asV2(instance)))
+      .filter(({name}) => !name.includes('failure.category'))
 
     it('the contract declares closed lists to test', () => {
       expect(casi.length).toBeGreaterThan(0)
+    })
+
+    it('an invented failure.category becomes a result the contract accepts', () => {
+      const parsed = parseWorkflowResult(JSON.stringify({contract_version: 2, code: 'CYCL-81', state: 'blocked', security_findings: [],
+        failure: {category: 'environment', summary: 'No database.', retryable: true, human_action: 'Start it.'}}), 'planner')
+      expect(parsed).toMatchObject({failure: {category: 'unknown'}})
+      expect(ajv.getSchema(`${schema.$id}#/$defs/failure`)!(parsed!.failure)).toBe(true)
     })
 
     it.each(casi)('$phase: $name', ({name, definition, instance, phase}) => {

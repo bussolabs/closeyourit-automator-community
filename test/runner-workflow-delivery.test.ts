@@ -235,7 +235,9 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
   describe('non-interpretable result with a claimed ticket: delivers a synthetic blocked (CYAU-192)', () => {
     const ENUM_INVENTATO = {
       contract_version: 2, code: 'CYAU-192', state: 'blocked', security_findings: [],
-      failure: {category: 'git_auth', summary: 'Git non si autentica.', retryable: false, human_action: 'Ruotare.'},
+      // CYRA-1197 — an invented failure category is now read as `unknown`: the invented value sits in another closed list.
+      review: {verdict: 'git_auth'},
+      failure: {category: 'authentication', summary: 'Git non si autentica.', retryable: false, human_action: 'Ruotare.'},
     }
 
     it('autopilot: contract v2, retryable failure with the reason, review declared by the host, no gate nor reviewer', async () => {
@@ -262,14 +264,14 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
           contract_version: 2, code: 'CYAU-192', state: 'blocked', security_findings: [],
           failure: {
             category: 'unknown', retryable: true,
-            summary: expect.stringMatching(/^Risultato non interpretabile: failure\.category: .*'git_auth'/u),
+            summary: expect.stringMatching(/^Risultato non interpretabile: review\.verdict: .*'git_auth'/u),
             human_action: 'Se si ripete, rileggere le istruzioni della skill: il modello non ha rispettato il formato del risultato',
           },
         },
       })
       // The stdout excerpt travels redacted: the token does not leave the machine.
       const detail = (payload.result.failure as {technical_detail: string}).technical_detail
-      expect(detail).toContain('"category": "git_auth"')
+      expect(detail).toContain('"verdict": "git_auth"')
       expect(detail).not.toContain(token)
       // No review fingerprint: there is no diff that was read.
       expect(payload.review).not.toHaveProperty('reviewed_diff_sha256')
@@ -291,7 +293,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
       expect(log).toContain('# delivery: ok')
       expect(log).toContain('# error_code: C422-WORKFLOW-001')
       expect(log).toContain('# synthetic_result: blocked')
-      expect(log).toMatch(/# issues: failure\.category: .*'git_auth'/u)
+      expect(log).toMatch(/# issues: review\.verdict: .*'git_auth'/u)
       expect(log).toContain('# ---- risultato non interpretabile (fase autopilot) ----')
       expect(log).not.toContain(token)
     })

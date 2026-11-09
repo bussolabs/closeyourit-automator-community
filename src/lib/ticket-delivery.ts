@@ -293,6 +293,23 @@ export function observedHeadSha(
   }
 }
 
+/**
+ * CYRA-1197 — whether the working copy's HEAD conflicts with `base`, measured with `git merge-tree` (no checkout,
+ * no index change). Only a clear conflict (exit 1) answers true: an error or a missing ref answers false, so a
+ * conflict is never invented.
+ */
+export function conflictsWithBase(
+  cwd: string,
+  base: string,
+  run: TicketDeliveryCommandRunner = defaultGitRun,
+): boolean {
+  try {
+    return run(['merge-tree', '--write-tree', '--no-messages', base, 'HEAD'], cwd).status === 1
+  } catch {
+    return false
+  }
+}
+
 // Limits of the deliverable changeset (CYAU-142): well ABOVE real work (even a large refactoring
 // touches tens/a few hundred files) and BELOW the observed incident (15,608 files / 372 MB). A dependency install
 // that ended up in the worktree — or any other abnormal output that escaped the managed ignore — is stopped BEFORE

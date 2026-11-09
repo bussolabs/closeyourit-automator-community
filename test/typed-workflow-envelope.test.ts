@@ -196,14 +196,15 @@ describe('parseWorkflowResultDetailed — the rejection reason, not only the rej
     expect(detailed.value).toMatchObject({code: 'CYRA-660', state: 'blocked'})
   })
 
-  it('invented enum in failure.category: the path and the received value', () => {
+  // CYRA-1197 — an invented category ("environment", "git_auth") threw the whole block away, and the server only
+  // learnt the result was unreadable. The category only labels the failure: it is read as `unknown`, and the
+  // declared value stays in the summary.
+  it('invented enum in failure.category: read as unknown, the declared value kept in the summary', () => {
     const raw = JSON.stringify({...AUTOPILOT_BLOCKED_V2, failure: {...AUTOPILOT_BLOCKED_V2.failure, category: 'git_auth'}})
     const detailed = parseWorkflowResultDetailed(raw, 'autopilot')
-    expect(detailed.value).toBeNull()
-    expect(parseWorkflowResult(raw, 'autopilot')).toBeNull()
-    expect(detailed.issues).toHaveLength(1)
-    expect(detailed.issues[0]).toMatch(/^failure\.category: /u)
-    expect(detailed.issues[0]).toContain("'git_auth'")
+    expect(detailed.issues).toEqual([])
+    expect(detailed.value).toMatchObject({state: 'blocked', failure: {category: 'unknown'}})
+    expect((detailed.value?.failure as {summary: string}).summary).toContain('git_auth')
   })
 
   it('acceptance_evidence.status "pending": the indexed path inside the work_report', () => {
