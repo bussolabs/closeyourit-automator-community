@@ -298,6 +298,21 @@ export function observedHeadSha(
  * no index change). Only a clear conflict (exit 1) answers true: an error or a missing ref answers false, so a
  * conflict is never invented.
  */
+/** The files the work changed against the base, as git sees them; empty when git cannot say (CYRA-1197). */
+export function changedFilesSinceBase(
+  cwd: string,
+  base: string,
+  run: TicketDeliveryCommandRunner = defaultGitRun,
+): string[] {
+  try {
+    const result = run(['diff', '--name-only', `${base}...HEAD`], cwd)
+    if (result.status !== 0) return []
+    return result.stdout.split('\n').map(line => line.trim()).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 export function conflictsWithBase(
   cwd: string,
   base: string,

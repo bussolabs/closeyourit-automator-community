@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.52.3] - 2026-11-09
+
+### Fixed
+
+- **Un lavoro già fatto non si ferma più per la revisione.** Se il diff contiene un token finto, il revisore legge una copia mascherata; la cache di pnpm non blocca la revisione. (CYRA-1197)
+- **Una consegna senza commit o file elencati non va persa.** La macchina li ricava da git solo se c'è un commit vero; un blocco senza motivo prende quello del suo errore. (CYRA-1197)
+
 ## [0.52.2] - 2026-11-09
 
 ### Changed

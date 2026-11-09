@@ -207,6 +207,52 @@ describe('parseWorkflowResultDetailed — the rejection reason, not only the rej
     expect((detailed.value?.failure as {summary: string}).summary).toContain('git_auth')
   })
 
+  // CYRA-1197 — a delivery whose report forgot what git already knows (the commit, the changed files) was thrown
+  // away three times and the ticket stopped. The host fills those fields from what it measured in the worktree.
+  it('fills the commit, the changed files and the summary the report left out from what the host measured', () => {
+    const delivered = {
+      contract_version: 2, code: 'CYRA-1164', state: 'delivered', gate: {passed: true}, review: {verdict: 'unavailable'},
+      cycles: 1, security_findings: [],
+      delivery: {prUrl: 'https://github.com/bussolabs/closeyourit-rails/pull/90', cyiStatus: 'in_review', autoMerged: false},
+      work_report: {
+        changed_files: [],
+        tests: [{command: 'rspec', status: 'passed', summary: 'green'}], risks: [], deviations: [],
+        acceptance_evidence: [{criterion_id: 'DOD-1', status: 'verified', evidence: 'spec', source: 'reported'}],
+      },
+    }
+    const raw = JSON.stringify(delivered)
+    expect(parseWorkflowResultDetailed(raw, 'autopilot').value).toBeNull()
+
+    const measured = {headSha: 'b'.repeat(40), changedFiles: ['app/x.rb']}
+    const detailed = parseWorkflowResultDetailed(raw, 'autopilot', measured)
+    expect(detailed.issues).toEqual([])
+    expect(detailed.value).toMatchObject({work_report: {commit: 'b'.repeat(40), changed_files: [{path: 'app/x.rb'}]}})
+    expect((detailed.value?.work_report as {summary: string}).summary).not.toBe('')
+  })
+
+  it('never fills a delivery whose branch carries no committed change', () => {
+    const delivered = {
+      contract_version: 2, code: 'CYRA-1154', state: 'delivered', gate: {passed: true}, review: {verdict: 'unavailable'},
+      cycles: 1, security_findings: [],
+      delivery: {prUrl: 'https://github.com/bussolabs/closeyourit-rails/pull/91', cyiStatus: 'in_review', autoMerged: false},
+      work_report: {
+        summary: 'Done', changed_files: [{path: 'app/x.rb', summary: 'x'}],
+        tests: [{command: 'rspec', status: 'passed', summary: 'green'}], risks: [], deviations: [],
+        acceptance_evidence: [{criterion_id: 'DOD-1', status: 'verified', evidence: 'spec', source: 'reported'}],
+      },
+    }
+    const detailed = parseWorkflowResultDetailed(JSON.stringify(delivered), 'autopilot', {headSha: 'b'.repeat(40), changedFiles: []})
+    expect(detailed.value).toBeNull()
+    expect(detailed.issues).toEqual([expect.stringMatching(/^work_report\.commit/u)])
+  })
+
+  it('a blocked result without a reason takes the reason from its own failure summary', () => {
+    const raw = JSON.stringify({code: 'CYRA-1137', state: 'blocked', reason: '', failure: {summary: 'The server endpoint does not exist.'}})
+    const detailed = parseWorkflowResultDetailed(raw, 'autopilot')
+    expect(detailed.issues).toEqual([])
+    expect(detailed.value).toMatchObject({state: 'blocked', reason: 'The server endpoint does not exist.'})
+  })
+
   it('acceptance_evidence.status "pending": the indexed path inside the work_report', () => {
     const delivered = {
       contract_version: 2, code: 'CYRA-700', state: 'delivered', gate: {passed: true}, review: {verdict: 'unavailable'},

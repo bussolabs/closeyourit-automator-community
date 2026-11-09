@@ -547,7 +547,43 @@ const formatIssue = (issue: z.ZodIssue): string => {
   return `${issue.path.length === 0 ? '(root)' : issue.path.join('.')}: ${issue.message}${received}`
 }
 
-export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhase): WorkflowParseOutcome {
+/** What the host measured in the worktree after the session: git knows it, the report may forget it. */
+export interface MeasuredDelivery {
+  headSha?: string
+  changedFiles?: string[]
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+// CYRA-1197 — fields the agent forgot but that are facts, not judgements: a blocked result takes its reason from its
+// own failure summary, and a delivery report takes the commit and the changed files the host measured with git.
+// Nothing the agent claimed is overwritten; the server and the reviewer still check the work itself.
+function withMeasuredFacts(object: Record<string, unknown>, measured?: MeasuredDelivery): Record<string, unknown> {
+  let result = object
+  const failure = result.failure
+  if (result.state === 'blocked' && !(typeof result.reason === 'string' && result.reason.trim()) &&
+      isRecord(failure) && typeof failure.summary === 'string' && failure.summary.trim()) {
+    result = {...result, reason: failure.summary}
+  }
+  const report = result.work_report
+  // Only a branch that really carries committed changes is filled: uncommitted work is never declared delivered.
+  const files = (measured?.changedFiles ?? []).slice(0, 200)
+  if (!measured?.headSha || files.length === 0 || !isRecord(report)) return result
+  const filled: Record<string, unknown> = {...report}
+  if (typeof filled.commit !== 'string' || !/^[0-9a-f]{40}$/u.test(filled.commit)) filled.commit = measured.headSha
+  if (!Array.isArray(filled.changed_files) || filled.changed_files.length === 0) {
+    filled.changed_files = files.map(path => ({path, summary: 'Changed in this delivery (measured by the host).'}))
+  }
+  if (typeof filled.summary !== 'string' || !filled.summary.trim()) {
+    filled.summary = typeof result.reason === 'string' && result.reason.trim()
+      ? result.reason
+      : 'Delivered the approved plan; see the pull request for the changes.'
+  }
+  return {...result, work_report: filled}
+}
+
+export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhase, measured?: MeasuredDelivery): WorkflowParseOutcome {
   // Real wire result (CYAU-97): per-PHASE schema (signed in the claim), with the real skill contracts. The 5
   // phases have distinct schemas; the server revalidates, so the parse is lenient (`.passthrough()`).
   let closest: string[] | undefined
@@ -555,7 +591,7 @@ export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhas
     // Only objects: a scalar or an array is never a result, and as the "closest candidate" with a
     // single issue ("expected object") it would hide the real object, the one explaining what is wrong.
     if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue
-    const object = withContractVersion(candidate as Record<string, unknown>)
+    const object = withMeasuredFacts(withContractVersion(candidate as Record<string, unknown>), measured)
     const schema = schemaFor(object, phase)
     let issues: string[]
     if (schema) {

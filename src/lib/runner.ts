@@ -13,7 +13,7 @@ import {appendLogFooter, boundedExcerpt, prune} from './logger'
 import {type SecretCapabilities} from './env-capabilities'
 import {type GithubTokenFetcher} from './github-token'
 import {ErrorCodes} from '../errors/error-codes'
-import {conflictsWithBase, observedHeadSha} from './ticket-delivery'
+import {changedFilesSinceBase, conflictsWithBase, observedHeadSha} from './ticket-delivery'
 import {
   type TicketRunAfterResult,
   type TicketRunLifecycle,
@@ -1064,7 +1064,11 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             // An UNINTERPRETABLE output is a different case (CYAU-192): the session ended fine, it is the
             // result format that does not match, and the reason goes on the ticket — see the branch below.
             if (workflowDelivery && effectiveAction.type !== 'shell' && raw.status === 'success' && lifecycleResult?.outcome !== 'retry') {
-              const parsedResult = parseWorkflowResultDetailed(raw.stdout, workflowDelivery.executionPhase)
+              // CYRA-1197 — what git knows about the delivery, for a report that forgot the commit or the files.
+              const measured = workflowDelivery.executionPhase === 'autopilot' && ticketRun !== undefined
+                ? {headSha: observedHeadSha(ticketRun.authorizedCwd), changedFiles: changedFilesSinceBase(ticketRun.authorizedCwd, 'origin/HEAD')}
+                : undefined
+              const parsedResult = parseWorkflowResultDetailed(raw.stdout, workflowDelivery.executionPhase, measured)
               const structured = parsedResult.value
               // The reviewer is the engine the server names (CYAU-226), on both paths (the diff review is run by the
               // cycle with the same selection). Without a name: the other runtime, or the same one when the machine

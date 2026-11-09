@@ -455,8 +455,10 @@ export async function resolveReviewDiff(
 
     // The skills keep their scratch files (gate commands, commit message, PR body) under .closeyourit/session/,
     // which no target repository ignores: it is never part of the work, so it stays out of the check (CYRA-877).
+    // CYRA-1197 — the same for .pnpm-store, the package cache pnpm writes in the project when the sandbox cannot
+    // write the global one: a cache, never part of the work.
     const statusArgs = ['status', '--porcelain=v2', '-z', '--untracked-files=normal', '--ignore-submodules=none',
-      '--', '.', ':(exclude).closeyourit/session']
+      '--', '.', ':(exclude).closeyourit/session', ':(exclude).pnpm-store']
     const statusBefore = (await snapshotGit(statusArgs)).toString('latin1')
     const statusEntriesBefore = statusBefore.split('\0')
     if (hasDirtyIgnoreEntries(statusEntriesBefore)) {

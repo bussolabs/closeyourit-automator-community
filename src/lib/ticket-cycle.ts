@@ -979,8 +979,12 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
             let snapshot: ResolvedReviewDiff
             try {
               snapshot = await resolveDiff(input.base, prepared.worktreePath, signal ?? input.signal)
-              // A diff carrying sensitive material is sent to no reviewer, not even a local one.
-              if (redactSecrets(snapshot.diff) !== snapshot.diff) return nonDisponibile('il diff contiene materiale sensibile')
+              // A diff carrying sensitive material is sent to no reviewer, not even a local one. CYRA-1197 — the
+              // reviewer reads a copy with those values masked instead of nothing: token-shaped text is often the fake
+              // token of a redaction test, and refusing left the work unreviewed. The fingerprints still name the
+              // real diff, so the attestation is unchanged.
+              const masked = redactSecrets(snapshot.diff)
+              if (masked !== snapshot.diff) snapshot = {...snapshot, diff: masked}
             } catch (error) {
               // Empty diff included (`resolveDiff` rejects it): after a successful release the changes are no
               // longer pending, they are already in. There is nothing to compare, and declaring it

@@ -1068,9 +1068,13 @@ describe('resolveReviewDiff', () => {
       git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'change'])
       fs.mkdirSync(path.join(repo, '.closeyourit', 'session'), {recursive: true})
       fs.writeFileSync(path.join(repo, '.closeyourit', 'session', 'pr-body.md'), 'body\n')
+      // CYRA-1197 — pnpm puts its package cache in the project when the sandbox cannot write the global one.
+      fs.mkdirSync(path.join(repo, '.pnpm-store', 'v10'), {recursive: true})
+      fs.writeFileSync(path.join(repo, '.pnpm-store', 'v10', 'index.json'), '{}\n')
 
       const resolved = await resolveReviewDiff(base, repo)
       expect(resolved.diff).not.toContain('pr-body.md')
+      expect(resolved.diff).not.toContain('index.json')
 
       fs.writeFileSync(path.join(repo, 'new.ts'), 'must not vanish\n')
       await expect(resolveReviewDiff(base, repo)).rejects.toThrow(/non tracciati/)

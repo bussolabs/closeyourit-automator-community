@@ -1252,6 +1252,29 @@ describe('buildCrossReviewRetryPrompt', () => {
       })
     })
 
+    // CYRA-1197 — token-shaped text in the diff (often the fake token of a redaction test) left the work unreviewed
+    // and the ticket stopped. The reviewer now reads a copy with those values masked; the secret never reaches it.
+    it('reviews a diff with token-shaped text on a masked copy, never sending the value', async () => {
+      const runsBase = temporaryDirectory()
+      const executeReview = vi.fn(async ({selection}: {selection: {reviewer: 'claude' | 'codex' | null}}) => ({
+        status: 'completed' as const, reviewer: selection.reviewer, findings: [], detail: null,
+        attestation: {reviewedBaseCommit: 'a'.repeat(40), reviewedSnapshotTree: 'b'.repeat(40), reviewedDiffSha256: 'c'.repeat(64)},
+      }))
+      const lifecycle = await provider(runsBase, {
+        resolveReviewDiff: vi.fn(async () => ({
+          baseCommit: 'a'.repeat(40), snapshotTree: 'b'.repeat(40), diffSha256: 'c'.repeat(64),
+          diff: '+ expect(redact("token=cyi_ah_ABCDEF")).toBe("token=[REDACTED]")',
+        })),
+        executeReview,
+      }).prepare({...skillMode, reviewDepth: 'diff'})
+
+      const review = await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+
+      expect(review.status).toBe('accepted')
+      expect(executeReview).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify(executeReview.mock.calls[0])).not.toContain('cyi_ah_ABCDEF')
+    })
+
     // A blocking finding is NOT "I could not look": it is "I looked and found a defect".
     // Sending it as `unavailable` would hide a real finding behind a word saying that nobody
     // read it, and the report on the ticket would say the wrong thing.

@@ -10,6 +10,7 @@ import {
   defaultTicketDeliveryGit,
   knowledgeArtifactsFromResult,
   measureChangeset,
+  changedFilesSinceBase,
   conflictsWithBase,
   observedHeadSha,
   runTicketDelivery,
@@ -413,5 +414,26 @@ describe('conflictsWithBase', () => {
   it('is false when git cannot tell, so a conflict is never invented', () => {
     expect(conflictsWithBase('/nowhere', 'main', () => ({status: 128, stdout: '', stderr: 'fatal'}))).toBe(false)
     expect(conflictsWithBase('/nowhere', 'main', () => { throw new Error('spawn failed') })).toBe(false)
+  })
+})
+
+// CYRA-1197 — the files the delivery changed, for a report that forgot to list them.
+describe('changedFilesSinceBase', () => {
+  it('lists the files the branch changed against the base', () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-changed-'))
+    dirs.push(repo)
+    const git = (...args: string[]) => spawnSync('git', ['-C', repo, '-c', 'user.email=p@p', '-c', 'user.name=P', ...args], {encoding: 'utf8'})
+    spawnSync('git', ['init', '-q', '-b', 'main', repo])
+    fs.writeFileSync(path.join(repo, 'a.md'), 'base\n')
+    git('add', '-A'); git('commit', '-q', '-m', 'base')
+    git('checkout', '-q', '-b', 'ticket')
+    fs.writeFileSync(path.join(repo, 'b.md'), 'new\n')
+    git('add', '-A'); git('commit', '-q', '-m', 'ticket')
+
+    expect(changedFilesSinceBase(repo, 'main')).toEqual(['b.md'])
+  })
+
+  it('is empty when git cannot tell', () => {
+    expect(changedFilesSinceBase('/nowhere', 'main', () => ({status: 128, stdout: '', stderr: 'fatal'}))).toEqual([])
   })
 })
