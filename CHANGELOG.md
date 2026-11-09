@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.52.2] - 2026-11-09
+
+### Changed
+
+- **Il supporter decide le domande aperte con la scelta prudente.** Se una scelta sicura esiste la prende, approva e la scrive nelle note per chi scrive il codice, invece di passare il piano a una persona. (CYRA-1197)
+- **Un piano che tocca la CI torna al pianificatore.** Le macchine non possono cambiare i file in .github/workflows: il supporter ora chiede di toglierli dal piano invece di passarlo a una persona. (CYRA-1197)
+
 ## [0.52.1] - 2026-11-09
 
 ### Fixed

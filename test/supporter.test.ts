@@ -167,11 +167,28 @@ describe('buildSupporterPlanPrompt', () => {
   it('offers "revise" for gaps the planner can fix', () => {
     expect(buildSupporterPlanPrompt(planRound)).toContain('"revise"')
   })
+
+  it('settles an open point with a safe default instead of handing it to a person (CYRA-1197)', () => {
+    const prompt = buildSupporterPlanPrompt(planRound)
+    expect(prompt).toContain('an open point with a safe default is not a reason to escalate')
+    expect(prompt).toContain('implementation_notes')
+  })
+
+  it('sends back a plan the automation cannot deliver instead of handing it to a person (CYRA-1197)', () => {
+    const prompt = buildSupporterPlanPrompt(planRound)
+    expect(prompt).toContain('.github/workflows')
+    expect(prompt).toContain('set "revise" so the planner drops those files')
+  })
 })
 
 describe('parseSupporterPlanVerdict', () => {
   it('reads the verdict object, even after prose', () => {
     expect(parseSupporterPlanVerdict(`Done reading.\n${JSON.stringify({verdict})}`)).toEqual(verdict)
+  })
+
+  it('keeps the notes the supporter writes for the implementer (CYRA-1197)', () => {
+    const parsed = parseSupporterPlanVerdict(JSON.stringify({verdict: {...verdict, implementation_notes: 'Keep the wording.'}}))
+    expect(parsed?.implementation_notes).toBe('Keep the wording.')
   })
 
   it('accepts "revise", which sends a plan with fixable gaps back to the planner (CYRA-1197)', () => {
