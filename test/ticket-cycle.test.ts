@@ -5,7 +5,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest'
 
 import {normalizeAgentResult} from '../src/lib/agent-result'
 import {BUSY_MARKER_FILE, type BusyMarker, readBusyMarker} from '../src/lib/busy-marker'
-import {loadQualityGate} from '../src/lib/quality-gate'
+import {EmulatorTestConfigSchema, loadQualityGate} from '../src/lib/quality-gate'
 import {readRun, recordCheckpoint, runPath, saveRun} from '../src/lib/state'
 import {
   attestAutomaticGateConfig,
@@ -1539,5 +1539,173 @@ describe('disagreementSummary (CYAU-237)', () => {
   it('names a missing answer instead of leaving the implementer side empty', () => {
     expect(disagreementSummary(previous, [{id: 1, implementerResponse: '  ', reason: 'Ancora assente.'}]))
       .toContain('Implementatore: (nessuna risposta nel resoconto)')
+  })
+})
+
+// ── CYAU-295 — the phone test, read from the base branch and run after the session ─────────────────────────
+describe('emulator test in the delivery path (CYAU-295)', () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1])
+  const emulator = {
+    platform: 'android' as const, app_id: 'it.example.app', build: 'flutter build apk --debug',
+    artifact: 'build/app.apk', avd: 'closeyourit', required: true, build_timeout: 1800, boot_timeout: 300, observe: 15,
+  }
+  const baseGate = (section: Partial<typeof emulator> | null) => ({
+    version: 1, runner: [], timeout: 10, checks: [{stage: 'lint', run: 'lint', required: true}],
+    ...(section ? {emulator: {...emulator, ...section}} : {}),
+  })
+  const skillMode = {...input, outcomeOwnedByServer: true}
+
+  async function lifecycleWith(section: Partial<typeof emulator> | null, overrides: Record<string, unknown> = {}) {
+    const loadGateAtRef = vi.fn(() => baseGate(section))
+    const publishEmulatorEvidence = vi.fn()
+    const lifecycle = await provider(temporaryDirectory(), {loadGateAtRef, publishEmulatorEvidence, ...overrides}).prepare(skillMode)
+    return {lifecycle, loadGateAtRef, publishEmulatorEvidence}
+  }
+
+  it('a project without the section turns no phone on', async () => {
+    const runEmulatorTest = vi.fn()
+    const {lifecycle} = await lifecycleWith(null, {runEmulatorTest})
+    expect(lifecycle.emulatorTestWorkflowDelivery).toBeUndefined()
+    expect(lifecycle.afterWorkflowVerificationFailure).toBeUndefined()
+    expect(runEmulatorTest).not.toHaveBeenCalled()
+  })
+
+  it('outside skill-mode the base branch is not read and no test is offered', async () => {
+    const loadGateAtRef = vi.fn(() => baseGate({}))
+    const lifecycle = await provider(temporaryDirectory(), {loadGateAtRef}).prepare(input)
+    expect(loadGateAtRef).not.toHaveBeenCalled()
+    expect(lifecycle.emulatorTestWorkflowDelivery).toBeUndefined()
+  })
+
+  it('reads the section from the base branch, so a work branch cannot drop it', async () => {
+    // The worktree loader would say "no emulator": it is never asked.
+    const runEmulatorTest = vi.fn(async () => ({status: 'passed' as const, summary: 'Prova su telefono superata.', screenshot: PNG}))
+    const {lifecycle, loadGateAtRef, publishEmulatorEvidence} = await lifecycleWith({}, {
+      runEmulatorTest, loadGate: vi.fn(() => baseGate(null)),
+    })
+    const controller = new AbortController()
+
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({state: 'delivered'}, controller.signal))
+      .resolves.toEqual({status: 'passed', summary: 'Prova su telefono superata.'})
+
+    expect(loadGateAtRef).toHaveBeenCalledWith(workspace.worktreePath, input.base)
+    expect(runEmulatorTest).toHaveBeenCalledWith({
+      config: emulator, cwd: workspace.worktreePath, ticket: input.ticket, signal: controller.signal,
+    })
+    expect(publishEmulatorEvidence).toHaveBeenCalledWith({
+      project: 'CYAU', ticket: input.ticket, headSha: 'abc123', comment: 'Prova su telefono superata.', screenshot: PNG,
+    })
+  })
+
+  it('a refused screenshot stops the delivery until the next round', async () => {
+    const runEmulatorTest = vi.fn(async () => ({status: 'passed' as const, summary: 'Superata.', screenshot: PNG}))
+    const {lifecycle} = await lifecycleWith({}, {
+      runEmulatorTest,
+      publishEmulatorEvidence: vi.fn(() => { throw new Error('caricamento della foto dello schermo non riuscito: 413') }),
+    })
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toEqual({
+      status: 'unavailable', summary: expect.stringContaining('riprova al giro successivo'),
+    })
+  })
+
+  it('a non-Error refusal is reported too, and an unknown HEAD still names the evidence', async () => {
+    const publishEmulatorEvidence = vi.fn(async () => { throw 'offline' as unknown as Error })
+    const {lifecycle} = await lifecycleWith({}, {
+      runEmulatorTest: vi.fn(async () => ({status: 'passed' as const, summary: 'Superata.', screenshot: PNG})),
+      publishEmulatorEvidence,
+      checkpointGit: {currentBranch: () => workspace.branch, headCommit: () => null, isDirty: () => false},
+    })
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toMatchObject({summary: expect.stringContaining('offline')})
+    expect(publishEmulatorEvidence).toHaveBeenCalledWith(expect.objectContaining({headSha: 'head'}))
+  })
+
+  it('a crash goes back to the agent with the log lines, and the ticket gets the first one', async () => {
+    const runEmulatorTest = vi.fn(async () => ({
+      status: 'crashed' as const, summary: 'Prova su telefono fallita: l\'app si è chiusa.',
+      evidence: ['E AndroidRuntime: FATAL EXCEPTION: main', 'E AndroidRuntime: Process: it.example.app, PID: 1'], screenshot: PNG,
+    }))
+    const {lifecycle, publishEmulatorEvidence} = await lifecycleWith({}, {runEmulatorTest})
+    publishEmulatorEvidence.mockRejectedValueOnce(new Error('ticket offline'))
+
+    const outcome = await lifecycle.emulatorTestWorkflowDelivery!({})
+
+    expect(outcome).toEqual({
+      status: 'failed',
+      summary: 'Prova su telefono fallita: l\'app si è chiusa.\nE AndroidRuntime: FATAL EXCEPTION: main\nE AndroidRuntime: Process: it.example.app, PID: 1',
+    })
+    expect(publishEmulatorEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      comment: expect.stringContaining('Prima riga dei registri: E AndroidRuntime: FATAL EXCEPTION: main'), screenshot: PNG,
+    }))
+
+    // Back to the agent, within the existing cycle budget.
+    await lifecycle.beforeRuntime()
+    const retry = await lifecycle.afterWorkflowVerificationFailure!(outcome.summary)
+    expect(retry).toMatchObject({outcome: 'retry', retryPrompt: expect.stringContaining('FATAL EXCEPTION')})
+  })
+
+  it('a crash without log lines comments its summary', async () => {
+    const {lifecycle, publishEmulatorEvidence} = await lifecycleWith({}, {
+      runEmulatorTest: vi.fn(async () => ({status: 'crashed' as const, summary: 'Non si apre.', evidence: [], screenshot: null})),
+    })
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toEqual({status: 'failed', summary: 'Non si apre.'})
+    expect(publishEmulatorEvidence).toHaveBeenCalledWith(expect.objectContaining({comment: 'Non si apre.', screenshot: null}))
+  })
+
+  it('a required test the machine cannot run stops the delivery, and says so', async () => {
+    const {lifecycle, publishEmulatorEvidence} = await lifecycleWith({}, {
+      runEmulatorTest: vi.fn(async () => ({status: 'unavailable' as const, summary: 'Prova su telefono non disponibile: niente KVM.'})),
+    })
+    publishEmulatorEvidence.mockImplementationOnce(() => { throw new Error('offline') })
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toEqual({
+      status: 'unavailable', summary: expect.stringContaining('obbligatoria: la consegna si ferma'),
+    })
+  })
+
+  it('an optional test the machine cannot run lets the delivery go on, and says so on the ticket', async () => {
+    const {lifecycle, publishEmulatorEvidence} = await lifecycleWith({required: false}, {
+      runEmulatorTest: vi.fn(async () => ({status: 'unavailable' as const, summary: 'Prova su telefono non disponibile: niente KVM.'})),
+    })
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toEqual({
+      status: 'passed', summary: expect.stringContaining('non è obbligatoria: viene saltata e la consegna prosegue'),
+    })
+    expect(publishEmulatorEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      comment: expect.stringContaining('niente KVM'), screenshot: null,
+    }))
+  })
+
+  it.each([
+    ['a busy phone', 'Prova su telefono rimandata: il telefono simulato di questa macchina è occupato da un\'altra prova.'],
+    ['a missing screenshot', 'Prova su telefono rimandata: l\'app è rimasta aperta ma la foto dello schermo non è riuscita.'],
+  ])('%s waits for the next round even when the test is optional, without writing on the ticket', async (_name, summary) => {
+    const {lifecycle, publishEmulatorEvidence} = await lifecycleWith({required: false}, {
+      runEmulatorTest: vi.fn(async () => ({status: 'unavailable' as const, retry: true as const, summary})),
+    })
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toEqual({
+      status: 'unavailable', summary: `${summary} La consegna riprova al giro successivo.`,
+    })
+    expect(publishEmulatorEvidence).not.toHaveBeenCalled()
+  })
+
+  it('a red build goes back to the agent like a crash', async () => {
+    const {lifecycle} = await lifecycleWith({required: false}, {
+      runEmulatorTest: vi.fn(async () => ({
+        status: 'crashed' as const, summary: 'Prova su telefono fallita: la costruzione dell\'app non è riuscita (exit 1).',
+        evidence: ['lib/main.dart:3:1: Error: Expected a declaration'], screenshot: null,
+      })),
+    })
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toEqual({
+      status: 'failed', summary: expect.stringContaining('Expected a declaration'),
+    })
+  })
+
+  it('a section that does not say required skips the test on a machine without the SDK and delivers', async () => {
+    const parsed = EmulatorTestConfigSchema.parse({...emulator, required: undefined})
+    expect(parsed.required).toBe(false)
+    const {lifecycle} = await lifecycleWith({required: parsed.required}, {
+      runEmulatorTest: vi.fn(async () => ({status: 'unavailable' as const, summary: 'Prova su telefono non disponibile: Android SDK assente.'})),
+    })
+    await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toEqual({
+      status: 'passed', summary: expect.stringContaining('Android SDK assente'),
+    })
   })
 })

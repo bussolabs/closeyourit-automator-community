@@ -113,6 +113,11 @@ async function dispatch(opts: {
     {status: 'passed'; summary: string; headSha: string} |
     {status: 'failed' | 'unavailable'; summary: string}
   >
+  /** CYAU-295: the phone test, after the CI and before the cross-review. */
+  emulatorTest?: (result: Record<string, unknown>) => Promise<{status: 'passed' | 'failed' | 'unavailable'; summary: string}>
+  afterVerificationFailure?: (summary: string) => Promise<
+    {outcome: 'retry'; retryPrompt: string} | {outcome: 'complete'; runStatus: 'failure'; errorCode: string}
+  >
 }) {
   const s = scenario()
   const release = vi.fn(async () => undefined)
@@ -147,6 +152,8 @@ async function dispatch(opts: {
         ...(opts.afterAccepted ? {afterAccepted: opts.afterAccepted} : {}),
         ...(opts.verify ? {verify: opts.verify} : {}),
         ...(opts.finalize ? {finalize: opts.finalize} : {}),
+        ...(opts.emulatorTest ? {emulatorTest: opts.emulatorTest} : {}),
+        ...(opts.afterVerificationFailure ? {afterVerificationFailure: opts.afterVerificationFailure} : {}),
         ...(opts.reviewOnDiff ? {reviewOnDiff: opts.reviewOnDiff} : {}),
       },
     }),
@@ -184,6 +191,94 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     expect(deliver).not.toHaveBeenCalled()
     expect(action.status).toBe('failure')
     expect(action.errorCode).toBe('C409-GATE-002')
+  })
+
+  // CYAU-295 — the phone test sits between the CI and the cross-review.
+  describe('emulator test (CYAU-295)', () => {
+    const passedCi = () => vi.fn(async () => ({status: 'passed' as const, summary: 'CI verde', headSha: 'a'.repeat(40)}))
+
+    it('runs after the CI and before the promotion and the delivery', async () => {
+      const verify = passedCi()
+      const emulatorTest = vi.fn(async () => ({status: 'passed' as const, summary: 'Prova su telefono superata.'}))
+      const finalize = vi.fn(async () => ({status: 'passed' as const, summary: 'PR ready', headSha: 'a'.repeat(40)}))
+      const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', verify, emulatorTest, finalize, deliver,
+      })
+
+      expect(emulatorTest).toHaveBeenCalledWith(AUTOPILOT_RESULT, expect.anything())
+      expect(verify.mock.invocationCallOrder[0]).toBeLessThan(emulatorTest.mock.invocationCallOrder[0])
+      expect(emulatorTest.mock.invocationCallOrder[0]).toBeLessThan(finalize.mock.invocationCallOrder[0])
+      expect(deliver).toHaveBeenCalledTimes(1)
+      expect(action.status).toBe('success')
+    })
+
+    it('a red CI does not even turn the phone on', async () => {
+      const emulatorTest = vi.fn()
+      await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', deliver: vi.fn(), emulatorTest,
+        verify: vi.fn(async () => ({status: 'failed' as const, summary: 'CI rossa'})),
+      })
+      expect(emulatorTest).not.toHaveBeenCalled()
+    })
+
+    it('a crash goes back to the agent: no review, no promotion, no delivery', async () => {
+      const emulatorTest = vi.fn(async () => ({status: 'failed' as const, summary: 'Prova su telefono fallita: crash.'}))
+      const afterVerificationFailure = vi.fn(async () => ({outcome: 'complete' as const, runStatus: 'failure' as const, errorCode: 'C409-CYCLE-001'}))
+      const finalize = vi.fn()
+      const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot',
+        verify: passedCi(), emulatorTest, afterVerificationFailure, finalize, deliver,
+      })
+
+      expect(afterVerificationFailure).toHaveBeenCalledWith('Prova su telefono fallita: crash.')
+      expect(finalize).not.toHaveBeenCalled()
+      expect(deliver).not.toHaveBeenCalled()
+      expect(action.status).toBe('failure')
+      expect(action.errorCode).toBe('C409-CYCLE-001')
+    })
+
+    it('after a crash the agent works again and the next green test delivers once', async () => {
+      const emulatorTest = vi.fn()
+        .mockResolvedValueOnce({status: 'failed' as const, summary: 'crash'})
+        .mockResolvedValueOnce({status: 'passed' as const, summary: 'ok'})
+      const afterVerificationFailure = vi.fn(async () => ({outcome: 'retry' as const, retryPrompt: 'Correggi il crash.'}))
+      const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+
+      await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', authorizedCwd: dir,
+        emulatorTest, afterVerificationFailure, deliver,
+      })
+
+      expect(emulatorTest).toHaveBeenCalledTimes(2)
+      expect(deliver).toHaveBeenCalledTimes(1)
+    })
+
+    it('a crash without a way back is a failed gate', async () => {
+      const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', deliver,
+        emulatorTest: vi.fn(async () => ({status: 'failed' as const, summary: 'crash'})),
+      })
+      expect(deliver).not.toHaveBeenCalled()
+      expect(action.errorCode).toBe('C409-GATE-002')
+    })
+
+    it('a machine that cannot run a required test stops the delivery as unavailable, never as a crash', async () => {
+      const afterVerificationFailure = vi.fn()
+      const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', deliver, afterVerificationFailure,
+        emulatorTest: vi.fn(async () => ({status: 'unavailable' as const, summary: 'niente KVM'})),
+      })
+      expect(afterVerificationFailure).not.toHaveBeenCalled()
+      expect(deliver).not.toHaveBeenCalled()
+      expect(action.status).toBe('failure')
+      expect(action.errorCode).toBe('C503-GATE-004')
+    })
   })
 
   it('non-attestable draft→ready promotion: does not deliver to the server', async () => {

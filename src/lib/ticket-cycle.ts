@@ -33,8 +33,16 @@ import {
   runGate,
   type GateReport,
   type QualityGateConfig,
+  type EmulatorTestConfig,
   type RunCheck,
 } from './quality-gate'
+import {
+  publishEmulatorEvidence,
+  runEmulatorTest,
+  type EmulatorEvidenceInput,
+  type EmulatorTestInput,
+  type EmulatorTestReport,
+} from './emulator-test'
 import {
   finalizeRemoteQualityGate,
   verifyRemoteQualityGate,
@@ -163,6 +171,17 @@ export type WorkflowDeliveryVerification =
   | {status: 'failed'; summary: string}
   | {status: 'unavailable'; summary: string}
 
+/**
+ * CYAU-295 — the outcome of the phone test: `failed` is a crash or a red build (back to the agent), `unavailable` a
+ * machine that could not run a REQUIRED test, a test to retry later (phone busy, no screenshot) or a ticket that
+ * refused the evidence (the delivery stops). An optional test the machine could not run is `passed`, and its summary
+ * says so.
+ */
+export interface WorkflowEmulatorVerification {
+  status: 'passed' | 'failed' | 'unavailable'
+  summary: string
+}
+
 export interface TicketRunLifecycle {
   runId: string
   authorizedCwd: string
@@ -178,7 +197,9 @@ export interface TicketRunLifecycle {
   verifyWorkflowDelivery?(result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowDeliveryVerification>
   /** Draft→ready after the cross-review, with a new SHA attestation. */
   finalizeWorkflowDelivery?(result: Record<string, unknown>, verifiedSha: string, signal?: AbortSignal): Promise<WorkflowDeliveryVerification>
-  /** A red CI goes back to the implementer without delivering an attempt to the server. */
+  /** CYAU-295 — the phone test declared by the base branch: after the remote CI, before the cross-review. */
+  emulatorTestWorkflowDelivery?(result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowEmulatorVerification>
+  /** A red CI (or a crash on the emulated phone) goes back to the implementer without delivering an attempt. */
   afterWorkflowVerificationFailure?(summary: string): Promise<TicketRunAfterResult>
   /** The terminal checkpoint is created only after the server's actual acceptance. */
   afterWorkflowAccepted?(): Promise<TicketRunAfterResult>
@@ -257,6 +278,10 @@ export interface TicketCycleOptions {
   loadGateAtRef?: (cwd: string, ref: string) => QualityGateConfig | null
   verifyRemoteGate?: (input: RemoteGateInput, signal?: AbortSignal) => Promise<RemoteGateResult>
   finalizeRemoteGate?: (input: RemoteGateInput, verifiedSha: string) => Promise<RemoteGateResult>
+  /** CYAU-295 — runs the phone test on the ticket worktree; never throws. */
+  runEmulatorTest?: (input: EmulatorTestInput) => Promise<EmulatorTestReport>
+  /** CYAU-295 — screenshot and outcome on the ticket; throws when the service refuses them. */
+  publishEmulatorEvidence?: (input: EmulatorEvidenceInput) => void | Promise<void>
   /** Explicit capability for the CYAU-37 remote effects. Missing leaves the cycle in `in_review`. */
   delivery?: TicketCycleDeliveryOptions | ((input: TicketCycleInput) => TicketCycleDeliveryOptions)
 }
@@ -503,6 +528,8 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
   const loadTrustedGate = options.loadGateAtRef ?? loadQualityGateAtRef
   const verifyRemote = options.verifyRemoteGate ?? ((input, signal) => verifyRemoteQualityGate(input, {}, signal))
   const finalizeRemote = options.finalizeRemoteGate ?? ((input, sha) => finalizeRemoteQualityGate(input, sha))
+  const executeEmulatorTest = options.runEmulatorTest ?? ((input) => runEmulatorTest(input))
+  const publishEvidence = options.publishEmulatorEvidence ?? ((input) => publishEmulatorEvidence(input))
 
   return {
     async prepare(input) {
@@ -598,11 +625,14 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
       // The remote policy comes from the already trusted BASE branch. Reading it from the worktree would let the same PR
       // under review remove a mandatory check and self-certify. A v1/missing one keeps the legacy
       // path; a v2 enables the CI attestation without changing the behaviour of non-migrated repositories.
+      // CYAU-295 — the phone test takes the same road: a work branch that drops the section cannot switch it off.
       let remoteConfig: Extract<QualityGateConfig, {version: 2}>['remote'] | null = null
+      let emulatorConfig: EmulatorTestConfig | null = null
       if (input.outcomeOwnedByServer) {
         try {
           const trustedGate = loadTrustedGate(prepared.worktreePath, input.base)
           if (trustedGate?.version === 2) remoteConfig = trustedGate.remote
+          if (trustedGate?.emulator) emulatorConfig = trustedGate.emulator
         } catch {
           move('blocked', prepared)
           throw new Error('quality gate del ramo base non interpretabile (fail-closed)')
@@ -1083,6 +1113,48 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
             if (!prUrl) return {status: 'failed' as const, summary: 'risultato senza consegna PR attestabile'}
             return normalizeRemoteResult(await finalizeRemote(remoteInput(prUrl), verifiedSha))
           },
+        } : {}),
+        ...(emulatorConfig ? {
+          async emulatorTestWorkflowDelivery(_result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowEmulatorVerification> {
+            const config = emulatorConfig!
+            const report = await executeEmulatorTest({
+              config, cwd: prepared.worktreePath, ticket: input.ticket, signal: signal ?? input.signal,
+            })
+            const headSha = git.headCommit(prepared.worktreePath) ?? 'head'
+            const publish = async (comment: string, screenshot: Buffer | null): Promise<void> => {
+              await publishEvidence({project: input.project, ticket: input.ticket, headSha, comment, screenshot})
+            }
+            if (report.status === 'passed') {
+              // The evidence on the ticket is part of the test: without it the delivery waits for the next round.
+              try {
+                await publish(report.summary, report.screenshot)
+              } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error)
+                return {
+                  status: 'unavailable',
+                  summary: redactSecrets(`${report.summary} L'esito non è arrivato sul ticket (${detail}): la consegna riprova al giro successivo.`),
+                }
+              }
+              return {status: 'passed', summary: report.summary}
+            }
+            if (report.status === 'crashed') {
+              const first = report.evidence[0]
+              // The work goes back to the agent anyway: a ticket that refuses the evidence changes nothing here.
+              await publish(first ? `${report.summary} Prima riga dei registri: ${clip(first).slice(0, 120)}` : report.summary, report.screenshot)
+                .catch(() => undefined)
+              return {status: 'failed', summary: [report.summary, ...report.evidence].join('\n')}
+            }
+            // The machine can run the test, just not now (phone busy, no screenshot): waiting is not skipping, even
+            // for an optional test. Nothing is written on the ticket, or every busy round would add a comment.
+            if (report.retry) return {status: 'unavailable', summary: `${report.summary} La consegna riprova al giro successivo.`}
+            const note = config.required
+              ? `${report.summary} La prova è obbligatoria: la consegna si ferma.`
+              : `${report.summary} La prova non è obbligatoria: viene saltata e la consegna prosegue.`
+            await publish(note, null).catch(() => undefined)
+            return {status: config.required ? 'unavailable' : 'passed', summary: note}
+          },
+        } : {}),
+        ...(remoteConfig || emulatorConfig ? {
           async afterWorkflowVerificationFailure(summary: string) {
             return retryAfterWorkflowFinding(summary)
           },

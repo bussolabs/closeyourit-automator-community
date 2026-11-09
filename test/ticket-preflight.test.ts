@@ -1870,6 +1870,7 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
           ...(await prepare(input)),
           verifyWorkflowDelivery: vi.fn(),
           finalizeWorkflowDelivery: vi.fn(),
+          emulatorTestWorkflowDelivery: vi.fn(),
           afterWorkflowVerificationFailure: vi.fn(),
         })) as typeof cycle.prepare
         return cycle
@@ -1878,12 +1879,15 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
 
       const autopilot = await preflightCon(approved, 'autopilot', undefined, cycleWithRemoteGate())
       expect(autopilot.workflowDelivery?.verify).toBeTypeOf('function')
+      // CYAU-295 — the phone test checks the app the PR delivers: autopilot only.
+      expect(autopilot.workflowDelivery?.emulatorTest).toBeTypeOf('function')
 
       for (const phase of ['closer_staging', 'closer_production']) {
         const result = await preflightCon(approved, phase, undefined, cycleWithRemoteGate())
         expect(result.outcome).toBe('admit')
         expect(result.workflowDelivery?.verify).toBeUndefined()
         expect(result.workflowDelivery?.finalize).toBeUndefined()
+        expect(result.workflowDelivery?.emulatorTest).toBeUndefined()
       }
     })
 

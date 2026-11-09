@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-11-09
+
+### Added
+
+- **Prova su telefono simulato prima della consegna.** Un progetto può chiedere nel file dei controlli di qualità, letto solo dal ramo principale, che la macchina costruisca l'app, la installi e la apra su un telefono simulato dopo la sessione dell'agente. La costruzione dell'app gira negli stessi limiti delle sessioni, con memoria e processori limitati, credenziali nascoste e rete chiusa se il progetto non la apre. La foto dello schermo e l'esito arrivano sul ticket; un crash o una costruzione rossa rimandano il lavoro all'agente, una foto mancante o rifiutata e un emulatore occupato fermano la consegna fino al giro dopo, e una macchina senza emulatore salta la prova e lo scrive sul ticket, fermando la consegna solo se il progetto la dichiara obbligatoria. Il battito dichiara emulatore e adb. (CYAU-295)
+
 ## [0.52.3] - 2026-11-09
 
 ### Fixed

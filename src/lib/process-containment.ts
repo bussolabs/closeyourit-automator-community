@@ -16,6 +16,26 @@ export interface ContainmentCommand {
    * On a prepared command: when set, the wrapper is spawned with exactly this environment.
    */
   env?: NodeJS.ProcessEnv
+  /** CYAU-295 — cgroup limits of the unit (systemd backend only), e.g. `{memoryMax: '50%', cpuQuota: '200%'}`. */
+  limits?: ContainmentLimits
+}
+
+export interface ContainmentLimits {
+  memoryMax?: string
+  cpuQuota?: string
+}
+
+const LIMIT_VALUE = /^[1-9][0-9]{0,5}(%|[KMGT])?$/
+
+/** systemd-run properties of the limits; a malformed value throws instead of reaching the service manager. */
+function limitProperties(limits: ContainmentLimits | undefined): string[] {
+  const properties: string[] = []
+  for (const [property, value] of [['MemoryMax', limits?.memoryMax], ['CPUQuota', limits?.cpuQuota]] as const) {
+    if (value === undefined) continue
+    if (!LIMIT_VALUE.test(value) || (property === 'CPUQuota' && !value.endsWith('%'))) throw new Error(`limite ${property} non valido`)
+    properties.push(`--property=${property}=${value}`)
+  }
+  return properties
 }
 
 export interface StrongContainmentHandle {
@@ -177,6 +197,7 @@ export function createSystemdContainmentBackend(
     async prepare(command) {
       const availability = await backend.available()
       if (!availability.available) throw new Error(availability.detail ?? 'strong containment non disponibile')
+      const limits = limitProperties(command.limits)
       const id = io.randomId()
       if (!/^[a-f0-9]{32}$/.test(id)) throw new Error('identita containment non valida')
       const unit = `automator-action-${id}.scope`
@@ -206,7 +227,7 @@ export function createSystemdContainmentBackend(
           args: [
             '--user', '--scope', '--quiet', '--collect', '--expand-environment=no', `--unit=${unit}`,
             '--property=KillMode=control-group', '--property=SendSIGKILL=yes',
-            '--property=TimeoutStopSec=1ms', '--', command.cmd, ...command.args,
+            '--property=TimeoutStopSec=1ms', ...limits, '--', command.cmd, ...command.args,
           ],
         },
         async signal(signal) {

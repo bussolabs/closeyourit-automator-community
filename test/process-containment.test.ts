@@ -79,6 +79,20 @@ describe('systemd strong containment', () => {
     expect(calls.filter((args) => args.includes('--version'))).toHaveLength(1)
   })
 
+  it('applies memory and CPU limits to the cgroup, and refuses a malformed one (CYAU-295)', async () => {
+    const backend = createSystemdContainmentBackend(fakeIo().io)
+    const handle = await backend.prepare({...command, limits: {memoryMax: '50%', cpuQuota: '200%'}})
+    expect(handle.command.args).toEqual(expect.arrayContaining(['--property=MemoryMax=50%', '--property=CPUQuota=200%']))
+    expect(handle.command.args.indexOf('--property=CPUQuota=200%')).toBeLessThan(handle.command.args.indexOf('--'))
+    const memoryOnly = await backend.prepare({...command, limits: {memoryMax: '4G'}})
+    expect(memoryOnly.command.args.filter((arg) => arg.startsWith('--property=Memory') || arg.startsWith('--property=CPU')))
+      .toEqual(['--property=MemoryMax=4G'])
+
+    await expect(backend.prepare({...command, limits: {memoryMax: '1G --property=Delegate=yes'}})).rejects.toThrow(/MemoryMax non valido/)
+    await expect(backend.prepare({...command, limits: {cpuQuota: '2G'}})).rejects.toThrow(/CPUQuota non valido/)
+    await expect(backend.prepare({...command, limits: {memoryMax: '0'}})).rejects.toThrow(/MemoryMax non valido/)
+  })
+
   it('SIGTERM and SIGKILL target the cgroup by unique identity, not a reusable PID', async () => {
     const {io, calls} = fakeIo()
     const handle = await createSystemdContainmentBackend(io).prepare(command)

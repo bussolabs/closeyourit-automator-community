@@ -1728,6 +1728,9 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               ...(deliversPr && ticketRun?.finalizeWorkflowDelivery ? {
                 finalize: ticketRun.finalizeWorkflowDelivery.bind(ticketRun),
               } : {}),
+              ...(deliversPr && ticketRun?.emulatorTestWorkflowDelivery ? {
+                emulatorTest: ticketRun.emulatorTestWorkflowDelivery.bind(ticketRun),
+              } : {}),
               ...(deliversPr && ticketRun?.afterWorkflowVerificationFailure ? {
                 afterVerificationFailure: ticketRun.afterWorkflowVerificationFailure.bind(ticketRun),
               } : {}),

@@ -182,6 +182,10 @@ describe('buildCapabilities', () => {
       expect(typeof rt.required).toBe('boolean')
       expect(rt).not.toHaveProperty('bin')
     }
+    // CYAU-295 — the panel sees which machines can run the phone test; neither tool is required.
+    const android = caps.runtimes.filter((rt) => rt.name === 'android-emulator' || rt.name === 'adb')
+    expect(android.map((rt) => rt.name)).toEqual(['android-emulator', 'adb'])
+    expect(android.every((rt) => rt.required === false)).toBe(true)
   })
 
   it('capabilities without secrets: only the keys leave the repositories, never cwd or token', () => {

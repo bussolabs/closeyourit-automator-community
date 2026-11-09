@@ -18,6 +18,7 @@ import {
   type TicketRunAfterResult,
   type TicketRunLifecycle,
   type WorkflowDeliveryVerification,
+  type WorkflowEmulatorVerification,
   testSlotFor,
 } from './ticket-cycle'
 import {
@@ -166,6 +167,8 @@ export interface WorkflowDelivery {
   verify?(result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowDeliveryVerification>
   /** Promotes the draft PR only after green CI and cross-review, re-attesting the SHA. */
   finalize?(result: Record<string, unknown>, verifiedSha: string, signal?: AbortSignal): Promise<WorkflowDeliveryVerification>
+  /** CYAU-295 — the phone test, after the CI and before the cross-review. */
+  emulatorTest?(result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowEmulatorVerification>
   /** Brings a red CI back to the implementer cycle without delivering the result to the server. */
   afterVerificationFailure?(summary: string): Promise<TicketRunAfterResult>
   /** Closes the local state only after the server has accepted the delivery. */
@@ -1158,6 +1161,22 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                     lifecycleResult = {
                       outcome: 'complete', runStatus: 'failure',
                       errorCode: verification.status === 'failed' ? ErrorCodes.Gate.failed : ErrorCodes.Gate.unavailable,
+                    }
+                  }
+                  return
+                }
+              }
+              // CYAU-295 — the phone test runs on the machine, after the CI and before paying a reviewer. A crash goes
+              // back to the agent like a red CI; a machine that cannot run a required test stops the delivery.
+              if (workflowDelivery.emulatorTest) {
+                const emulator = await workflowDelivery.emulatorTest(structured, lifecycleSignal)
+                if (emulator.status !== 'passed') {
+                  if (emulator.status === 'failed' && workflowDelivery.afterVerificationFailure) {
+                    lifecycleResult = await workflowDelivery.afterVerificationFailure(emulator.summary)
+                  } else {
+                    lifecycleResult = {
+                      outcome: 'complete', runStatus: 'failure',
+                      errorCode: emulator.status === 'failed' ? ErrorCodes.Gate.failed : ErrorCodes.Gate.unavailable,
                     }
                   }
                   return

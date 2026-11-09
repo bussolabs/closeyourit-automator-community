@@ -335,6 +335,51 @@ Ogni comando supporta `--json`.
   HEAD locale/remoto, aspetta la CI, avvia la cross-review, riattesta lo SHA, rende pronta la PR e soltanto dopo
   consegna il risultato al server. Rosso, check mancante, timeout, push concorrente o risposta GitHub illeggibile
   non avanzano né PR né ticket.
+- **Prova su telefono simulato** (CYAU-295). Un progetto mobile la attiva con una sezione facoltativa `emulator`
+  in `.closeyourit/quality-gate.yml` (versione 1 o 2), letta come `remote` solo dal ref base fidato: un ramo di
+  lavoro che la toglie non la spegne.
+
+  ```yaml
+  emulator:
+    platform: android            # unico valore ammesso
+    app_id: it.example.app       # application id da aprire
+    build: flutter build apk --debug
+    artifact: build/app/outputs/flutter-apk/app-debug.apk   # relativo al worktree
+    avd: closeyourit             # AVD da avviare (default closeyourit)
+    required: false              # default: senza SDK o emulatore la prova si salta e la consegna prosegue
+    network: false               # default: la costruzione gira senza rete; true se scarica dipendenze (Gradle, pub)
+    build_timeout: 1800          # secondi, max 3600
+    boot_timeout: 300            # secondi, max 900
+    observe: 15                  # secondi in cui l'app deve restare aperta, max 120
+  ```
+
+  Dopo la sessione dell'agente e la verifica della CI, prima della cross-review, la macchina costruisce l'app
+  negli stessi limiti delle sessioni: uno scope systemd come le azioni `containment: strong` (metà della memoria
+  e metà dei processori della macchina, tutto il gruppo spento al timeout) e dentro bubblewrap con il filesystem
+  in sola lettura, scrittura solo nel worktree e in `<stateDir>/emulator-build/<ticket>`, nessuna credenziale
+  gestita nell'ambiente, nascosti i percorsi negati alle sessioni (`~/.config/gh`, config dell'Automator, home
+  di Claude e Codex, keyring, socket di systemd/D-Bus/Docker/Incus) più `~/.config`, `~/.ssh`, `~/.gnupg`,
+  `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.aws`, `~/.docker`, `~/.kube` e le cartelle di stato, config
+  e dati dell'Automator (gli altri worktree compresi). La rete è chiusa salvo `network: true`, che vale solo
+  letto dal ramo base. Poi avvia un emulatore senza finestra sulla porta 5584 (`-read-only`, un solo emulatore
+  per macchina con `<stateDir>/emulator.lock`), installa e apre l'app, legge `logcat` e scatta una foto dello
+  schermo; emulatore e processi si spengono anche dopo errore, timeout o annullamento. La foto viene allegata al
+  ticket con `cyi tickets attach` (nome `emulatore-<sha>.png`, mai due volte per lo stesso commit) e un commento
+  riporta l'esito. Un crash, o una costruzione che esce con errore, rimanda il lavoro all'agente nel limite dei
+  giri. Una prova superata vale solo con la foto: se la foto non arriva, o il ticket la rifiuta, la consegna si
+  ferma e riprova al giro dopo; lo stesso se l'emulatore è occupato da un altro ticket per oltre 45 minuti. Se
+  la macchina non può fare la prova (avvio lento, strumenti o comando di costruzione assenti, file prodotto
+  mancante, contenimento non disponibile) la prova è «non disponibile», mai un crash: di default la consegna
+  prosegue e lo scrive sul ticket; con `required: true` la consegna si ferma. Un crash la ferma in ogni caso.
+  Sulla macchina servono `/dev/kvm` leggibile e scrivibile dall'utente del servizio, `/usr/bin/bwrap`, systemd
+  ≥ 254 con cgroup v2 e il gestore utente raggiungibile (come per `containment: strong`), l'Android SDK con
+  `emulator` e `platform-tools` (da `ANDROID_SDK_ROOT`/`ANDROID_HOME` o dal PATH del servizio), un AVD con il
+  nome dichiarato e la toolchain della costruzione già installata fuori dalle cartelle nascoste (la cache di
+  Gradle e pub viene scaricata in `<stateDir>/emulator-build`). Il battito dichiara `android-emulator` (presente
+  solo con KVM) e `adb`, entrambi non obbligatori, chiedendo la loro versione una sola volta per binario: dal
+  pannello si vede quali macchine possono fare la prova. Un Automator più
+  vecchio rifiuta il file con la nuova sezione e ferma il ticket: meglio fermarsi che saltare una prova
+  richiesta.
 - Il tetto di lavorazioni in parallelo (`limits.max_parallel`) vale anche con **un solo progetto in coda**: in
   skill-mode il dispatch chiede lavoro con la presa in carico atomica (`POST /api/v1/ticket_queue/next_claim`),
   dove il server sceglie il candidato e prende il lease nella stessa transazione. Richieste concorrenti sulla

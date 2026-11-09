@@ -145,7 +145,7 @@ export const ESCAPE_SOCKET_PATHS = [
   '/run/incus',
 ] as const
 
-const SANDBOX_DENIED_READ_PATHS = [
+export const SANDBOX_DENIED_READ_PATHS = [
   '~/.config/gh',
   '~/.config/closeyourit-automator',
   '~/.claude',

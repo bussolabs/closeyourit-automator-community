@@ -173,6 +173,61 @@ describe('quality-gate — schema and loader (versioned per-repository config)',
   })
 })
 
+// CYAU-295 — the optional test on an emulated phone, run by the Automator after the session.
+describe('quality-gate — emulator section', () => {
+  const emulator = [
+    'emulator:',
+    '  platform: android',
+    '  app_id: it.example.app',
+    '  build: flutter build apk --debug',
+    '  artifact: build/app/outputs/flutter-apk/app-debug.apk',
+  ].join('\n')
+
+  it('is optional: a config without it is unchanged', () => {
+    const r = validateQualityGate(writeConfig('version: 1\nchecks:\n  - {stage: unit, run: x}\n'))
+    expect(r.ok && r.config.emulator).toBeUndefined()
+  })
+
+  it('accepts it in v1 and v2, optional for a machine without the emulator by default', () => {
+    for (const head of [
+      'version: 1\nchecks:\n  - {stage: unit, run: x}\n',
+      'version: 2\nchecks:\n  - {stage: unit, run: x}\nremote: {provider: github, required_checks: [ci]}\n',
+    ]) {
+      const r = validateQualityGate(writeConfig(`${head}${emulator}\n`))
+      expect(r.ok).toBe(true)
+      if (r.ok) {
+        expect(r.config.emulator).toEqual({
+          platform: 'android', app_id: 'it.example.app', build: 'flutter build apk --debug',
+          artifact: 'build/app/outputs/flutter-apk/app-debug.apk', avd: 'closeyourit',
+          required: false, network: false, build_timeout: 1800, boot_timeout: 300, observe: 15,
+        })
+      }
+    }
+  })
+
+  it('takes the declared limits and the optional flag', () => {
+    const r = validateQualityGate(writeConfig(
+      `version: 1\nchecks:\n  - {stage: unit, run: x}\n${emulator}\n  required: true\n  network: true\n  avd: pixel_7\n  observe: 30\n  boot_timeout: 600\n  build_timeout: 900\n`,
+    ))
+    expect(r.ok && r.config.emulator).toMatchObject({required: true, network: true, avd: 'pixel_7', observe: 30, boot_timeout: 600, build_timeout: 900})
+  })
+
+  it.each([
+    ['an unknown key', `${emulator}\n  headless: true`],
+    ['another platform', emulator.replace('android', 'ios')],
+    ['an invalid application id', emulator.replace('it.example.app', 'app; rm -rf /')],
+    ['an absolute artifact', emulator.replace('build/app', '/tmp/app')],
+    ['an artifact outside the worktree', emulator.replace('build/app', '../other/app')],
+    ['an observation beyond two minutes', `${emulator}\n  observe: 600`],
+    ['an AVD name with a path', `${emulator}\n  avd: ../avd`],
+    ['a network that is not a flag', `${emulator}\n  network: open`],
+  ])('rejects %s', (_name, section) => {
+    const r = validateQualityGate(writeConfig(`version: 1\nchecks:\n  - {stage: unit, run: x}\n${section}\n`))
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.issues.some((issue) => issue.path.startsWith('emulator'))).toBe(true)
+  })
+})
+
 describe('quality-gate — ordering and command building (mise + timeout)', () => {
   it('isGateStage recognises only the known stages', () => {
     expect(isGateStage('security')).toBe(true)

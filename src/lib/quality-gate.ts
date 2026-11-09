@@ -51,6 +51,47 @@ export const RemoteQualityGateConfigSchema = z
   .strict()
 export type RemoteQualityGateConfig = z.infer<typeof RemoteQualityGateConfigSchema>
 
+/** CYAU-295 — an artifact path: relative, inside the worktree, never a parent segment. */
+const RelativeArtifactSchema = z.string().trim().min(1).refine(
+  (value) => !value.startsWith('/') && !value.split(/[\\/]/).includes('..'),
+  'il file prodotto deve stare dentro il worktree (percorso relativo, senza "..")',
+)
+
+/**
+ * CYAU-295 — the test on an emulated phone, run by the Automator AFTER the agent session (which is confined and cannot
+ * reach the virtualization). Like `remote`, it is honoured only when read from the trusted base branch.
+ */
+export const EmulatorTestConfigSchema = z
+  .object({
+    platform: z.literal('android'),
+    /** The Android application id the emulator launches (e.g. `it.closeyour.app`). */
+    app_id: z.string().regex(/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/, 'application id Android non valido'),
+    /** Shell command that builds the test version, run confined (writes only in the worktree and a scratch folder). */
+    build: z.string().trim().min(1),
+    /** The produced APK, relative to the worktree root. */
+    artifact: RelativeArtifactSchema,
+    /** The Android Virtual Device to boot: it must exist on the machine. */
+    avd: z.string().regex(/^[A-Za-z0-9._-]+$/, 'nome AVD non valido').default('closeyourit'),
+    /**
+     * Optional by default: a machine without the SDK or the emulator skips the test with a clear note and the delivery
+     * goes on. `required: true` makes that machine stop the delivery instead. A crash blocks in both cases.
+     */
+    required: z.boolean().default(false),
+    /**
+     * Network for the build. Closed by default: the build runs code of the work branch on the machine. A project whose
+     * build downloads its dependencies (Gradle, pub) opens it here, on the base branch, where a work branch cannot.
+     */
+    network: z.boolean().default(false),
+    /** Seconds allowed to the build. */
+    build_timeout: z.number().int().positive().max(3600).default(1800),
+    /** Seconds allowed to the emulator boot: exceeding it means "test unavailable", never "app crashed". */
+    boot_timeout: z.number().int().positive().max(900).default(300),
+    /** Seconds the app must stay open without crashing for the test to pass. */
+    observe: z.number().int().positive().max(120).default(15),
+  })
+  .strict()
+export type EmulatorTestConfig = z.infer<typeof EmulatorTestConfigSchema>
+
 /** A declared check: the phase, the shell command, whether it is required (default yes: fail-closed), the timeout. */
 export const GateCheckSchema = z
   .object({
@@ -71,6 +112,8 @@ const QualityGateBaseSchema = z.object({
     /** Global timeout (seconds), used by the checks without their own `timeout`. */
     timeout: TimeoutSchema.default(DEFAULT_GATE_TIMEOUT_S),
     checks: z.array(GateCheckSchema).min(1, 'almeno una verifica richiesta'),
+    /** CYAU-295 — optional test on an emulated phone, run by the Automator after the session. */
+    emulator: EmulatorTestConfigSchema.optional(),
   })
 
 /**

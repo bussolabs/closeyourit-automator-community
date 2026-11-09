@@ -9,6 +9,7 @@ import {readUpdateFailure, type UpdateFailureStop} from './update-outcome'
 import {type HangBeatTarget, type HangReport} from './hang-watchdog'
 import {detectPlatform} from './service'
 import {agentQuotaReport, type AgentQuotaReport} from './agent-quota'
+import {emulatorToolRuntimes} from './emulator-test'
 
 // Heartbeat to CloseYourIt: POST check_in to a cron monitor. Zero-config server-side (the monitor
 // is born at the first ping); if the daemon dies, the pings stop and CloseYourIt raises the `cron_missed` alert.
@@ -126,7 +127,8 @@ export function buildCapabilities(input: CapabilitiesInput = {}): HostCapabiliti
     ...(input.version ? {automator_version: input.version} : {}),
     platform: input.platform ?? detectPlatform(),
     arch: input.arch ?? process.arch,
-    runtimes: input.runtimes ?? collectRuntimes(),
+    // CYAU-295 — emulator and adb are optional: they say which machines can run the phone test.
+    runtimes: input.runtimes ?? [...collectRuntimes(), ...emulatorToolRuntimes()],
     repositories: Object.keys(input.hosts ?? {}),
     running: input.running ?? 0,
     slots: input.slots ?? 1,
