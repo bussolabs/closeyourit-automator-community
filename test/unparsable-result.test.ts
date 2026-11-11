@@ -1,7 +1,11 @@
 import {describe, expect, it} from 'vitest'
 import {
+  CYCLE_LIMIT_HUMAN_ACTION,
+  CYCLE_LIMIT_REASON_PREFIX,
   UNPARSABLE_REASON_CHARS,
   UNPARSABLE_TECHNICAL_DETAIL_CHARS,
+  cycleLimitBlockedResult,
+  cycleLimitReason,
   syntheticBlockedResult,
   unparsableReason,
 } from '../src/lib/unparsable-result'
@@ -58,5 +62,31 @@ describe('syntheticBlockedResult — measured conflict with main', () => {
   it('keeps unknown and retryable without a measured conflict', () => {
     const result = syntheticBlockedResult({phase: 'autopilot', code: 'STRA-47', issues: ['x: y'], stdout: '{}'})
     expect(result).toMatchObject({failure: {category: 'unknown', retryable: true}})
+  })
+})
+
+// CYAU-306 — red checks on the last allowed round: a block the server must NOT retry, with the CI's reason.
+describe('cycleLimitBlockedResult', () => {
+  it('declares a failed check, not retryable, with the reason and the human action', () => {
+    const result = cycleLimitBlockedResult({code: 'CYAU-306', summary: 'CI rossa: ci / ci-gate'})
+    expect(result).toEqual({
+      contract_version: 2, code: 'CYAU-306', state: 'blocked', security_findings: [],
+      failure: {
+        category: 'quality_gate', retryable: false,
+        summary: `${CYCLE_LIMIT_REASON_PREFIX}CI rossa: ci / ci-gate`,
+        human_action: CYCLE_LIMIT_HUMAN_ACTION,
+      },
+    })
+  })
+
+  it('reuses the redaction of the unreadable result: redacted and cleaned BEFORE the cut', () => {
+    const token = `cyi_ah_${'D'.repeat(24)}`
+    const padding = 'x'.repeat(UNPARSABLE_REASON_CHARS - 12)
+    const reason = cycleLimitReason(`${padding} \u001b[31m${token}`)
+    expect(reason.startsWith(CYCLE_LIMIT_REASON_PREFIX)).toBe(true)
+    expect(reason).not.toContain(token)
+    expect(reason).not.toContain(token.slice(0, 12))
+    expect(reason).not.toContain('\u001b')
+    expect(reason.length).toBeLessThanOrEqual(CYCLE_LIMIT_REASON_PREFIX.length + UNPARSABLE_REASON_CHARS + 1)
   })
 })

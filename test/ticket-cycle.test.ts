@@ -939,6 +939,33 @@ describe('persistent ticket cycle', () => {
     expect(calls).toEqual({commit: 1, push: 1, pr: 1, link: 1, status: []})
   })
 
+  it('CYAU-279: link and conditions of the ticket card reach the PR the automatic delivery opens', async () => {
+    const runsBase = temporaryDirectory()
+    const bodies: string[] = []
+    const url = 'https://app.closeyour.it/projects/CYAU/tickets/CYAU-35'
+    const delivery = {
+      authorized: true,
+      git: {commitApproved: () => 'd'.repeat(40), attestCommit: () => undefined},
+      probe: {
+        push: () => undefined,
+        findPr: () => null,
+        createPr: ({body}: {body: string}) => { bodies.push(body); return 'https://github.test/closeyourit/automator/pull/37' },
+        ticketLinkExists: () => false,
+        linkTicket: () => undefined,
+      },
+      kb: {publish: () => { throw new Error('nessun artifact atteso') }},
+      knowledgeArtifacts: () => [],
+    }
+    const lifecycle = await provider(runsBase, {delivery}).prepare({...input, ticketUrl: url, conditions: ['Titolo con il codice']})
+    await lifecycle.beforeRuntime()
+    const execution = result()
+    await expect(lifecycle.afterRuntime(execution.raw, execution.normalized)).resolves.toMatchObject({outcome: 'complete', runStatus: 'success'})
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toContain('- **Codice:** CYAU-35')
+    expect(bodies[0]).toContain(`- **Collegamento:** ${url}`)
+    expect(bodies[0]).toContain('- Titolo con il codice')
+  })
+
   it('missing remote capability → checkpointed commit, resumable in_review phase and no blocked/remote effect', async () => {
     const runsBase = temporaryDirectory()
     const calls = {commit: 0, push: 0}
@@ -1218,6 +1245,71 @@ describe('no local redo after a review "no" (CYAU-175)', () => {
     }).prepare({...input, outcomeOwnedByServer: true})
 
     expect(typeof lifecycle.afterWorkflowVerificationFailure).toBe('function')
+  })
+})
+
+// CYAU-306 — red checks consume the persisted rounds; at the limit the cycle answers C409-CYCLE-002, the code the
+// runner turns into a block for the server. The local run stays closed: only a new claim starts again.
+describe('red checks and the round limit (CYAU-306)', () => {
+  const remoteGate = {
+    loadGateAtRef: vi.fn(() => ({
+      version: 2, runner: [], timeout: 10,
+      checks: [{stage: 'lint', run: 'lint', required: true}],
+      remote: {provider: 'github', required_checks: ['ci / ci-gate'], timeout: 1800, poll_interval: 10},
+    })),
+  }
+  const skillMode = {...input, outcomeOwnedByServer: true}
+
+  it('rounds left: back to the implementer; last round: blocked at the limit, never a third round', async () => {
+    const runsBase = temporaryDirectory()
+    const lifecycle = await provider(runsBase, remoteGate).prepare(skillMode)
+    const execution = result()
+
+    await lifecycle.beforeRuntime()
+    await lifecycle.afterRuntime(execution.raw, execution.normalized)
+    expect(await lifecycle.afterWorkflowVerificationFailure!('CI rossa: ci / ci-gate')).toMatchObject({
+      outcome: 'retry', retryPrompt: expect.stringContaining('CI rossa'),
+    })
+
+    await lifecycle.beforeRuntime()
+    await lifecycle.afterRuntime(execution.raw, execution.normalized)
+    expect(await lifecycle.afterWorkflowVerificationFailure!('CI rossa: ci / ci-gate')).toEqual({
+      outcome: 'complete', runStatus: 'failure', errorCode: 'C409-CYCLE-002',
+    })
+
+    const run = readRun(runPath(input.runId, runsBase)).run
+    expect(run?.checkpoints.at(-1)?.phase).toBe('blocked')
+    expect(run?.checkpoints.filter((entry) => entry.phase === 'implementing')).toHaveLength(2)
+  })
+
+  it('a ticket stopped at the limit: its local run is not reopened by a later claim', async () => {
+    const runsBase = temporaryDirectory()
+    const lifecycle = await provider(runsBase, remoteGate).prepare(skillMode)
+    const execution = result()
+    for (let round = 0; round < 2; round++) {
+      await lifecycle.beforeRuntime()
+      await lifecycle.afterRuntime(execution.raw, execution.normalized)
+      await lifecycle.afterWorkflowVerificationFailure!('CI rossa')
+    }
+
+    await expect(provider(runsBase, remoteGate).prepare(skillMode)).rejects.toThrow(/non riprendibile.*blocked/i)
+  })
+
+  it('after a person unblocks it, the new claim starts again with the rounds available', async () => {
+    const runsBase = temporaryDirectory()
+    const stopped = await provider(runsBase, remoteGate).prepare(skillMode)
+    const execution = result()
+    for (let round = 0; round < 2; round++) {
+      await stopped.beforeRuntime()
+      await stopped.afterRuntime(execution.raw, execution.normalized)
+      await stopped.afterWorkflowVerificationFailure!('CI rossa')
+    }
+
+    // Every claim carries a new run id (`ticket-preflight.ts`): the unblocked ticket gets a fresh local run.
+    const restarted = await provider(runsBase, remoteGate).prepare({...skillMode, runId: 'run-35-unblocked'})
+    await restarted.beforeRuntime()
+    await restarted.afterRuntime(execution.raw, execution.normalized)
+    expect(await restarted.afterWorkflowVerificationFailure!('CI rossa')).toMatchObject({outcome: 'retry'})
   })
 })
 

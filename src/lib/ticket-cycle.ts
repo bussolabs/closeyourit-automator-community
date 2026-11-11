@@ -128,6 +128,10 @@ export interface TicketCycleInput {
   base: string
   /** Requirements acquired from the ticket; they are redacted before the reviewer prompt. */
   requirements: string
+  /** CYAU-279 — the ticket page returned by the service, already checked; it reaches the PR description. */
+  ticketUrl?: string
+  /** CYAU-279 — the ticket's acceptance conditions from its card; they reach the PR description. */
+  conditions?: string[]
   /**
    * CYAU-237 — the findings of the review that rejected the previous attempt of THIS phase (already filtered by
    * phase upstream). They reach the diff reviewer as untrusted data; missing on a first round.
@@ -758,6 +762,8 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
           automation,
           result,
           knowledgeArtifacts: (deliveryOptions.knowledgeArtifacts ?? knowledgeArtifactsFromResult)(result),
+          ...(input.ticketUrl ? {ticketUrl: input.ticketUrl} : {}),
+          ...(input.conditions ? {conditions: input.conditions} : {}),
           signal: signal ?? input.signal,
         }, {
           git: deliveryOptions.git ?? defaultTicketDeliveryGit(),

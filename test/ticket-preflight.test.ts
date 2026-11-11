@@ -211,6 +211,15 @@ describe('parseTicketDetail', () => {
     expect(parseTicketDetail({data: {code: 'CYAU-34', title: 'Titolo'}}, 'CYAU', '/repo')).not.toHaveProperty('approvedSiblings')
   })
 
+  it('CYAU-279: keeps the ticket link returned by the service only when it is a safe service address', () => {
+    const url = 'https://app.closeyour.it/projects/CYAU/tickets/CYAU-34'
+    expect(parseTicketDetail({data: {code: 'CYAU-34', title: 'Titolo', url}}, 'CYAU', '/repo')?.url).toBe(url)
+    for (const rejected of ['https://evil.example/tickets/CYAU-34', `https://app.closeyour.it/${'a'.repeat(500)}`, 'http://app.closeyour.it/t', 7, null]) {
+      expect(parseTicketDetail({data: {code: 'CYAU-34', title: 'Titolo', url: rejected}}, 'CYAU', '/repo')).not.toHaveProperty('url')
+    }
+    expect(parseTicketDetail({data: {code: 'CYAU-34', title: 'Titolo'}}, 'CYAU', '/repo')).not.toHaveProperty('url')
+  })
+
   it('partial or malformed payload → null fail-closed', () => {
     expect(parseTicketDetail({}, 'CYAU', '/repo')).toBeNull()
     expect(parseTicketDetail({data: {code: 'CYAU-34'}}, 'CYAU', '/repo')).toBeNull()
@@ -403,6 +412,8 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
       // default. The host runs it, never chooses it.
       reviewDepth: 'diff',
       reviewMode: 'cross',
+      // CYAU-279 — the card's conditions travel to the PR description; this candidate has no link.
+      conditions: ['Nessun doppio avvio'],
     })
     const requirements = ticketCycle.prepare.mock.calls[0][0].requirements
     expect(requirements).toContain('Scenario 1: Claim')
@@ -1224,6 +1235,38 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
     expect((result.action as {skill?: unknown}).skill).toEqual({
       command: '/closeyourit-skills:autopilot', args: 'CYAU-34', plugin_dir: resolvedPluginDir,
     })
+  })
+
+  it('CYAU-279: the link of the queue candidate and its conditions travel to the ticket cycle, a foreign link never', async () => {
+    const run = async (url: unknown) => {
+      // Each run is a fresh claim of the same ticket: the attempt counter must not carry over, like in beforeEach.
+      fs.rmSync(path.join(stateRoot, 'ticket-attempts'), {recursive: true, force: true})
+      const ticketCycle = fakeTicketCycle()
+      const preflight = buildTicketPreflight({
+        probe: probe(), guidance,
+        queue: {getTicketQueue: vi.fn(async () => ({outcome: 'candidate' as const, candidate: {...queueCandidate, url: url as string}}))},
+        authorizeCwd: () => '/repo', attestRepository: () => true,
+        lease: {acquire: vi.fn(async () => ({
+          outcome: 'acquired' as const, runId: 'run-1', lease: {renewEveryMs: 1000, renew: vi.fn(async () => true), release: vi.fn(async () => undefined)},
+          attemptId: 'attempt-1', deliverAttempt: vi.fn(async () => true), ...hostFirstLease('autopilot'),
+        }))},
+        ticketCycle,
+        reserveLimits: async (policy, snapshot, cost) => ({
+          decision: evaluateLimits(policy, {...snapshot, pending_runs: 1, pending_cost: cost}, 'dispatch'), usage: null,
+        }),
+        skills: {pluginDir: presentPluginDir, enabled: true},
+        attestConfinement: () => ({attested: true}),
+      })
+      expect(await preflight('worker', claudeAction, queueContext)).toMatchObject({outcome: 'admit'})
+      return ticketCycle.prepare.mock.calls[0][0] as unknown as Record<string, unknown>
+    }
+    const url = 'https://app.closeyour.it/projects/CYAU/tickets/CYAU-34'
+    expect(await run(url)).toMatchObject({ticketUrl: url, conditions: ['Nessun doppio avvio']})
+    for (const rejected of ['https://evil.example/tickets/CYAU-34', `https://app.closeyour.it/${'a'.repeat(500)}`, 42]) {
+      const input = await run(rejected)
+      expect(input).not.toHaveProperty('ticketUrl')
+      expect(input.conditions).toEqual(['Nessun doppio avvio'])
+    }
   })
 
   it('CYAU-1: the candidate guidance is consulted (required) and carried into the context before the claim', async () => {

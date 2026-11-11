@@ -11,6 +11,7 @@ import {
   readTicketAttempts,
   recordTicketAttempt,
   resetTicketAttempts,
+  restartedByPerson,
   settleQuotaPause,
   ticketAttemptsPath,
 } from '../src/lib/ticket-attempts'
@@ -292,5 +293,26 @@ describe('settleQuotaPause', () => {
     const record = claim(dir)
     fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-275', dir), JSON.stringify({...record, quota_pauses: -1}))
     expect(readTicketAttempts('CYAU', 'CYAU-275', dir).corrupt).toBe(true)
+  })
+})
+
+// CYAU-306 — a ticket stopped at the round limit stays stopped until a person unblocks it, then starts again with
+// the full budget. Nothing in the restart logic changes: this proves the existing path covers the new block.
+describe('restartedByPerson — after a round-limit block', () => {
+  it('stays exhausted without a person, starts again once a person moved the budget after the last attempt', () => {
+    const dir = tempDir()
+    for (const minute of ['10', '11', '12']) {
+      recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-306', phase: 'autopilot', now: at(`2026-11-09T10:${minute}:00.000Z`)}, dir)
+    }
+    const stopped = readTicketAttempts('CYAU', 'CYAU-306', dir).record
+    expect(evaluateTicketAttempts(stopped, 3, 'autopilot').outcome).toBe('exhausted')
+    // The server's budget dates from before our last attempt: nobody unblocked it, the ticket is not taken again.
+    expect(restartedByPerson(stopped, '2026-11-09T10:00:00.000Z')).toBe(false)
+
+    // A person unblocks it: the server's budget restarts after our last attempt.
+    expect(restartedByPerson(stopped, '2026-11-09T12:00:00.000Z')).toBe(true)
+    resetTicketAttempts('CYAU', 'CYAU-306', dir, at('2026-11-09T12:01:00.000Z'))
+    const restarted = readTicketAttempts('CYAU', 'CYAU-306', dir).record
+    expect(evaluateTicketAttempts(restarted, 3, 'autopilot')).toMatchObject({outcome: 'admit', attempts: 0})
   })
 })

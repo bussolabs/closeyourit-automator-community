@@ -7,12 +7,15 @@ import {
   type DeliveryProbe,
   type DeliveryResult,
   defaultDeliveryProbe,
+  isDeliverableTicket,
   planDelivery,
   type PrContent,
   type PrTests,
   prContentFromResult,
   runDelivery,
 } from '../lib/deliver'
+import {type TicketDetail} from '../lib/ticket-coordinator'
+import {defaultTicketCliProbe} from '../lib/ticket-preflight'
 import {AutomatorError, ErrorCodes} from '../errors/error-codes'
 
 export default class Deliver extends BaseCommand {
@@ -51,9 +54,14 @@ export default class Deliver extends BaseCommand {
     return defaultDeliveryProbe(opts)
   }
 
+  /** Reads the ticket card with `cyi tickets show` (CYAU-279). Overridable in tests; unreadable → null. */
+  protected async loadTicket(project: string, ticket: string, cwd: string): Promise<TicketDetail | null> {
+    return defaultTicketCliProbe().loadTicket(project, ticket, cwd)
+  }
+
   async run(): Promise<unknown> {
     const {flags} = await this.parse(Deliver)
-    const content = this.resolveContent(flags)
+    const content = {...this.resolveContent(flags), ...await this.ticketData(flags.project, flags.ticket, flags.cwd)}
 
     if (flags['dry-run']) {
       // planDelivery validates the branch (exit 2 when not deliverable) and composes title/body without running anything.
@@ -90,6 +98,18 @@ export default class Deliver extends BaseCommand {
 
       throw error
     }
+  }
+
+  /**
+   * Link and conditions from the ticket card, like the automatic delivery (CYAU-279). A card that cannot be read,
+   * or that belongs to another ticket, leaves both unavailable: the PR says so and nothing is built by hand.
+   */
+  private async ticketData(project: string, ticket: string, cwd: string): Promise<Pick<PrContent, 'ticketUrl' | 'conditions'>> {
+    // An undeliverable code is refused later by planDelivery: it never reaches the `cyi` argv first.
+    if (!isDeliverableTicket(ticket)) return {ticketUrl: null, conditions: null}
+    const card = await this.loadTicket(project, ticket, cwd).catch(() => null)
+    if (!card || card.code.toLowerCase() !== ticket.toLowerCase()) return {ticketUrl: null, conditions: null}
+    return {ticketUrl: card.url ?? null, conditions: card.conditions ?? null}
   }
 
   /** Composes the PR content: from --result-file (agent outcome) and/or from the flags, with the flags as override. */

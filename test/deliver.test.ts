@@ -16,9 +16,13 @@ import {
   type DeliveryProbe,
   isDeliverableBranch,
   planDelivery,
+  PR_BODY_MAX_LENGTH,
+  PR_REPORT_MAX_LENGTH,
+  PR_TICKET_BLOCK_MAX_LENGTH,
   type PrContent,
   prContentFromResult,
   runDelivery,
+  TICKET_CODE_MAX_LENGTH,
 } from '../src/lib/deliver'
 import {AutomatorError, ErrorCodes} from '../src/errors/error-codes'
 import {RetryableDeliveryError} from '../src/lib/delivery-errors'
@@ -111,8 +115,8 @@ describe('composePrTitle', () => {
     expect(composePrTitle({ticket: 'CYAU-24', summary: null})).toBe('CYAU-24: consegna per la review')
   })
 
-  it('an explicit override takes precedence', () => {
-    expect(composePrTitle({ticket: 'CYAU-24', summary: 'x'}, 'Titolo scelto')).toBe('Titolo scelto')
+  it('an explicit override takes precedence over the summary, behind the ticket code (CYAU-279)', () => {
+    expect(composePrTitle({ticket: 'CYAU-24', summary: 'x'}, 'Titolo scelto')).toBe('CYAU-24: Titolo scelto')
   })
 })
 
@@ -206,6 +210,175 @@ describe('prContentFromResult — bridge from the uniform agent outcome', () => 
     })
     expect(JSON.stringify(content)).not.toContain(token)
     expect(JSON.stringify(content)).toContain('[REDACTED]')
+  })
+})
+
+// CYAU-279 — fixed template: the code opens the title; on top of the description code, link returned by the
+// service and acceptance conditions; never more than 4000 characters. Every case checks code and link stay whole.
+describe('PR template with ticket code, link and conditions (CYAU-279)', () => {
+  const url = 'https://app.closeyour.it/projects/CYRA/tickets/CYRA-981'
+  const content = (over: Partial<PrContent> = {}): PrContent => ({
+    ticket: 'CYRA-981',
+    summary: 'Collega la PR al ticket',
+    tests: {passed: 4, failed: 0, summary: 'deliver verde'},
+    risks: [],
+    ticketUrl: url,
+    conditions: ['Titolo con il codice', 'Descrizione con link e condizioni'],
+    ...over,
+  })
+  const expectWholeTicket = (body: string, ticket: string, link: string | null): void => {
+    expect(body).toContain(`- **Codice:** ${ticket}`)
+    if (link) expect(body).toContain(`- **Collegamento:** ${link}`)
+    else expect(body).toContain('- **Collegamento:** non disponibile')
+    expect(body.length).toBeLessThanOrEqual(PR_BODY_MAX_LENGTH)
+  }
+
+  it('SC-1: title opens with the code, the description carries link and conditions on top', () => {
+    const plan = planDelivery({content: content(), branch: 'ticket/CYRA-981'})
+    expect(plan.title).toBe('CYRA-981: Collega la PR al ticket')
+    expectWholeTicket(plan.body, 'CYRA-981', url)
+    expect(plan.body).toContain('- Titolo con il codice')
+    expect(plan.body).toContain('- Descrizione con link e condizioni')
+    expect(plan.body.indexOf('## Ticket')).toBe(0)
+    expect(plan.body.indexOf('### Condizioni di fatto')).toBeLessThan(plan.body.indexOf('## Riepilogo'))
+    expect(plan.body).toMatch(/Ticket:\s*CYRA-981$/)
+  })
+
+  it('SC-2: a forced title without the code still opens with it, and never twice', () => {
+    const forced = composePrTitle(content(), 'Titolo scelto a mano')
+    expect(forced).toBe('CYRA-981: Titolo scelto a mano')
+    expect(forced.split('CYRA-981')).toHaveLength(2)
+    expect(composePrTitle(content(), 'CYRA-981: già col codice')).toBe('CYRA-981: già col codice')
+    expect(composePrTitle(content(), 'CYRA-981 già col codice')).toBe('CYRA-981 già col codice')
+    // Another code that merely starts with the same characters is not the delivered one.
+    expect(composePrTitle(content(), 'CYRA-9810 altro')).toBe('CYRA-981: CYRA-9810 altro')
+    expectWholeTicket(planDelivery({content: content(), branch: 'ticket/CYRA-981', titleOverride: 'x'}).body, 'CYRA-981', url)
+  })
+
+  it('SC-3: without a link from the service the description says so and builds none', () => {
+    for (const ticketUrl of [undefined, null]) {
+      const body = composePrBody(content({ticketUrl}))
+      expectWholeTicket(body, 'CYRA-981', null)
+      expect(body).not.toContain('https://')
+      expect(body).not.toContain('closeyour.it')
+    }
+  })
+
+  it('SC-4: a link outside the service, unsafe or over 500 characters counts as missing and is not printed', () => {
+    const rejected = [
+      'https://evil.example/projects/CYRA/tickets/CYRA-981',
+      'https://closeyour.it.evil.example/tickets/CYRA-981',
+      'http://app.closeyour.it/projects/CYRA/tickets/CYRA-981',
+      'https://user:pass@app.closeyour.it/projects/CYRA/tickets/CYRA-981',
+      'https://app.closeyour.it:8443/projects/CYRA/tickets/CYRA-981',
+      'https://app.closeyour.it/tickets/CYRA-981)[x](https://evil.example',
+      `https://app.closeyour.it/tickets/${'a'.repeat(500)}`,
+    ]
+    for (const ticketUrl of rejected) {
+      const body = composePrBody(content({ticketUrl}))
+      expectWholeTicket(body, 'CYRA-981', null)
+      expect(body).not.toContain(ticketUrl)
+    }
+  })
+
+  it('SC-5: a 10000-character report with 0 conditions stays within 4000, code and link whole, with a notice', () => {
+    const body = composePrBody(content({summary: 'r'.repeat(10_000), conditions: []}))
+    expectWholeTicket(body, 'CYRA-981', url)
+    expect(body).toContain('_Resoconto accorciato per stare nel limite della descrizione: il testo completo è sul ticket CYRA-981._')
+    expect(body).toContain('Il ticket non ha condizioni di fatto.')
+    // Only the summary got shorter: tests and risks keep their sections.
+    expect(body).toContain('## Test\n\n4 passati, 0 falliti — deliver verde')
+    expect(body).toContain('## Rischi\n\nNessun rischio segnalato.')
+    expect(body).toMatch(/Ticket:\s*CYRA-981$/)
+  })
+
+  it('SC-6: 40 long conditions stay within 4000 and those left out become a pointer to the ticket', () => {
+    const conditions = Array.from({length: 40}, (_, index) => `Condizione ${index + 1}: ${'c'.repeat(180)}`)
+    const body = composePrBody(content({conditions}))
+    expectWholeTicket(body, 'CYRA-981', url)
+    expect(body).toContain(conditions[0])
+    expect(body).not.toContain(conditions[39])
+    const shown = conditions.filter((condition) => body.includes(condition)).length
+    expect(body).toContain(`- …altre ${40 - shown} condizioni sul ticket CYRA-981`)
+    // The report is untouched when it fits its own cap: only the conditions got shorter.
+    expect(body).toContain('## Riepilogo\n\nCollega la PR al ticket')
+    expect(body).not.toContain('Resoconto accorciato')
+  })
+
+  it('one condition left out is named in the singular', () => {
+    const conditions = ['Breve', `Lunga ${'x'.repeat(5000)}`]
+    const body = composePrBody(content({conditions}))
+    expect(body).toContain('- Breve')
+    expect(body).toContain('- …un\'altra condizione sul ticket CYRA-981')
+  })
+
+  it('SC-7: a ticket with 0 conditions says so, with code and link still there', () => {
+    const body = composePrBody(content({conditions: []}))
+    expectWholeTicket(body, 'CYRA-981', url)
+    expect(body).toContain('Il ticket non ha condizioni di fatto.')
+    expect(composePrBody(content({conditions: ['  ', '']}))).toContain('Il ticket non ha condizioni di fatto.')
+  })
+
+  it('conditions that could not be read point to the ticket instead of claiming there are none', () => {
+    for (const conditions of [undefined, null]) {
+      const body = composePrBody(content({conditions}))
+      expectWholeTicket(body, 'CYRA-981', url)
+      expect(body).toContain('Condizioni non disponibili: le trovi sul ticket CYRA-981.')
+    }
+  })
+
+  it('SC-8: a report quoting another ticket never lends its code to title or ticket block', () => {
+    const plan = planDelivery({content: content({summary: 'CYRA-123: chiude anche CYRA-123'}), branch: 'ticket/CYRA-981'})
+    expect(plan.title.startsWith('CYRA-981: ')).toBe(true)
+    expectWholeTicket(plan.body, 'CYRA-981', url)
+    expect(plan.body).not.toContain('**Codice:** CYRA-123')
+    expect(plan.body).toMatch(/Ticket:\s*CYRA-981$/)
+  })
+
+  it('worst case — longest code and link, 10000-character report, 40 long conditions — stays within 4000', () => {
+    const ticket = `CYRA-${'9'.repeat(TICKET_CODE_MAX_LENGTH - 5)}`
+    const longUrl = `https://app.closeyour.it/projects/CYRA/tickets/${'a'.repeat(500 - 'https://app.closeyour.it/projects/CYRA/tickets/'.length)}`
+    expect(longUrl).toHaveLength(500)
+    const body = composePrBody({
+      ticket, summary: 's'.repeat(10_000), tests: {passed: 1, failed: 0, summary: 't'.repeat(3000)},
+      risks: Array.from({length: 30}, () => 'r'.repeat(200)), changedFiles: Array.from({length: 50}, (_, i) => `src/f${i}.ts`),
+      ticketUrl: longUrl, conditions: Array.from({length: 40}, () => 'c'.repeat(400)),
+    })
+    expectWholeTicket(body, ticket, longUrl)
+    const ticketBlock = body.slice(0, body.indexOf('\n\n### Condizioni di fatto'))
+    expect(ticketBlock.length).toBeLessThanOrEqual(PR_TICKET_BLOCK_MAX_LENGTH)
+    const report = body.slice(body.indexOf('## Riepilogo'), body.lastIndexOf('\n\n---\nTicket:'))
+    expect(report.length).toBeLessThanOrEqual(PR_REPORT_MAX_LENGTH)
+    expect(report).toContain('Resoconto accorciato')
+    expect(body).toContain('condizioni sul ticket')
+  })
+
+  it('a cut report never ends on half of a surrogate pair', () => {
+    const body = composePrBody(content({summary: '😀'.repeat(5000)}))
+    expect(body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/)
+    expect(body.length).toBeLessThanOrEqual(PR_BODY_MAX_LENGTH)
+  })
+
+  it('conditions are published redacted and on a single line', () => {
+    const token = `ghp_${'a'.repeat(36)}`
+    const body = composePrBody(content({conditions: [`Usa ${token}`, 'Riga uno\n## Titolo finto\nriga tre']}))
+    expect(body).not.toContain(token)
+    expect(body).toContain('- Usa [REDACTED]')
+    expect(body).toContain('- Riga uno ## Titolo finto riga tre')
+    expect(body).not.toContain('\n## Titolo finto')
+  })
+
+  it('a code longer than 64 characters cannot be delivered (it is never cut from the body)', () => {
+    expect(() => assertDeliverableTicket(`CYRA-${'9'.repeat(TICKET_CODE_MAX_LENGTH)}`)).toThrow(AutomatorError)
+    expect(() => assertDeliverableTicket(`CYRA-${'9'.repeat(TICKET_CODE_MAX_LENGTH - 5)}`)).not.toThrow()
+  })
+
+  it('prContentFromResult carries link and conditions of the card, and leaves them out when not given', () => {
+    const withCard = prContentFromResult('CYRA-981', makeResult(), {url, conditions: ['A']})
+    expect(withCard).toMatchObject({ticketUrl: url, conditions: ['A']})
+    const withoutCard = prContentFromResult('CYRA-981', makeResult())
+    expect('ticketUrl' in withoutCard).toBe(false)
+    expect('conditions' in withoutCard).toBe(false)
   })
 })
 

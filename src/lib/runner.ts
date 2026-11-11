@@ -32,7 +32,7 @@ import {
 import {buildWorkflowReviewPrompt, parseWorkflowResultDetailed, parseWorkflowReview} from './typed-workflow'
 import {runOpencodeResultReview} from './review-execution'
 import {type ReviewerId} from './route'
-import {HOST_SYNTHETIC_REVIEW_SUMMARY, syntheticBlockedResult} from './unparsable-result'
+import {cycleLimitBlockedResult, HOST_SYNTHETIC_REVIEW_SUMMARY, syntheticBlockedResult} from './unparsable-result'
 import {type ExecutionPhase} from './phase-profile'
 import {resolveFlowConcurrency, runFlowPool} from './flow-engine'
 import {type PreflightStop} from './heartbeat'
@@ -201,6 +201,7 @@ export interface DeliveryRecord {
   /**
    * - ok: delivered and accepted. Since CYAU-192 also for an UNINTERPRETABLE result: the host delivers a
    *   synthetic `blocked` with the reason, and `errorCode` stays C422-WORKFLOW-001 to state the local cause.
+   *   Since CYAU-306 also for red checks at the round limit: a `blocked` not to retry, `errorCode` C409-CYCLE-002.
    * - not-attempted: no PUT — the result is not interpretable and there is no ticket code with which to
    *   build the synthetic `blocked` (outside the queue).
    * - rejected: the server rejected it on the merits, or the cross-review did not approve.
@@ -1157,6 +1158,37 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                 } else {
                   if (verification.status === 'failed' && workflowDelivery.afterVerificationFailure) {
                     lifecycleResult = await workflowDelivery.afterVerificationFailure(verification.summary)
+                    // CYAU-306 — red on the last allowed round: the local cycle is closed `blocked`, and before
+                    // this nothing told the server, which found the attempt stale and put the phase back in the
+                    // queue. The host now delivers a `blocked` that must not be retried, with the CI's reason.
+                    // An unreadable check (`unavailable`) never gets here: it consumes no round and blocks nothing.
+                    const ticketCode = workflowDelivery.ticketCode ?? claimedTicket
+                    if (lifecycleResult.errorCode === ErrorCodes.Cycle.limitReached && ticketCode) {
+                      const observed = ticketRun ? observedHeadSha(ticketRun.authorizedCwd) : undefined
+                      const delivered = await workflowDelivery.deliver({
+                        runtime: effectiveAction.type,
+                        reviewer_runtime: reviewerRuntimeId,
+                        result: cycleLimitBlockedResult({code: ticketCode, summary: verification.summary}),
+                        review: {status: 'accepted', depth: 'result', summary: HOST_SYNTHETIC_REVIEW_SUMMARY},
+                        ...(observed ? {observed: {head_sha: observed}} : {}),
+                        ...deliveryUsage(effectiveAction.type, 'model' in effectiveAction ? effectiveAction.model : undefined,
+                                         attemptCostUsd, raw.stdout),
+                      })
+                      // The local cause stays the cycle limit; the record says what the server did with the block.
+                      deliveryRecord = recordDelivery(workflowDelivery, {
+                        outcome: delivered.outcome,
+                        errorCode: delivered.outcome === 'ok'
+                          ? ErrorCodes.Cycle.limitReached
+                          : delivered.outcome === 'rejected'
+                          ? ErrorCodes.Workflow.rejected
+                          : ErrorCodes.Workflow.undelivered,
+                        reviewStatus: 'accepted',
+                        attemptStatus: delivered.outcome === 'ok' ? delivered.attempt?.status : undefined,
+                        httpStatus: delivered.status,
+                        serverErrorCode: delivered.outcome === 'rejected' ? delivered.code : undefined,
+                        raw, syntheticResult: 'blocked-cycle-limit',
+                      })
+                    }
                   } else {
                     lifecycleResult = {
                       outcome: 'complete', runStatus: 'failure',

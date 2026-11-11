@@ -6,6 +6,7 @@ import {isSafeSegment} from './workspace'
 import {redactSecrets} from './secret-redaction'
 import {remoteCommandError} from './delivery-errors'
 import {GitHubPrUrlSchema, isGitHubPrUrl} from './github-pr-url'
+import {serviceTicketUrl} from './ticket-url'
 import {AutomatorError, ErrorCodes} from '../errors/error-codes'
 
 // Uniform delivery of the run for human review (CYAU-24). When the work passes implementation,
@@ -34,6 +35,8 @@ export const DELIVERABLE_BRANCH_PREFIX = 'ticket/'
 export const DEFAULT_BASE_BRANCH = 'main'
 /** Default remote to push to. */
 export const DEFAULT_REMOTE = 'origin'
+/** The longest ticket code that can be delivered: it is never cut from the PR body (CYAU-279). */
+export const TICKET_CODE_MAX_LENGTH = 64
 
 // ── Guards (pure) ──────────────────────────────────────────────────────────────────────────────────────────
 
@@ -58,12 +61,18 @@ export function assertDeliverableBranch(branch: string): void {
   }
 }
 
+/** true if `ticket` is a safe segment no longer than `TICKET_CODE_MAX_LENGTH`. Pure. */
+export function isDeliverableTicket(ticket: string): boolean {
+  return isSafeSegment(ticket) && ticket.length <= TICKET_CODE_MAX_LENGTH
+}
+
 /**
  * Rejects an unsafe ticket: the ticket code ends up in the `cyi` argv (comment + state transition)
- * and in the PR body → input defence (untrusted), as `workspace` validates its own segments. Exit 2.
+ * and in the PR body → input defence (untrusted), as `workspace` validates its own segments. Bounded in length,
+ * because the code is never cut from the PR body (CYAU-279). Exit 2.
  */
 export function assertDeliverableTicket(ticket: string): void {
-  if (!isSafeSegment(ticket)) {
+  if (!isDeliverableTicket(ticket)) {
     throw new AutomatorError(ErrorCodes.Deliver.invalidInput, `Codice ticket non valido: "${ticket}"`, 2)
   }
 }
@@ -110,16 +119,28 @@ export interface PrContent {
   tests: PrTests | null
   risks: string[]
   changedFiles?: string[]
+  /** CYAU-279 — the ticket page returned by the service; missing/null = not available, never built here. */
+  ticketUrl?: string | null
+  /** CYAU-279 — the ticket's acceptance conditions; missing/null = not read, `[]` = the ticket has none. */
+  conditions?: string[] | null
 }
 
-/** Derives the PR content from the agent's uniform outcome (CYAU-6): summary, tests, risks, files. */
-export function prContentFromResult(ticket: string, result: AgentRunResult): PrContent {
+/** What the delivery knows of the ticket card besides its code (CYAU-279). */
+export interface PrTicketData {
+  url?: string | null
+  conditions?: string[] | null
+}
+
+/** Derives the PR content from the agent's uniform outcome (CYAU-6): summary, tests, risks, files + ticket data. */
+export function prContentFromResult(ticket: string, result: AgentRunResult, ticketData: PrTicketData = {}): PrContent {
   return {
     ticket,
     summary: result.summary === null ? null : redactSecrets(result.summary),
     tests: {...result.tests, summary: result.tests.summary === null ? null : redactSecrets(result.tests.summary)},
     risks: result.risks.map((risk) => redactSecrets(risk)),
     changedFiles: result.changedFiles.map((file) => redactSecrets(file)),
+    ...(ticketData.url === undefined ? {} : {ticketUrl: ticketData.url}),
+    ...(ticketData.conditions === undefined ? {} : {conditions: ticketData.conditions}),
   }
 }
 
@@ -127,10 +148,21 @@ function firstLine(text: string): string {
   return text.split('\n')[0].trim()
 }
 
-/** PR title: an explicit override, otherwise `<ticket>: <first line of the summary>` (or a default). */
+/** true when `title` already opens with the ticket code as a whole word (`CYAU-24: …`, `CYAU-24 …`). */
+function startsWithTicket(title: string, ticket: string): boolean {
+  if (!title.startsWith(ticket)) return false
+  const next = title.charAt(ticket.length)
+  return next === '' || !/[\p{L}\p{N}_-]/u.test(next)
+}
+
+/**
+ * PR title: ALWAYS opens with the delivered ticket code (CYAU-279). An explicit override keeps its text but gets the
+ * code in front when it does not already start with it (never twice); otherwise `<ticket>: <first line of the
+ * summary>` (or a default). The code is only ever the delivered one, never one quoted in the agent's text.
+ */
 export function composePrTitle(content: Pick<PrContent, 'ticket' | 'summary'>, override?: string): string {
   const forced = override?.trim()
-  if (forced) return forced
+  if (forced) return startsWithTicket(forced, content.ticket) ? forced : `${content.ticket}: ${firstLine(forced)}`
   const summary = content.summary?.trim()
   return summary ? `${content.ticket}: ${firstLine(summary)}` : `${content.ticket}: consegna per la review`
 }
@@ -151,12 +183,63 @@ function formatTests(tests: PrTests | null): string {
   return head || summary
 }
 
-/**
- * Composes the PR markdown body. It ALWAYS contains the three DoD sections — summary, tests, risks — even
- * when the agent reported nothing (explicit placeholders): the PR is never "empty" of context. It closes
- * with a reference to the ticket, the PR→ticket side of the bidirectional link. Pure.
- */
-export function composePrBody(content: PrContent): string {
+// CYAU-279 — the PR body never exceeds 4000 characters, with ONE rule on what gets shorter. Code and link are
+// never cut and take at most 700 characters (the code is capped by `assertDeliverableTicket`, the link by
+// `serviceTicketUrl`). The agent's report has its own internal cap of 2500 characters, with a notice when cut. The
+// conditions use the space left, and those that do not fit become a pointer to the ticket. Capping the report
+// is what makes 4000 a guarantee: shortening the conditions alone would not be enough.
+
+/** The hard ceiling of the PR description. */
+export const PR_BODY_MAX_LENGTH = 4000
+/** The ticket block (heading, code, link): never cut, never longer than this. */
+export const PR_TICKET_BLOCK_MAX_LENGTH = 700
+/** Internal cap of the agent's report (summary, tests, risks, files), notice included. */
+export const PR_REPORT_MAX_LENGTH = 2500
+const SECTION_SEPARATOR = '\n\n'
+
+/** Conditions are published redacted and on one line each: untrusted text cannot open headings or sections. */
+function conditionText(condition: string): string {
+  return redactSecrets(condition).replace(/\s+/gu, ' ').trim()
+}
+
+/** The ticket block: code and link (or why it is missing), always whole. The link is re-checked, never built. */
+function ticketBlock(content: PrContent): string {
+  const url = serviceTicketUrl(content.ticketUrl)
+  return [
+    '## Ticket',
+    '',
+    `- **Codice:** ${content.ticket}`,
+    url ? `- **Collegamento:** ${url}` : '- **Collegamento:** non disponibile: il servizio non ha restituito un collegamento valido al ticket.',
+  ].join('\n')
+}
+
+/** The conditions that fit in `budget` characters, in order; those left out become a pointer to the ticket. */
+function conditionsBlock(content: PrContent, budget: number): string {
+  const heading = '### Condizioni di fatto\n\n'
+  if (content.conditions === undefined || content.conditions === null) {
+    return `${heading}Condizioni non disponibili: le trovi sul ticket ${content.ticket}.`
+  }
+  const conditions = content.conditions.map(conditionText).filter((text) => text !== '').map((text) => `- ${text}`)
+  if (conditions.length === 0) return `${heading}Il ticket non ha condizioni di fatto.`
+
+  const pointer = (left: number): string =>
+    `- …${left === 1 ? 'un\'altra condizione' : `altre ${left} condizioni`} sul ticket ${content.ticket}, non riportate per stare nel limite della descrizione.`
+  const included: string[] = []
+  let used = heading.length
+  for (const [index, line] of conditions.entries()) {
+    const left = conditions.length - index - 1
+    const cost = (included.length > 0 ? 1 : 0) + line.length
+    const tail = left > 0 ? 1 + pointer(left).length : 0
+    if (used + cost + tail > budget) break
+    included.push(line)
+    used += cost
+  }
+  const excluded = conditions.length - included.length
+  return `${heading}${[...included, ...(excluded > 0 ? [pointer(excluded)] : [])].join('\n')}`
+}
+
+/** The agent's report: summary, tests, risks and files, as the three DoD sections always require. */
+function reportBlock(content: PrContent): string {
   const lines: string[] = []
   lines.push('## Riepilogo', '', content.summary?.trim() || 'Nessun riepilogo fornito.', '')
   lines.push('## Test', '', formatTests(content.tests), '')
@@ -168,9 +251,54 @@ export function composePrBody(content: PrContent): string {
     lines.push('', '## File modificati', '')
     for (const file of content.changedFiles) lines.push(`- \`${file}\``)
   }
-
-  lines.push('', '---', `Ticket: ${content.ticket}`)
   return lines.join('\n')
+}
+
+/** The summary kept when only the summary is shortened: below this, the whole report is cut instead. */
+const MIN_KEPT_SUMMARY = 200
+
+/** The first `max` characters of `text`, never ending on half of a surrogate pair. */
+function cutText(text: string, max: number): string {
+  let cut = text.slice(0, Math.max(0, max))
+  const last = cut.charCodeAt(cut.length - 1)
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1)
+  return cut.trimEnd()
+}
+
+/**
+ * Caps the agent's report at 2500 characters and says so with a pointer to the ticket. The summary is shortened
+ * first, so tests and risks keep their sections; when the summary alone cannot absorb the excess, the whole report
+ * is cut, at a line end when one is close.
+ */
+function capReport(content: PrContent): string {
+  const report = reportBlock(content)
+  if (report.length <= PR_REPORT_MAX_LENGTH) return report
+  const notice = `\n\n_Resoconto accorciato per stare nel limite della descrizione: il testo completo è sul ticket ${content.ticket}._`
+  const excess = report.length + notice.length - PR_REPORT_MAX_LENGTH
+  const summary = content.summary?.trim() ?? ''
+  if (summary.length - excess >= MIN_KEPT_SUMMARY) {
+    return reportBlock({...content, summary: `${cutText(summary, summary.length - excess)}${notice}`})
+  }
+
+  let cut = report.slice(0, PR_REPORT_MAX_LENGTH - notice.length)
+  const lineEnd = cut.lastIndexOf('\n')
+  if (lineEnd >= cut.length / 2) cut = cut.slice(0, lineEnd)
+  return `${cutText(cut, cut.length)}${notice}`
+}
+
+/**
+ * Composes the PR markdown body with a fixed template (CYAU-279): on top the ticket block — code, link returned by
+ * the service (or that it is missing) and the acceptance conditions — then the agent's report with the three DoD
+ * sections, ALWAYS present even when the agent reported nothing (explicit placeholders). It closes with the
+ * reference to the ticket, the PR→ticket side of the bidirectional link. Never longer than 4000 characters. Pure.
+ */
+export function composePrBody(content: PrContent): string {
+  const ticket = ticketBlock(content)
+  const report = capReport(content)
+  const footer = `---\nTicket: ${content.ticket}`
+  const fixed = ticket.length + report.length + footer.length + 3 * SECTION_SEPARATOR.length
+  const conditions = conditionsBlock(content, PR_BODY_MAX_LENGTH - fixed)
+  return [ticket, conditions, report, footer].join(SECTION_SEPARATOR)
 }
 
 /** The CYI state the delivery moves the ticket to: "In Review", never beyond (Resolved/Closed = human review). */

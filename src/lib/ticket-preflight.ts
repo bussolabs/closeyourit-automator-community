@@ -83,6 +83,7 @@ import {defaultOperationalDeliveryProbe} from './deliver'
 import {defaultKbPublisher} from './publish'
 import {ticketBranch, worktreePath} from './workspace'
 import {refreshReadOnlyCheckout} from './checkout-refresh'
+import {serviceTicketUrl} from './ticket-url'
 import {
   TicketCoordinator,
   type ApprovedSibling,
@@ -780,11 +781,14 @@ function queueCandidateToTicket(candidate: ClaimedTicketCandidate, cwd: string):
   const reworkFindings = composeReworkFindings(candidate.workflow?.rework, text(candidate.workflow?.execution_phase))
   const previousReviewFindings = reworkFindingsFor(candidate.workflow?.rework, text(candidate.workflow?.execution_phase))
   const approvedSiblings = approvedSiblingsFrom(candidate.approved_siblings)
+  // CYAU-279 — the ticket page as returned by the service; an unsafe or oversized one counts as missing.
+  const url = serviceTicketUrl(candidate.url)
   return {
     project: candidate.project.key,
     code: candidate.code,
     defaultBranch: candidate.project.default_branch,
     cwd,
+    ...(url ? {url} : {}),
     title: candidate.title,
     description: text(candidate.description),
     technicalAnalysis: text(candidate.technical_analysis),
@@ -875,10 +879,13 @@ export function parseTicketDetail(raw: unknown, project: string, cwd: string): T
   // `status` is the label shown to the user (translatable, renamable); `status_ref` carries the canonical code and
   // category, the only ones on which one can decide whether the work is already done (CYAU-155). Missing on legacy servers.
   const statusRef = isRecord(data.status_ref) ? data.status_ref : undefined
+  // CYAU-279 — the ticket page as returned by the service; an unsafe or oversized one counts as missing.
+  const url = serviceTicketUrl(data.url)
   return {
     project,
     code,
     cwd,
+    ...(url ? {url} : {}),
     title,
     description: text(data.description),
     technicalAnalysis: text(data.technical_analysis),
@@ -1676,6 +1683,9 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
                 runtime: acquired.workEngine ?? profile.runtime,
                 base,
                 requirements: reviewRequirements(ticket),
+                // CYAU-279 — code, link and conditions of the card travel to the PR the delivery opens.
+                ...(ticket.url ? {ticketUrl: ticket.url} : {}),
+                ...(ticket.conditions ? {conditions: ticket.conditions} : {}),
                 // CYAU-237 — the reviewer of a new attempt rereads its own previous findings of this phase.
                 ...(ticket.previousReviewFindings ? {previousFindings: ticket.previousReviewFindings} : {}),
                 // CYAU-172 — the phase comes from the queue, so the server decides the outcome: the skill has

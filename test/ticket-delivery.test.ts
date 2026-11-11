@@ -119,6 +119,26 @@ describe('ticket delivery integrata', () => {
     }
   })
 
+  it('CYAU-279: the PR opens with the code in the title and the card link and conditions in the description', async () => {
+    const opened: Array<{title: string; body: string}> = []
+    const url = 'https://app.closeyour.it/projects/CYAU/tickets/CYAU-37'
+    const h = harness()
+    const delivery: DeliveryProbe = {...h.deps.delivery, createPr: ({title, body}) => {
+      opened.push({title, body})
+      return 'https://github.test/acme/repo/pull/37'
+    }}
+    await runTicketDelivery(input({knowledgeArtifacts: [], ticketUrl: url, conditions: ['Titolo con il codice']}), {...h.deps, delivery})
+    await runTicketDelivery(input({knowledgeArtifacts: []}), {...harness().deps, delivery})
+    expect(opened[0].title).toBe('CYAU-37: Delivery completa')
+    expect(opened[0].body).toContain('- **Codice:** CYAU-37')
+    expect(opened[0].body).toContain(`- **Collegamento:** ${url}`)
+    expect(opened[0].body).toContain('- Titolo con il codice')
+    // Without the card data the description says what is missing and builds nothing.
+    expect(opened[1].body).toContain('- **Codice:** CYAU-37')
+    expect(opened[1].body).toContain('- **Collegamento:** non disponibile')
+    expect(opened[1].body).toContain('Condizioni non disponibili')
+  })
+
   it('if the remote capability is missing persists the local commit and stays suspended without push/PR/Knowledge', async () => {
     const h = harness()
     const output = await runTicketDelivery(input({authorized: false}), h.deps)

@@ -115,6 +115,7 @@ async function dispatch(opts: {
   >
   /** CYAU-295: the phone test, after the CI and before the cross-review. */
   emulatorTest?: (result: Record<string, unknown>) => Promise<{status: 'passed' | 'failed' | 'unavailable'; summary: string}>
+  /** CYAU-306: the cycle's answer to a red CI — one more round, or the round limit. */
   afterVerificationFailure?: (summary: string) => Promise<
     {outcome: 'retry'; retryPrompt: string} | {outcome: 'complete'; runStatus: 'failure'; errorCode: string}
   >
@@ -191,6 +192,102 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     expect(deliver).not.toHaveBeenCalled()
     expect(action.status).toBe('failure')
     expect(action.errorCode).toBe('C409-GATE-002')
+  })
+
+  // CYAU-306 — red checks at the round limit. Before, the local cycle closed `blocked` and the server heard
+  // nothing: the attempt went stale and the phase came back to the queue on the same red checks.
+  describe('red CI and the round limit (CYAU-306)', () => {
+    const limitReached = async () => ({outcome: 'complete' as const, runStatus: 'failure' as const, errorCode: 'C409-CYCLE-002'})
+
+    it('last allowed round still red: the server receives a blocked that must not be retried, with the reason', async () => {
+      const token = `cyi_ah_${'E'.repeat(24)}`
+      const verify = vi.fn(async () => ({status: 'failed' as const, summary: `CI rossa: ci / ci-gate (${token})`}))
+      const finalize = vi.fn()
+      const reviewOnDiff = vi.fn()
+      const afterAccepted = vi.fn(async () => ({outcome: 'complete' as const, runStatus: 'success' as const, errorCode: null}))
+      const afterVerificationFailure = vi.fn(limitReached)
+      const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200, attempt: {status: 'blocked'}}))
+
+      const {log, action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', ticketCode: 'CYAU-306',
+        verify, finalize, reviewOnDiff, afterAccepted, afterVerificationFailure, deliver,
+      })
+
+      expect(afterVerificationFailure).toHaveBeenCalledTimes(1)
+      expect(deliver).toHaveBeenCalledTimes(1)
+      const payload = deliver.mock.calls[0][0] as AttemptDelivery
+      expect(payload).toMatchObject({
+        runtime: 'claude', reviewer_runtime: 'codex',
+        review: {status: 'accepted', depth: 'result'},
+        result: {
+          contract_version: 2, code: 'CYAU-306', state: 'blocked', security_findings: [],
+          failure: {
+            category: 'quality_gate', retryable: false,
+            summary: expect.stringMatching(/^Controlli rossi anche all'ultimo giro di correzione: CI rossa: ci \/ ci-gate/u),
+            human_action: expect.stringContaining('non riprova da sola'),
+          },
+        },
+      })
+      expect(JSON.stringify(payload)).not.toContain(token)
+      // No promotion, no reviewer, and the local cycle is NOT reopened: it stays blocked.
+      expect(finalize).not.toHaveBeenCalled()
+      expect(reviewOnDiff).not.toHaveBeenCalled()
+      expect(afterAccepted).not.toHaveBeenCalled()
+      expect(action.status).toBe('failure')
+      expect(action.errorCode).toBe('C409-CYCLE-002')
+      expect(action.delivery).toMatchObject({
+        outcome: 'ok', phase: 'autopilot', errorCode: 'C409-CYCLE-002', reviewStatus: 'accepted', attemptStatus: 'blocked',
+      })
+      expect(log).toContain('# synthetic_result: blocked-cycle-limit')
+    })
+
+    it('a rejected block keeps its own cause in the record', async () => {
+      const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'rejected', status: 422, code: 'R422'}))
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', ticketCode: 'CYAU-306', deliver,
+        verify: async () => ({status: 'failed' as const, summary: 'CI rossa'}), afterVerificationFailure: limitReached,
+      })
+      expect(deliver).toHaveBeenCalledTimes(1)
+      expect(action.errorCode).toBe('C409-CYCLE-002')
+      expect(action.delivery).toMatchObject({outcome: 'rejected', errorCode: 'C409-WORKFLOW-002', serverErrorCode: 'R422'})
+    })
+
+    it('rounds left: retries the fix as today, without telling the server about a block', async () => {
+      const verify = vi.fn()
+        .mockResolvedValueOnce({status: 'failed', summary: 'CI rossa: ci / ci-gate'})
+        .mockResolvedValueOnce({status: 'passed', summary: 'CI verde', headSha: 'a'.repeat(40)})
+      const finalize = vi.fn(async () => ({status: 'passed' as const, summary: 'PR ready', headSha: 'a'.repeat(40)}))
+      const afterVerificationFailure = vi.fn(async () => ({outcome: 'retry' as const, retryPrompt: 'Correggi la CI'}))
+      const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+
+      await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', ticketCode: 'CYAU-306',
+        verify, finalize, afterVerificationFailure, deliver,
+      })
+
+      expect(afterVerificationFailure).toHaveBeenCalledTimes(1)
+      expect(verify).toHaveBeenCalledTimes(2)
+      // One delivery only, the real result of the second round: no block reached the server.
+      expect(deliver).toHaveBeenCalledTimes(1)
+      expect(deliver.mock.calls[0][0].result).toMatchObject({state: 'delivered'})
+      expect(deliver.mock.calls[0][0].result).not.toHaveProperty('failure')
+    })
+
+    it('unreadable checks on the last round: no limit block, and the cycle is not asked to consume a round', async () => {
+      const afterVerificationFailure = vi.fn(limitReached)
+      const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', ticketCode: 'CYAU-306',
+        verify: async () => ({status: 'unavailable' as const, summary: 'GitHub non raggiungibile'}),
+        afterVerificationFailure, deliver,
+      })
+
+      expect(afterVerificationFailure).not.toHaveBeenCalled()
+      expect(deliver).not.toHaveBeenCalled()
+      expect(action.status).toBe('failure')
+      expect(action.errorCode).toBe('C503-GATE-004')
+    })
   })
 
   // CYAU-295 — the phone test sits between the CI and the cross-review.

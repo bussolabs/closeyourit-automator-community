@@ -60,6 +60,8 @@ export interface ClaimedTicketCandidate {
   platforms?: Array<{id?: string; code?: string; label?: string}>
   scenarios?: Array<{title?: string | null; step_given?: string | null; step_when?: string | null; step_then?: string | null; step_expected?: string | null}>
   conditions?: Array<{text?: string | null}>
+  /** CYAU-279 — the ticket page as composed by the service. Untrusted: checked by `serviceTicketUrl`. */
+  url?: string | null
   /** Structured guidance resolved SERVER-side (CYAU-1): references/procedures/rules. Additive, missing on legacy servers. */
   guidance?: Record<string, unknown> | null
   /**

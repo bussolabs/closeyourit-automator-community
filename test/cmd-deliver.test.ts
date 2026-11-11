@@ -10,6 +10,7 @@ import {
   type LinkTicketArgs,
   type PushArgs,
 } from '../src/lib/deliver'
+import {type TicketDetail} from '../src/lib/ticket-coordinator'
 import {runCaptured, runExpectingExit} from './helpers/command'
 
 // The `deliver` command (CYAU-24) delivers the run for human review: it pushes the allowed branch
@@ -28,14 +29,25 @@ interface Recorded {
 
 let recorded: Recorded
 let existingPr: string | null
+// CYAU-279 — the ticket card the command reads with `cyi tickets show` (null = not readable).
+let card: TicketDetail | null | Error
+let cardReads: Array<{project: string; ticket: string; cwd: string}>
 
 function resetRecorded(): void {
   recorded = {push: [], findPr: [], createPr: [], linkTicket: []}
   existingPr = null
+  card = null
+  cardReads = []
 }
 
 // Test subclass: injects a fake probe in place of the real one (git/gh/cyi), recording the calls.
 class TestDeliver extends Deliver {
+  protected async loadTicket(project: string, ticket: string, cwd: string): Promise<TicketDetail | null> {
+    cardReads.push({project, ticket, cwd})
+    if (card instanceof Error) throw card
+    return card
+  }
+
   protected makeProbe(): DeliveryProbe {
     return {
       push: (a) => recorded.push.push(a),
@@ -181,6 +193,64 @@ describe('deliver command — dry-run (plan without executing)', () => {
     const argv = ['--ticket', 'CYAU-24', '--branch', 'develop', '--project', 'CYAU', '--dry-run']
     const {stderr} = await runExpectingExit(TestDeliver, argv, 2)
     expect(stderr).toContain('C400-DELIVER-001')
+  })
+})
+
+describe('deliver command — link and conditions from the ticket card (CYAU-279)', () => {
+  const url = 'https://app.closeyour.it/projects/CYAU/tickets/CYAU-24'
+  const cardOf = (over: Partial<TicketDetail> = {}): TicketDetail => ({
+    project: 'CYAU', code: 'CYAU-24', cwd: '/wt', title: 'Titolo', comments: [], url,
+    conditions: ['Titolo con il codice', 'Descrizione con link'], ...over,
+  })
+
+  it('reads the card of the delivered ticket and puts code, link and conditions in the PR', async () => {
+    card = cardOf()
+    const {result} = await runCaptured(TestDeliver, [...base, '--summary', 'Apre la PR', '--title', 'Scelto a mano', '--dry-run'])
+    const p = result as DeliverPayload
+    expect(cardReads).toEqual([{project: 'CYAU', ticket: 'CYAU-24', cwd: '/wt'}])
+    expect(p.title).toBe('CYAU-24: Scelto a mano')
+    expect(p.body).toContain('- **Codice:** CYAU-24')
+    expect(p.body).toContain(`- **Collegamento:** ${url}`)
+    expect(p.body).toContain('- Titolo con il codice')
+    expect(p.body).toContain('- Descrizione con link')
+  })
+
+  it('a card without link says the link is missing; a card with no conditions says so', async () => {
+    card = cardOf({url: undefined, conditions: []})
+    const {result} = await runCaptured(TestDeliver, [...base, '--summary', 'x', '--dry-run'])
+    const body = (result as DeliverPayload).body!
+    expect(body).toContain('- **Collegamento:** non disponibile')
+    expect(body).toContain('Il ticket non ha condizioni di fatto.')
+  })
+
+  it('an unreadable card, a failing read or the card of another ticket leave link and conditions unavailable', async () => {
+    for (const unreadable of [null, new Error('cyi down'), cardOf({code: 'CYAU-99'})]) {
+      card = unreadable
+      const {result} = await runCaptured(TestDeliver, [...base, '--summary', 'x', '--dry-run'])
+      const body = (result as DeliverPayload).body!
+      expect(body).toContain('- **Codice:** CYAU-24')
+      expect(body).toContain('- **Collegamento:** non disponibile')
+      expect(body).toContain('Condizioni non disponibili: le trovi sul ticket CYAU-24.')
+      expect(body).not.toContain(url)
+    }
+  })
+
+  it('an undeliverable ticket code is never sent to the card read', async () => {
+    const argv = ['--ticket', 'a/b', '--branch', 'ticket/CYAU-24', '--project', 'CYAU', '--cwd', '/wt', '--gate-passed']
+    await runExpectingExit(TestDeliver, argv, 2)
+    expect(cardReads).toEqual([])
+  })
+
+  it('the real card read fails soft: a read that cannot start is an unreadable card, not an error', async () => {
+    const missingCwd = path.join(os.tmpdir(), 'automator-cmd-deliver-missing-cwd', 'nope')
+    await expect(new Deliver([], {} as never)['loadTicket']('CYAU', 'CYAU-24', missingCwd)).resolves.toBeNull()
+  })
+
+  it('the real delivery opens the PR with the card data', async () => {
+    card = cardOf()
+    await runCaptured(TestDeliver, [...base, '--gate-passed', '--summary', 'x', '--json'])
+    expect(recorded.createPr[0].title).toBe('CYAU-24: x')
+    expect(recorded.createPr[0].body).toContain(`- **Collegamento:** ${url}`)
   })
 })
 

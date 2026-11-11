@@ -8,7 +8,7 @@ import {describe, expect, it} from 'vitest'
 
 import {type ExecutionPhase} from '../src/lib/phase-profile'
 import {parseWorkflowResult} from '../src/lib/typed-workflow'
-import {syntheticBlockedResult} from '../src/lib/unparsable-result'
+import {cycleLimitBlockedResult, syntheticBlockedResult} from '../src/lib/unparsable-result'
 import {
   type ContractManifest,
   enumParityCases,
@@ -172,5 +172,14 @@ describe('contract agent-result/v2', () => {
     })
     // The local parser accepts it too: the same barrier that rejected the original.
     expect(parseWorkflowResult(JSON.stringify(synthetic), phase)).not.toBeNull()
+  })
+
+  // CYAU-306 — the block for red checks at the round limit travels on the same PUT: same schema, same barrier.
+  it('the host cycle-limit blocked validates against autopilot_result', () => {
+    const synthetic = cycleLimitBlockedResult({code: 'CYRA-660', summary: 'CI rossa: ci / ci-gate'})
+    const validate = ajv.getSchema(`${schema.$id}#/$defs/autopilot_result`)!
+    expect(validate(synthetic), JSON.stringify(validate.errors)).toBe(true)
+    expect(synthetic).toMatchObject({failure: {category: 'quality_gate', retryable: false}})
+    expect(parseWorkflowResult(JSON.stringify(synthetic), 'autopilot')).not.toBeNull()
   })
 })

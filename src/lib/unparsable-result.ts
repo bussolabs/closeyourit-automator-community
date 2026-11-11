@@ -56,9 +56,13 @@ export interface SyntheticBlockedInput {
  * remaining piece through.
  */
 export function unparsableReason(issues: string[]): string {
-  const joined = sanitizeMultiline(redactSecrets(issues.join('; ')))
-  const bounded = joined.length > UNPARSABLE_REASON_CHARS ? `${joined.slice(0, UNPARSABLE_REASON_CHARS)}…` : joined
-  return `${UNPARSABLE_REASON_PREFIX}${bounded}`
+  return `${UNPARSABLE_REASON_PREFIX}${boundedReason(issues.join('; '))}`
+}
+
+/** Redacted and cleaned of control sequences, THEN cut: the same order for every reason that leaves the machine. */
+function boundedReason(text: string): string {
+  const clean = sanitizeMultiline(redactSecrets(text))
+  return clean.length > UNPARSABLE_REASON_CHARS ? `${clean.slice(0, UNPARSABLE_REASON_CHARS)}…` : clean
 }
 
 /** Stdout excerpt that may travel to the server: redacted BEFORE the cut, without control sequences. */
@@ -98,5 +102,47 @@ export function syntheticBlockedResult(input: SyntheticBlockedInput): Record<str
         state: 'escalated',
         causa: 'unreachable',
       }
+  }
+}
+
+/**
+ * CYAU-306 — the SYNTHETIC `blocked` the host delivers when the checks are still red on the last allowed round.
+ *
+ * Before, the local cycle closed `blocked` (C409-CYCLE-002) and NOTHING reached the server: without a delivery
+ * the attempt went stale, the server put the phase back in the queue and the ticket started again on red
+ * checks, with nobody told why. The block says it the way the server already reads blocks: v2 contract,
+ * `quality_gate`, and `retryable: false` — a person has to look, retrying alone gives the same red.
+ *
+ * Only for a RED check: a check whose outcome could not be read (`unavailable`) consumes no round and
+ * never gets here. The reason is the CI summary, redacted and cut like the one of the unreadable result.
+ */
+export const CYCLE_LIMIT_REASON_PREFIX = 'Controlli rossi anche all\'ultimo giro di correzione: '
+export const CYCLE_LIMIT_HUMAN_ACTION =
+  'Correggere i controlli rossi o rivedere il piano, poi sbloccare il ticket: la macchina non riprova da sola'
+
+export interface CycleLimitBlockedInput {
+  /** The claimed ticket's code: the contract requires it. */
+  code: string
+  /** What the CI said on the last round (`verification.summary`): redacted and truncated here. */
+  summary: string
+}
+
+export function cycleLimitReason(summary: string): string {
+  return `${CYCLE_LIMIT_REASON_PREFIX}${boundedReason(summary)}`
+}
+
+/** Autopilot only: it is the one phase whose delivery goes through the CI check, so the only one with this limit. */
+export function cycleLimitBlockedResult(input: CycleLimitBlockedInput): Record<string, unknown> {
+  return {
+    contract_version: 2,
+    code: input.code,
+    state: 'blocked',
+    failure: {
+      category: 'quality_gate',
+      summary: cycleLimitReason(input.summary),
+      retryable: false,
+      human_action: CYCLE_LIMIT_HUMAN_ACTION,
+    },
+    security_findings: [],
   }
 }

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.54.2] - 2026-11-09
+
+### Fixed
+
+- **Un ticket con i controlli rossi a giri finiti chiede una persona.** La macchina avvisa il server con un blocco da non ripetere e il motivo, invece di chiudere in silenzio; i controlli non leggibili non lo fanno scattare. (CYAU-306)
+
+## [0.54.0] - 2026-11-09
+
+### Changed
+
+- **La PR aperta dall'automator nomina sempre il suo ticket.** Il titolo comincia sempre con il codice del ticket consegnato, anche quando è scelto a mano. In cima alla descrizione ci sono il codice, il collegamento al ticket restituito dal servizio e le sue condizioni di fatto. Il collegamento si accetta solo se è una pagina sicura del servizio, lunga al massimo 500 caratteri: altrimenti la descrizione dice che manca, senza costruirne uno. La descrizione non supera mai 4000 caratteri: codice e collegamento non si tagliano, il resoconto dell'agente si accorcia oltre 2500 caratteri con un avviso, e le condizioni che non entrano diventano un rimando al ticket. Vale per la consegna automatica e per `automator deliver`, che legge la scheda del ticket con `cyi`. (CYAU-279)
+
 ## [0.53.0] - 2026-11-09
 
 ### Added

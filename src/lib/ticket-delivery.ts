@@ -55,6 +55,10 @@ export interface TicketDeliveryInput {
   automation: TicketAutomationEvidence
   result: AgentRunResult
   knowledgeArtifacts: KnowledgeArtifact[]
+  /** CYAU-279 — the ticket page returned by the service, already checked; missing = not available. */
+  ticketUrl?: string
+  /** CYAU-279 — the ticket's acceptance conditions as read from its card; missing = not read. */
+  conditions?: string[]
   signal?: AbortSignal
 }
 
@@ -187,7 +191,7 @@ export async function runTicketDelivery(
     assertActive(input.signal)
     try {
       delivery = runDelivery({
-        content: prContentFromResult(input.ticket, input.result),
+        content: prContentFromResult(input.ticket, input.result, {url: input.ticketUrl, conditions: input.conditions}),
         branch: input.branch,
         cwd: input.cwd,
         gatePassed: true,

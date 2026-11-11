@@ -88,6 +88,11 @@ export interface TicketDetail extends TicketContent {
   /** Trusted base branch from the sync queue; missing on legacy servers/CLIs. */
   defaultBranch?: string
   cwd: string
+  /**
+   * CYAU-279 — the ticket page as returned by the service, only when it is a safe CloseYourIt address of at most
+   * 500 characters (`serviceTicketUrl`). Missing = not returned or rejected: never built locally.
+   */
+  url?: string
   comments: TicketComment[]
   status?: string
   /** Canonical status code (`open`/`in_progress`/`resolved`…), distinct from the label shown to the user. */
