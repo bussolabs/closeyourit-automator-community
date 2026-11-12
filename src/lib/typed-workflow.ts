@@ -111,7 +111,13 @@ const V2Scenario = z.object({
   id: z.string().regex(/^SC-[1-9][0-9]*$/u), title: NonEmpty,
   given: NonEmpty, when: NonEmpty, then: NonEmpty, expected: NonEmpty,
 }).strict()
-const V2Done = z.object({id: z.string().regex(/^DOD-[1-9][0-9]*$/u), text: NonEmpty}).strict()
+// CYRA-1298 — a criterion may say how it is proven; a plan written before it existed carries none.
+const V2Verification = z.object({
+  kind: z.enum(['test', 'command', 'browser', 'manual']), how: NonEmpty.max(500),
+}).strict()
+const V2Done = z.object({
+  id: z.string().regex(/^DOD-[1-9][0-9]*$/u), text: NonEmpty, verification: V2Verification.optional(),
+}).strict()
 const V2WorkReport = z.object({
   summary: NonEmpty, commit: z.string().regex(/^[0-9a-f]{40}$/u),
   changed_files: z.array(z.object({path: NonEmpty, summary: NonEmpty}).strict()).min(1),

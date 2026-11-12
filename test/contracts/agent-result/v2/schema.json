@@ -223,6 +223,32 @@
           "type": "string",
           "minLength": 1,
           "pattern": "\\S"
+        },
+        "verification": {
+          "type": "object",
+          "description": "How the criterion is proven. Optional: a plan written before it existed carries none.",
+          "required": [
+            "kind",
+            "how"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "test",
+                "command",
+                "browser",
+                "manual"
+              ]
+            },
+            "how": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

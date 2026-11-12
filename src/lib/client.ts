@@ -23,7 +23,7 @@ const REQUEST_TIMEOUT_MS = 15_000
 // the local checkout by comparing the Git remotes (CYAU-10). `default_branch` is not needed for the checkout
 // mapping but is part of the contract (future on-demand auto-clone).
 /** A Definition of Done entry: a string in a v1 plan, {id, text} in a v2 plan (CYRA-877). */
-export type PlanDone = string | {id: string; text: string}
+export type PlanDone = string | {id: string; text: string; verification?: {kind: string; how: string}}
 
 export interface ProjectTarget {
   key: string

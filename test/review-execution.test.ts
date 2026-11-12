@@ -11,6 +11,7 @@ import {
   buildReviewPrompt,
   executeChunkedCrossReview,
   executeCrossReview,
+  materializeReviewSnapshot,
   parseReviewerOutput,
   parseNumstat,
   parseReviewerReport,
@@ -2045,5 +2046,134 @@ describe('OpenCode review', () => {
     )
 
     expect(reviewed).toMatchObject({ok: false, detail: expect.stringContaining('OpenRouter key')})
+  })
+})
+
+describe('review that reads the code (CYAU-328)', () => {
+  beforeEach(() => { vi.stubEnv('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-oat01-review-test') })
+  afterEach(() => { vi.unstubAllEnvs() })
+
+  const selection = selectReviewer('codex')
+  const claudeRequest = {...request, implementer: 'codex' as const, selection}
+  const envelope = JSON.stringify({
+    type: 'result',
+    is_error: false,
+    result: 'text output',
+    structured_output: JSON.parse(report([], claudeRequest)),
+  })
+
+  function initRepo(): {repo: string; git: (args: string[]) => string} {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-code-copy-'))
+    const git = (args: string[]): string => {
+      const result = spawnSync('git', ['-C', repo, ...args], {encoding: 'utf8'})
+      if (result.status !== 0) throw new Error(result.stderr)
+      return result.stdout.trim()
+    }
+    git(['init', '-q', '-b', 'main'])
+    return {repo, git}
+  }
+
+  it('copies only the tracked files of the reviewed tree, never the work folder', async () => {
+    const {repo, git} = initRepo()
+    let copy: Awaited<ReturnType<typeof materializeReviewSnapshot>> = null
+    try {
+      fs.mkdirSync(path.join(repo, 'src'))
+      fs.writeFileSync(path.join(repo, 'src', 'tracked.ts'), 'export const reviewed = true\n')
+      fs.symlinkSync('/etc/hosts', path.join(repo, 'link'))
+      git(['add', '.'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      const tree = git(['rev-parse', 'HEAD^{tree}'])
+      fs.mkdirSync(path.join(repo, '.closeyourit', 'session'), {recursive: true})
+      fs.writeFileSync(path.join(repo, '.closeyourit', 'session', 'commit-message.txt'), 'scratch\n')
+      fs.writeFileSync(path.join(repo, 'src', 'tracked.ts'), 'changed after the snapshot\n')
+      const objectsBefore = git(['count-objects', '-v'])
+
+      copy = await materializeReviewSnapshot(tree, repo)
+
+      expect(copy).not.toBeNull()
+      const directory = (copy as {directory: string}).directory
+      expect(fs.readFileSync(path.join(directory, 'src', 'tracked.ts'), 'utf8')).toBe('export const reviewed = true\n')
+      expect(fs.readdirSync(directory).sort()).toEqual(['link', 'src'])
+      // A symbolic link becomes a plain file holding its target: it can never lead outside the copy.
+      expect(fs.lstatSync(path.join(directory, 'link')).isSymbolicLink()).toBe(false)
+      expect(git(['count-objects', '-v'])).toBe(objectsBefore)
+      await (copy as {cleanup: () => Promise<void>}).cleanup()
+      expect(fs.existsSync(directory)).toBe(false)
+      copy = null
+    } finally {
+      await copy?.cleanup()
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  }, 30_000)
+
+  it('gives no copy when the reviewed tree is not in the repository', async () => {
+    const {repo, git} = initRepo()
+    try {
+      fs.writeFileSync(path.join(repo, 'tracked.ts'), 'base\n')
+      git(['add', '.'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      await expect(materializeReviewSnapshot('c'.repeat(40), repo)).resolves.toBeNull()
+    } finally {
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  }, 30_000)
+
+  it('with the switch on, Claude gets three read tools and read access to the copy only', async () => {
+    vi.stubEnv('AUTOMATOR_REVIEW_READS_CODE', '1')
+    try {
+      const cleanup = vi.fn(async () => undefined)
+      const {spawn, calls} = makeSpawn([{code: 0, stdout: envelope}])
+      const result = await executeCrossReview(claudeRequest, {
+        spawn, fs: fakeReviewFs(), materializeSnapshot: async () => ({directory: '/tmp/review-code/files', cleanup}),
+      })
+      expect(result.status).toBe('completed')
+      const args = calls[0].args
+      expect(args.at(args.indexOf('--tools') + 1)).toBe('Read,Glob,Grep')
+      expect(args.at(args.indexOf('--add-dir') + 1)).toBe('/tmp/review-code/files')
+      expect(args.at(args.indexOf('--permission-mode') + 1)).toBe('plan')
+      const filesystem = args.find((arg) => arg.startsWith('permissions.automator-claude-review.filesystem=')) as string
+      expect(filesystem).toContain('"/tmp/review-code/files" = "read"')
+      expect(filesystem).not.toContain(claudeRequest.cwd)
+      expect(filesystem.match(/= "write"/g)).toHaveLength(1)
+      expect(args).not.toContain(claudeRequest.cwd)
+      const instructions = args.at(args.indexOf('--system-prompt') + 1) as string
+      expect(instructions).toContain('/tmp/review-code/files')
+      expect(instructions).toContain('UNTRUSTED')
+      expect(cleanup).toHaveBeenCalledTimes(1)
+    } finally { vi.unstubAllEnvs() }
+  })
+
+  it('with the switch off, the command is the one of before and no copy is made', async () => {
+    const materializeSnapshot = vi.fn(async () => ({directory: '/tmp/review-code/files', cleanup: async () => undefined}))
+    const off = makeSpawn([{code: 0, stdout: envelope}])
+    await executeCrossReview(claudeRequest, {spawn: off.spawn, fs: fakeReviewFs(), materializeSnapshot})
+    expect(materializeSnapshot).not.toHaveBeenCalled()
+    expect(off.calls[0].args.at(off.calls[0].args.indexOf('--tools') + 1)).toBe('')
+    expect(off.calls[0].args).not.toContain('--add-dir')
+    expect(off.calls[0].args.at(off.calls[0].args.indexOf('--system-prompt') + 1)).toBe(buildReviewerInstructions(claudeRequest))
+  })
+
+  it('falls back to the review without tools when the copy cannot be made', async () => {
+    vi.stubEnv('AUTOMATOR_REVIEW_READS_CODE', '1')
+    try {
+      for (const materializeSnapshot of [async () => null, async () => { throw new Error('git failed') }]) {
+        const {spawn, calls} = makeSpawn([{code: 0, stdout: envelope}])
+        const result = await executeCrossReview(claudeRequest, {spawn, fs: fakeReviewFs(), materializeSnapshot})
+        expect(result.status).toBe('completed')
+        expect(calls[0].args.at(calls[0].args.indexOf('--tools') + 1)).toBe('')
+        expect(calls[0].args).not.toContain('--add-dir')
+      }
+    } finally { vi.unstubAllEnvs() }
+  })
+
+  it('the other reviewers never get the copy, even with the switch on', async () => {
+    vi.stubEnv('AUTOMATOR_REVIEW_READS_CODE', '1')
+    try {
+      const materializeSnapshot = vi.fn(async () => ({directory: '/tmp/review-code/files', cleanup: async () => undefined}))
+      const {spawn, calls} = makeSpawn([{code: 0, stdout: report()}])
+      await executeCrossReview(request, {spawn, fs: fakeReviewFs(), materializeSnapshot})
+      expect(materializeSnapshot).not.toHaveBeenCalled()
+      expect(calls[0].args).toContain('features.shell_tool=false')
+    } finally { vi.unstubAllEnvs() }
   })
 })

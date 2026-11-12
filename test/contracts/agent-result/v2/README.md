@@ -32,6 +32,12 @@ Le differenze principali sono:
 I dati dichiarati dall'agente restano `reported`. Le impronte `observed`, i controlli GitHub e le
 attestazioni della review sono `attested`: l'interfaccia non li presenta come equivalenti.
 
+## Come si verifica un «fatto quando»
+
+Ogni voce di `definition_of_done` può portare `verification`: `kind` (`test`, `command`, `browser`,
+`manual`) e `how`, la frase o il comando che dice come si dimostra. È facoltativo: un piano scritto prima
+non lo ha, e resta valido. Chi consegna continua a dichiarare la prova in `acceptance_evidence`.
+
 ## Compatibilità
 
 - producer aggiornati: planner e autopilot emettono v2;

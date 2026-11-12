@@ -632,6 +632,15 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
     const result = await autopilotPreflight(v2Plan as unknown as typeof approvedPlan)('worker', claudeAction, queueContext)
     const run = result.action?.run ?? ''
     expect(run).toContain('- DOD-1: RSpec verde')
+    // CYRA-1298 — a criterion that says how it is proven reaches the worker with its proof.
+    const proven = {...approvedPlan, definition_of_done: [
+      {id: 'DOD-1', text: 'RSpec verde', verification: {kind: 'command', how: 'bundle exec rspec'}},
+      {id: 'DOD-2', text: 'Nessun link rotto'},
+    ]}
+    const provenResult = await autopilotPreflight(proven as unknown as typeof approvedPlan)('worker', claudeAction, queueContext)
+    const provenRun = provenResult.action?.run ?? ''
+    expect(provenRun).toContain('- DOD-1: RSpec verde (verify by command: bundle exec rspec)')
+    expect(provenRun).toContain('- DOD-2: Nessun link rotto\n')
     expect(run).toContain('- DOD-2: Nessun link rotto')
     expect(run).not.toContain('[object Object]')
   })

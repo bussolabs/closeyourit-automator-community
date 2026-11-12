@@ -1,6 +1,7 @@
 import {type HostActivity, readHostActivity} from './activity'
 import {hasOperationalHostIdentity, isHostToken, type HeartbeatConfig, type Secrets} from './config'
 import {probeAll, type ProbeResult} from './deps'
+import os from 'node:os'
 import path from 'node:path'
 import {skillsDir, skillsModeEnabled, skillsPluginDir} from './paths'
 import {activeBundleIdentity, defaultSkillsGit, type ActiveBundleIdentity} from './skills-manifest'
@@ -49,6 +50,9 @@ export interface HostCapabilities {
   // The check_in is authenticated with the host token, which stays in the header and never enters the payload.
   host_id?: string
   automator_version?: string // automator version (omitted if unknown)
+  // CYAU-304: the machine name as it is NOW, read at every beat (omitted if empty). The name otherwise reaches the
+  // server only at the first registration, so a machine renamed afterwards would keep its old name on the panel.
+  hostname?: string
   platform: string // always linux in production
   arch: string // process.arch (arm64/x64)
   runtimes: RuntimeHealth[] // runtime health: which tools are installed and at which version
@@ -255,6 +259,8 @@ export interface HeartbeatOptions {
    * does not know the field yet drops it, so it costs nothing until the panel shows it.
    */
   agentQuota?: () => AgentQuotaReport[]
+  /** CYAU-304: the current machine name, read at every beat. Default `os.hostname()`; injectable in tests. */
+  hostname?: () => string
 }
 
 /**
@@ -327,7 +333,18 @@ export function makeHeartbeat(secrets: Secrets, opts: HeartbeatOptions = {}): ((
       }
     })()
     const hang = readHang(opts.hang)
-    report(await postHeartbeat(cfg, secrets.host.token, ok, {...capabilities, runtimes, ...activity(), ...lastStops, ...quota, ...(hang ? {hang} : {})}, opts.fetchFn ?? globalThis.fetch))
+    const hostname = readHostname(opts.hostname)
+    report(await postHeartbeat(cfg, secrets.host.token, ok, {...capabilities, ...(hostname ? {hostname} : {}), runtimes, ...activity(), ...lastStops, ...quota, ...(hang ? {hang} : {})}, opts.fetchFn ?? globalThis.fetch))
+  }
+}
+
+// CYAU-304: read at every beat, so a rename reaches the panel without restarting the service. An empty or unreadable
+// name is left out: the server keeps the one it has instead of receiving a blank.
+function readHostname(reader: (() => string) | undefined): string | null {
+  try {
+    return (reader ?? os.hostname)().trim() || null
+  } catch {
+    return null
   }
 }
 

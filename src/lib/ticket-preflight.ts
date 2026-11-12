@@ -715,7 +715,10 @@ const CONFLICT_RESOLUTION_SECTION = [
 
 /** A v1 plan lists its Definition of Done as strings, a v2 plan as {id, text} (CYRA-877). */
 function doneLine(entry: PlanDone): string {
-  return typeof entry === 'string' ? entry : `${entry.id}: ${entry.text}`
+  if (typeof entry === 'string') return entry
+  // CYRA-1298 — the worker proves a criterion the way the approved plan says, when it says so.
+  const proof = entry.verification ? ` (verify by ${entry.verification.kind}: ${entry.verification.how})` : ''
+  return `${entry.id}: ${entry.text}${proof}`
 }
 
 /**

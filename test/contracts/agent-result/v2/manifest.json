@@ -104,6 +104,16 @@
       "path": "fixtures/invalid/delivery_envelope_opencode_runtime.json",
       "definition": "delivery_envelope",
       "valid": false
+    },
+    {
+      "path": "fixtures/valid/planner_verification.json",
+      "definition": "planner_result",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/planner_verification_unknown_kind.json",
+      "definition": "planner_result",
+      "valid": false
     }
   ]
 }

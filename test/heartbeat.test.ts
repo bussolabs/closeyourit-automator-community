@@ -232,6 +232,40 @@ describe('makeHeartbeat', () => {
     expect(JSON.parse(calls[0].opts.body as string).agent_quota).toEqual(quota)
   })
 
+  // CYAU-304 — the name reaches the server only at registration: a renamed machine kept its old name on the panel.
+  it('sends the current machine name', async () => {
+    const {fn, calls} = fakeFetch()
+    const hb = makeHeartbeat({heartbeat: cfg, host: {id: 'h1', token: 'cyi_ah_host'}}, {
+      version: '0.0.1', runtimes: [], fetchFn: fn, activity: () => IDLE_ACTIVITY, hostname: () => 'server-minion-2',
+    })
+    await hb!(true)
+    expect(JSON.parse(calls[0].opts.body as string).hostname).toBe('server-minion-2')
+  })
+
+  it('reads the machine name at every beat, so a rename needs no restart', async () => {
+    const {fn, calls} = fakeFetch()
+    const names = ['old-name', 'server-minion-2']
+    const hb = makeHeartbeat({heartbeat: cfg, host: {id: 'h1', token: 'cyi_ah_host'}}, {
+      version: '0.0.1', runtimes: [], fetchFn: fn, activity: () => IDLE_ACTIVITY, hostname: () => names.shift()!,
+    })
+    await hb!(true)
+    await hb!(true)
+    expect(calls.map((call) => JSON.parse(call.opts.body as string).hostname)).toEqual(['old-name', 'server-minion-2'])
+  })
+
+  it('an empty or unreadable machine name is left out, and the beat still goes out', async () => {
+    const {fn, calls} = fakeFetch()
+    const readers = [() => '   ', () => { throw new Error('no name') }]
+    for (const hostname of readers) {
+      const hb = makeHeartbeat({heartbeat: cfg, host: {id: 'h1', token: 'cyi_ah_host'}}, {
+        version: '0.0.1', runtimes: [], fetchFn: fn, activity: () => IDLE_ACTIVITY, hostname,
+      })
+      await hb!(true)
+    }
+    expect(calls).toHaveLength(2)
+    for (const call of calls) expect(JSON.parse(call.opts.body as string)).not.toHaveProperty('hostname')
+  })
+
   // CYAU-247 — a rejected beat used to vanish: the host looked alive locally and offline on the panel.
   it('logs a rejected beat once, with the server code, and logs the recovery', async () => {
     const replies = [

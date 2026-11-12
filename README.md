@@ -317,6 +317,10 @@ Ogni comando supporta `--json`.
   finestra non chiede lavoro fino al reset. Se la lettura della quota non riesce, si lavora comunque. Il battito
   manda la quota in `agent_quota`; il server la ignora finché non la conosce, e l'attempt resta chiuso come
   interrotto finché il server non accetta uno stato «in pausa fino a».
+- Il battito manda anche il **nome attuale della macchina** in `hostname` (CYAU-304), letto a ogni invio: una
+  macchina rinominata lo comunica al battito successivo, senza riavviare il servizio né registrarsi di nuovo. Un
+  nome vuoto o illeggibile non viene mandato. Il battito ridotto inviato mentre il servizio è bloccato non lo
+  porta. Il server lo ignora finché non lo conosce: il nome sul pannello si aggiorna solo quando il server lo salva.
 - Mentre il quality gate gira, la cartella di lavoro è dichiarata **in uso**: `closeyourit-busy.json` viene scritto
   nella directory amministrativa Git della cartella (`.git/` in un checkout, il gitdir puntato in un worktree
   collegato) con pid, ora d'inizio e ticket, e rimosso alla fine — anche se la verifica fallisce, va in timeout o

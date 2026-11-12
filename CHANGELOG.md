@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-11-12
+
+### Added
+
+- **Come si verifica ogni «fatto quando».** Un piano può dire, per ogni condizione, come si dimostra. La macchina lo accetta e lo passa a chi scrive il codice, che così sa quale prova portare. (CYRA-1298)
+- **Chi rilegge può aprire il codice.** Con `AUTOMATOR_REVIEW_READS_CODE=1` sul servizio, la rilettura di Claude legge una copia dei soli file tracciati, mai la cartella di lavoro. È spento di default: senza la variabile la rilettura resta com'era. (CYAU-328)
+
+## [0.54.3] - 2026-11-09
+
+### Added
+
+- **Il battito porta il nome attuale della macchina.** Il nome si legge a ogni invio, così una macchina rinominata lo comunica senza riavvio né nuova registrazione; un nome vuoto non viene mandato. Il pannello lo mostrerà quando il server imparerà a salvarlo. (CYAU-304)
+
 ## [0.54.2] - 2026-11-09
 
 ### Fixed
