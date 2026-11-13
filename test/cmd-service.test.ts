@@ -258,6 +258,21 @@ describe('install', () => {
       expect(passed.env.AUTOMATOR_SANDBOX_DOMAINS).toBe('cyi.example.com')
     })
 
+    it('saves the Tester and the code-reading review switches only when the install shell sets them to 1 (CYAU-329)', async () => {
+      process.env.AUTOMATOR_TESTER = '1'
+      process.env.AUTOMATOR_REVIEW_READS_CODE = 'yes'
+      try {
+        await run(Install, ['--playbook', '/tmp/pb.yml'])
+      } finally {
+        delete process.env.AUTOMATOR_TESTER
+        delete process.env.AUTOMATOR_REVIEW_READS_CODE
+      }
+
+      const passed = fake.manager.install.mock.calls[0][0] as {env: Record<string, string>}
+      expect(passed.env.AUTOMATOR_TESTER).toBe('1')
+      expect(passed.env).not.toHaveProperty('AUTOMATOR_REVIEW_READS_CODE')
+    })
+
     it('leaves both out of the unit when the install shell has none', async () => {
       await run(Install, ['--playbook', '/tmp/pb.yml'])
 

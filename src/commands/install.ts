@@ -114,6 +114,9 @@ export default class Install extends BaseCommand {
       // than the installed ones and refuse every Claude session (CYRA-914 B9).
       ...(process.env.AUTOMATOR_PRODUCTION_HOSTS ? {AUTOMATOR_PRODUCTION_HOSTS: process.env.AUTOMATOR_PRODUCTION_HOSTS} : {}),
       ...(process.env.AUTOMATOR_SANDBOX_DOMAINS ? {AUTOMATOR_SANDBOX_DOMAINS: process.env.AUTOMATOR_SANDBOX_DOMAINS} : {}),
+      // Machine-side switches (CYAU-328, CYAU-329): only the value that turns them on is kept.
+      ...(process.env.AUTOMATOR_REVIEW_READS_CODE === '1' ? {AUTOMATOR_REVIEW_READS_CODE: '1'} : {}),
+      ...(process.env.AUTOMATOR_TESTER === '1' ? {AUTOMATOR_TESTER: '1'} : {}),
     }
 
     const manager = serviceManager(platform)

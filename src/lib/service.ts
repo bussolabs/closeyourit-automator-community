@@ -272,6 +272,9 @@ const SAFE_SERVICE_ENV = new Set([
   // doctor must see what `install` saw. Validated by command-policy and guardrails, which throw on a malformed entry.
   'AUTOMATOR_PRODUCTION_HOSTS',
   'AUTOMATOR_SANDBOX_DOMAINS',
+  // Machine-side switches, off unless `install` saw them set to 1 (CYAU-328, CYAU-329): the server cannot turn them on.
+  'AUTOMATOR_REVIEW_READS_CODE',
+  'AUTOMATOR_TESTER',
 ])
 
 /** Deterministic quoting of the systemd subset emitted by Automator. `%` is always made literal. */

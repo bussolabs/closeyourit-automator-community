@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.56.1] - 2026-11-13
+
+### Fixed
+
+- **Il Tester si accende davvero.** `AUTOMATOR_TESTER=1` e `AUTOMATOR_REVIEW_READS_CODE=1` passati a `automator install --managed` restano nel servizio. Prima il servizio li rifiutava. (CYAU-329)
+
 ## [0.56.0] - 2026-11-13
 
 ### Added

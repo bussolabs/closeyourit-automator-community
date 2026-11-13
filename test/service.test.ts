@@ -327,6 +327,20 @@ describe('SystemdManager', () => {
     expect(adopted?.env.AUTOMATOR_SANDBOX_DOMAINS).toBe('cyi.example.com')
   })
 
+  it('keeps the Tester and the code-reading review switches in an attestable unit (CYAU-329)', () => {
+    const h = home()
+    const {exec} = recordingExec()
+    const mgr = serviceManager('linux', exec, h)
+    mgr.install({...opts, nodePath: '/service/node', entrypoint: '/opt/automator/current/bin/run.js',
+      env: {AUTOMATOR_INSTALL_ROOT: '/opt/automator', AUTOMATOR_CONFIG_DIR: '/opt/config', CODEX_HOME: '/opt/codex',
+        AUTOMATOR_TESTER: '1', AUTOMATOR_REVIEW_READS_CODE: '1'}})
+
+    const adopted = mgr.runtime()
+    expect(adopted).not.toBeNull()
+    expect(adopted?.env.AUTOMATOR_TESTER).toBe('1')
+    expect(adopted?.env.AUTOMATOR_REVIEW_READS_CODE).toBe('1')
+  })
+
   it('rejects non-attestable systemd environment and paths', () => {
     const h = home()
     const {exec} = recordingExec()
