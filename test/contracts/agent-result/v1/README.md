@@ -35,3 +35,12 @@ il suo `$def` (valide/invalide) e i checksum `SHA256SUMS`.
 
 I consumatori (Rails `spec/contracts/agent_result_v1_spec.rb`, automator `test/contract-agent-result.test.ts`)
 vendorizzano questo bundle byte-identico e pinnano il commit docs in `LOCK.json`.
+
+## L'esito del Tester
+
+La busta della consegna può portare `tester` (CYAU-329): l'esito di una sessione separata, mai quella che
+ha scritto il lavoro, che ha eseguito i «fatto quando» del piano approvato. `moment` dice quando:
+`delivery` (prove `test` e `command`, prima della rilettura) o `staging` (prove `browser`, prima del tag
+di produzione). Porta `status` (`passed`, `failed`, `unavailable`), `engine`, il `commit` provato, una
+`summary` e una voce per criterio in `results`. Lo scrive la macchina, non l'agente, quindi è `attested`.
+È facoltativo: una macchina che non ha il Tester consegna senza. Quando serve lo decide il server.

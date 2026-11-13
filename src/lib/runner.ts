@@ -1,3 +1,5 @@
+import {type BrowserBlock, type BrowserReport} from './browser-tester'
+import {type TesterBlock, type TesterEngine, type TesterReport} from './tester'
 import * as fs from 'node:fs'
 import {type Action, type Playbook} from './schema'
 import {selectDue} from './scheduler'
@@ -169,6 +171,10 @@ export interface WorkflowDelivery {
   finalize?(result: Record<string, unknown>, verifiedSha: string, signal?: AbortSignal): Promise<WorkflowDeliveryVerification>
   /** CYAU-295 — the phone test, after the CI and before the cross-review. */
   emulatorTest?(result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowEmulatorVerification>
+  /** CYAU-329 — the Tester: after the phone test, before the cross-review. */
+  tester?(engine: TesterEngine, ask: (prompt: string) => Promise<string | null>, signal?: AbortSignal): Promise<TesterReport>
+  /** CYAU-329 — the Tester on staging: the plan's browser proofs, before the session that tags production. */
+  browserTester?(engine: TesterEngine, ask: (prompt: string) => Promise<string | null>, signal?: AbortSignal): Promise<BrowserReport>
   /** Brings a red CI back to the implementer cycle without delivering the result to the server. */
   afterVerificationFailure?(summary: string): Promise<TicketRunAfterResult>
   /** Closes the local state only after the server has accepted the delivery. */
@@ -943,6 +949,42 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           // No effect on the outcome: a lost measurement cannot make a successful run fail.
         }
       }
+      // CYAU-329 — the plan is proven in a browser: before the session that tags production, the engine that does NOT
+      // run the release names the steps, read-only, and the machine drives the browser on staging. Anything but a pass
+      // stops here: the tag is not pushed, the reason is written on the ticket, and the phase stays for a person.
+      let browserBlock: BrowserBlock | undefined
+      if (workflowDelivery?.browserTester && effectiveAction.type !== 'shell') {
+        const browserEngine: TesterEngine = effectiveAction.type === 'claude' ? 'codex' : 'claude'
+        const browserRuntime = browserEngine === 'codex' ? codexRuntime : claudeRuntime
+        const releaseAction = effectiveAction
+        const askBrowser = async (prompt: string): Promise<string | null> => {
+          const stepAction: Action = browserEngine === 'codex'
+            ? {type: 'codex', run: prompt, schedule: releaseAction.schedule, sandbox: 'read-only',
+                cwd: releaseAction.cwd, timeout: releaseAction.timeout, enabled: true, catch_up: false,
+                containment: releaseAction.containment}
+            : {type: 'claude', run: prompt, schedule: releaseAction.schedule, permission_mode: 'plan',
+                allowed_tools: ['Read', 'Glob', 'Grep'], cwd: releaseAction.cwd, timeout: releaseAction.timeout,
+                enabled: true, catch_up: false, containment: releaseAction.containment}
+          const asked = await browserRuntime.execute(`${name}tester`, stepAction, {
+            playbookDir: opts.playbookDir, logDir: opts.logDir, logName: `${logName}tester`,
+            now: opts.now, spawn: opts.spawn,
+            secrets: opts.secrets, clock: opts.clock, signal: opts.signal,
+            authorizedCwd: ticketRun?.authorizedCwd ?? opts.authorizedCwds?.[name],
+          }).result
+          chargeSession(asked.stdout)
+          return asked.status === 'success' ? asked.stdout : null
+        }
+        const proven = await workflowDelivery.browserTester(browserEngine, askBrowser, opts.signal)
+        if (proven.status !== 'passed') {
+          const reason = `prove in browser su staging non superate, rilascio in produzione non avviato: ${proven.summary}`
+          await ticketRun?.block().catch(() => undefined)
+          await executionLease?.release().catch(() => undefined)
+          preflightStopped.push({name, state: 'blocked', reason, audit: [{phase: 'tester', state: 'stopped', reason}]})
+          updateAction(state, name, {last_run: nowIso, last_status: 'skipped'})
+          return 'continue'
+        }
+        if (proven.block) browserBlock = proven.block
+      }
       const runtime = effectiveAction.type === 'claude' ? claudeRuntime : effectiveAction.type === 'codex' ? codexRuntime : shellRuntime
       let execution!: {result: RunResult; leaseLost: boolean}
       let result!: RunResult
@@ -1214,6 +1256,39 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                   return
                 }
               }
+              // CYAU-329 — the Tester runs the proofs of the approved plan on the delivered commit, after the checks
+              // and before paying a reviewer. The engine that did NOT write the work names one command per proof,
+              // read-only; the machine runs them. A failed proof goes back to the agent like a red CI. An outcome
+              // that is not a pass still travels with the delivery: the server decides what it is worth.
+              let testerBlock: TesterBlock | undefined
+              if (workflowDelivery.tester && hasDiffToReview(structured)) {
+                const testerEngine: TesterEngine = effectiveAction.type === 'claude' ? 'codex' : 'claude'
+                const testerRuntime = testerEngine === 'codex' ? codexRuntime : claudeRuntime
+                const askTester = async (prompt: string): Promise<string | null> => {
+                  const testerAction: Action = testerEngine === 'codex'
+                    ? {type: 'codex', run: prompt, schedule: effectiveAction.schedule, sandbox: 'read-only',
+                        cwd: effectiveAction.cwd, timeout: effectiveAction.timeout, enabled: true, catch_up: false,
+                        containment: effectiveAction.containment}
+                    : {type: 'claude', run: prompt, schedule: effectiveAction.schedule, permission_mode: 'plan',
+                        allowed_tools: ['Read', 'Glob', 'Grep'], cwd: effectiveAction.cwd, timeout: effectiveAction.timeout,
+                        enabled: true, catch_up: false, containment: effectiveAction.containment}
+                  const asked = await testerRuntime.execute(`${name}tester`, testerAction, {
+                    playbookDir: opts.playbookDir, logDir: opts.logDir, logName: `${logName}tester`,
+                    now: opts.now, spawn: opts.spawn,
+                    secrets: opts.secrets, clock: opts.clock, signal: lifecycleSignal,
+                    authorizedCwd: ticketRun?.authorizedCwd ?? opts.authorizedCwds?.[name],
+                  }).result
+                  // The Tester too is a session paid on the ticket (CYAU-155).
+                  chargeSession(asked.stdout)
+                  return asked.status === 'success' ? asked.stdout : null
+                }
+                const tested = await workflowDelivery.tester(testerEngine, askTester, lifecycleSignal)
+                if (tested.status === 'failed' && workflowDelivery.afterVerificationFailure) {
+                  lifecycleResult = await workflowDelivery.afterVerificationFailure(tested.summary)
+                  return
+                }
+                if (tested.block) testerBlock = tested.block
+              }
               // CYAU-176 — who reviews, and on what.
               //
               // Before, a second session always started that received ONLY the report written by the
@@ -1334,6 +1409,8 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                   return
                 }
               }
+              if (testerBlock) payload.tester = testerBlock
+              else if (browserBlock) payload.tester = browserBlock
               const delivered = await workflowDelivery.deliver(payload)
               // A rejection on the merits (the server decided) and a delivery that did not arrive (network, timeout,
               // 5xx, credential) have opposite remedies and no longer share the same code. A non-approved

@@ -43,6 +43,7 @@ import {
   type EmulatorTestInput,
   type EmulatorTestReport,
 } from './emulator-test'
+import {TESTER_COMMAND_TIMEOUT_S, runTester, testerEnabled, type TesterCriterion, type TesterEngine, type TesterInput, type TesterReport} from './tester'
 import {
   finalizeRemoteQualityGate,
   verifyRemoteQualityGate,
@@ -137,6 +138,8 @@ export interface TicketCycleInput {
    * phase upstream). They reach the diff reviewer as untrusted data; missing on a first round.
    */
   previousFindings?: PreviousReviewFinding[]
+  /** CYAU-329 — the done criteria of the approved plan a machine can run (a test or a command). */
+  testerCriteria?: TesterCriterion[]
   /**
    * CYAU-172 — the outcome of this phase is decided by the SERVER, not by the local check.
    *
@@ -203,6 +206,11 @@ export interface TicketRunLifecycle {
   finalizeWorkflowDelivery?(result: Record<string, unknown>, verifiedSha: string, signal?: AbortSignal): Promise<WorkflowDeliveryVerification>
   /** CYAU-295 — the phone test declared by the base branch: after the remote CI, before the cross-review. */
   emulatorTestWorkflowDelivery?(result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowEmulatorVerification>
+  /**
+   * CYAU-329 — the Tester: after the phone test, before the cross-review. `ask` runs the read-only session of the
+   * engine that did not write the work; the machine runs the commands it names.
+   */
+  testerWorkflowDelivery?(engine: TesterEngine, ask: (prompt: string) => Promise<string | null>, signal?: AbortSignal): Promise<TesterReport>
   /** A red CI (or a crash on the emulated phone) goes back to the implementer without delivering an attempt. */
   afterWorkflowVerificationFailure?(summary: string): Promise<TicketRunAfterResult>
   /** The terminal checkpoint is created only after the server's actual acceptance. */
@@ -284,6 +292,8 @@ export interface TicketCycleOptions {
   finalizeRemoteGate?: (input: RemoteGateInput, verifiedSha: string) => Promise<RemoteGateResult>
   /** CYAU-295 — runs the phone test on the ticket worktree; never throws. */
   runEmulatorTest?: (input: EmulatorTestInput) => Promise<EmulatorTestReport>
+  /** CYAU-329 — runs the Tester on the ticket worktree; never throws. */
+  runTester?: (input: TesterInput) => Promise<TesterReport>
   /** CYAU-295 — screenshot and outcome on the ticket; throws when the service refuses them. */
   publishEmulatorEvidence?: (input: EmulatorEvidenceInput) => void | Promise<void>
   /** Explicit capability for the CYAU-37 remote effects. Missing leaves the cycle in `in_review`. */
@@ -534,6 +544,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
   const finalizeRemote = options.finalizeRemoteGate ?? ((input, sha) => finalizeRemoteQualityGate(input, sha))
   const executeEmulatorTest = options.runEmulatorTest ?? ((input) => runEmulatorTest(input))
   const publishEvidence = options.publishEmulatorEvidence ?? ((input) => publishEmulatorEvidence(input))
+  const executeTester = options.runTester ?? ((input: TesterInput) => runTester(input))
 
   return {
     async prepare(input) {
@@ -1160,7 +1171,15 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
             return {status: config.required ? 'unavailable' : 'passed', summary: note}
           },
         } : {}),
-        ...(remoteConfig || emulatorConfig ? {
+        ...(testerEnabled() && input.outcomeOwnedByServer && input.testerCriteria?.length ? {
+          async testerWorkflowDelivery(engine: TesterEngine, ask: (prompt: string) => Promise<string | null>, signal?: AbortSignal): Promise<TesterReport> {
+            return executeTester({
+              criteria: input.testerCriteria!, cwd: prepared.worktreePath, ticket: input.ticket, engine,
+              timeoutSeconds: TESTER_COMMAND_TIMEOUT_S, askCommands: ask, signal: signal ?? input.signal,
+            })
+          },
+        } : {}),
+        ...(remoteConfig || emulatorConfig || (testerEnabled() && input.testerCriteria?.length) ? {
           async afterWorkflowVerificationFailure(summary: string) {
             return retryAfterWorkflowFinding(summary)
           },

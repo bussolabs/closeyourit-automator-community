@@ -1,3 +1,5 @@
+import type {BrowserBlock} from './browser-tester'
+import {type TesterBlock} from './tester'
 import {isHostToken, isOrgToken, isUserToken, type SyncConfig} from './config'
 import {type FetchFn} from './heartbeat'
 import {type SandboxModeT} from './schema'
@@ -267,6 +269,8 @@ export interface Lease {
    * releasing together picked the same name, and the second publication was rejected.
    */
   release?: {version: string; sha?: string}
+  /** CYAU-329 — the server asks this machine to try the plan's browser proofs on staging before the production tag. */
+  browser_proof?: boolean
 }
 
 /** Review depth due to the phase. The server decides it; the host executes it. */
@@ -313,6 +317,8 @@ export interface AttemptDelivery {
    * requires it exactly there, and it is the only one that knows which phase was claimed.
    */
   observed?: {head_sha: string}
+  /** CYAU-329 — what the machine's Tester measured on the delivered commit. Missing when it did not run. */
+  tester?: TesterBlock | BrowserBlock
   /** CYRA-872 — the known Claude spend of the attempt, in dollars. Missing when unknown (Codex): never a zero. */
   cost_usd?: number
   /** CYRA-872 — the work session's model, to compare costs across models. */
@@ -495,6 +501,8 @@ function parseLease(body: unknown): Lease | null {
   if (typeof d.work_model === 'string' && d.work_model.trim()) lease.work_model = d.work_model.trim()
   // CYRA-621 — checked shape: a number that is not a number is not passed to the session as if
   // it were, and an abbreviated identifier identifies nothing.
+  // CYAU-329 — only a literal `true` asks for the browser proofs: anything else is not a request.
+  if (d.browser_proof === true) lease.browser_proof = true
   const release = d.release as {version?: unknown; sha?: unknown} | null | undefined
   const versione = release && typeof release.version === 'string' ? release.version : null
   if (versione && /^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/u.test(versione)) {

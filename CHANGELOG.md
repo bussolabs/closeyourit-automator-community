@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.56.0] - 2026-11-13
+
+### Added
+
+- **Il Tester esegue le prove del piano.** Con `AUTOMATOR_TESTER=1` sul servizio, dopo i controlli e prima della rilettura la macchina esegue le prove di tipo test e comando del piano approvato, chiuse nella gabbia e senza rete. Una prova fallita torna a chi ha scritto il codice. È spento di default. (CYAU-329)
+- **Il Tester prova in browser su staging.** Prima del tag di produzione la macchina apre lo staging del progetto e segue le prove in browser del piano, con il browser chiuso nella gabbia e limitato a quel sito. Se una prova non passa, il rilascio non parte. Serve `agent-browser` sulla macchina. (CYAU-329)
+
+### Fixed
+
+- **File di sistema nella gabbia.** I comandi chiusi nella gabbia non potevano usare `/dev/null` né leggere numeri casuali. Ora la gabbia ha la sua cartella dei dispositivi. (CYAU-329)
+
 ## [0.55.0] - 2026-11-12
 
 ### Added

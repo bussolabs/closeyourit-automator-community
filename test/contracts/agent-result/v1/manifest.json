@@ -302,6 +302,21 @@
       "path": "fixtures/valid/triage_workable.json",
       "definition": "triage_result",
       "valid": true
+    },
+    {
+      "path": "fixtures/valid/delivery_envelope_tester_passed.json",
+      "definition": "delivery_envelope",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/delivery_envelope_tester_staging_failed.json",
+      "definition": "delivery_envelope",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/delivery_envelope_tester_unknown_status.json",
+      "definition": "delivery_envelope",
+      "valid": false
     }
   ]
 }

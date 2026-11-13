@@ -114,6 +114,21 @@
       "path": "fixtures/invalid/planner_verification_unknown_kind.json",
       "definition": "planner_result",
       "valid": false
+    },
+    {
+      "path": "fixtures/valid/delivery_envelope_tester_passed.json",
+      "definition": "delivery_envelope",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/delivery_envelope_tester_staging_failed.json",
+      "definition": "delivery_envelope",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/delivery_envelope_tester_unknown_status.json",
+      "definition": "delivery_envelope",
+      "valid": false
     }
   ]
 }

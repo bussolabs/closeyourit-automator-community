@@ -5,6 +5,7 @@ import {join} from 'node:path'
 import {describe, expect, it} from 'vitest'
 import {
   executeCrossReview,
+  materializeReviewSnapshot,
   resolveTrustedReviewExecutableSync,
   resolveReviewerRuntime,
   reviewDiffSha256,
@@ -115,8 +116,61 @@ describe('real reviewer CLIs — offline smoke of the installed versions', () =>
         '--no-session-persistence',
         '--strict-mcp-config',
         '--mcp-config',
+        '--add-dir',
       ]) expect(help.stdout).toContain(flag)
     },
+  )
+
+  // CYAU-328 — the same permissions the Claude review gets when it may read the code: the copy is readable,
+  // nothing else of the repository is, and the copy cannot be written.
+  it.runIf(process.platform === 'linux' && codexPath !== null)(
+    'the confined reviewer reads the copy of the tracked files and nothing outside it',
+    async () => {
+      const repo = mkdtempSync(join(tmpdir(), 'automator-review-copy-repo-'))
+      const home = mkdtempSync(join(tmpdir(), 'automator-review-copy-home-'))
+      const git = (args: string[]): string => {
+        const result = spawnSync('/usr/bin/git', ['-C', repo, ...args], {encoding: 'utf8'})
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout.trim()
+      }
+      git(['init', '-q', '-b', 'main'])
+      writeFileSync(join(repo, 'tracked.ts'), 'REVIEW_COPY_READABLE\n')
+      git(['add', '.'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      writeFileSync(join(repo, 'untracked-scratch.txt'), 'REVIEW_COPY_MUST_NOT_READ_THIS\n')
+      const copy = await materializeReviewSnapshot(git(['rev-parse', 'HEAD^{tree}']), repo)
+      try {
+        expect(copy).not.toBeNull()
+        const directory = (copy as {directory: string}).directory
+        const codex = await resolveReviewerRuntime('codex', {forbiddenRoots: [process.cwd()]})
+        const filesystem = [...codex.readPaths, directory].map((entry) => `${JSON.stringify(entry)} = "read"`).join(', ')
+        const confined = (command: string, args: string[]) => spawnSync(codex.command, [...codex.prefix,
+          'sandbox',
+          '-C', home,
+          '--permission-profile', 'automator-claude-review',
+          '-c', 'default_permissions="automator-claude-review"',
+          '-c', `permissions.automator-claude-review.filesystem={ ":minimal" = "read", ${filesystem}, ${JSON.stringify(home)} = "write" }`,
+          '-c', 'permissions.automator-claude-review.network.enabled=false',
+          '--', command, ...args,
+        ], {cwd: home, env: minimalEnv, encoding: 'utf8', timeout: 20_000})
+
+        const inside = confined('/bin/cat', [join(directory, 'tracked.ts')])
+        expect(inside.status, inside.stderr).toBe(0)
+        expect(inside.stdout).toContain('REVIEW_COPY_READABLE')
+
+        const outside = confined('/bin/cat', [join(repo, 'untracked-scratch.txt')])
+        expect(outside.status).not.toBe(0)
+        expect(`${outside.stdout}\n${outside.stderr}`).not.toContain('REVIEW_COPY_MUST_NOT_READ_THIS')
+
+        const write = confined('/bin/sh', ['-c', `echo changed > ${JSON.stringify(join(directory, 'tracked.ts'))}`])
+        expect(write.status).not.toBe(0)
+      } finally {
+        await copy?.cleanup()
+        rmSync(repo, {recursive: true, force: true})
+        rmSync(home, {recursive: true, force: true})
+      }
+    },
+    60_000,
   )
 })
 

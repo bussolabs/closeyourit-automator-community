@@ -1215,6 +1215,93 @@
       ],
       "additionalProperties": true
     },
+    "tester_envelope": {
+      "description": "What the machine's Tester found (CYAU-329): a separate session, never the one that wrote the work, ran the done criteria of the approved plan. `delivery` runs the `test` and `command` criteria before the cross-review; `staging` opens the staging site for the `browser` criteria before the production tag. The machine writes this block, not the agent whose work is tested. The contract fixes the SHAPE only: WHEN it is required is decided by the server.",
+      "type": "object",
+      "required": [
+        "moment",
+        "status",
+        "engine",
+        "commit",
+        "summary",
+        "results"
+      ],
+      "properties": {
+        "moment": {
+          "enum": [
+            "delivery",
+            "staging"
+          ]
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "unavailable"
+          ]
+        },
+        "engine": {
+          "enum": [
+            "claude",
+            "codex"
+          ]
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "criterion_id",
+              "kind",
+              "status",
+              "evidence"
+            ],
+            "properties": {
+              "criterion_id": {
+                "type": "string",
+                "pattern": "^DOD-[1-9][0-9]*$"
+              },
+              "kind": {
+                "enum": [
+                  "test",
+                  "command",
+                  "browser"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "not_run"
+                ]
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600,
+                "pattern": "\\S"
+              },
+              "attachment": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "delivery_envelope": {
       "type": "object",
       "required": [
@@ -1265,6 +1352,9 @@
             }
           },
           "additionalProperties": false
+        },
+        "tester": {
+          "$ref": "#/$defs/tester_envelope"
         }
       },
       "additionalProperties": true

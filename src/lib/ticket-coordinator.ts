@@ -1,3 +1,4 @@
+import {type PlanDone} from './client'
 import {
   decideClarification,
   readClarificationState,
@@ -123,6 +124,8 @@ export interface TicketDetail extends TicketContent {
    * spec, stopped on every ticket.
    */
   approvedPlan?: string
+  /** CYAU-329 — the done criteria of the APPROVED plan, as the server sent them: the Tester picks the ones it can run. */
+  approvedDone?: PlanDone[]
   /** CYAU-240 — clarification questions already answered: decisions taken on the ticket, oldest first. */
   answeredQuestions?: Array<{question: string; answer: string}>
   /**

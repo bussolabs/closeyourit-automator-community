@@ -1,0 +1,36 @@
+{
+  "runtime": "claude",
+  "reviewer_runtime": "codex",
+  "result": {
+    "code": "CYAU-97",
+    "category": "backend",
+    "capabilities": [
+      "backend"
+    ],
+    "risk": "low",
+    "requires_human_approval": false,
+    "reasons": [
+      "Classificazione chiara"
+    ],
+    "state": "workable"
+  },
+  "review": {
+    "status": "accepted",
+    "summary": "Classificazione corretta e giustificata."
+  },
+  "tester": {
+    "moment": "delivery",
+    "status": "green",
+    "engine": "codex",
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "summary": "Due prove eseguite, tutte superate.",
+    "results": [
+      {
+        "criterion_id": "DOD-1",
+        "kind": "test",
+        "status": "passed",
+        "evidence": "bundle exec rspec spec/models/agents/plan_spec.rb: 12 examples, 0 failures"
+      }
+    ]
+  }
+}

@@ -1,3 +1,5 @@
+import {type BrowserBlock, type BrowserReport} from '../src/lib/browser-tester'
+import {type TesterBlock, type TesterReport} from '../src/lib/tester'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -115,6 +117,10 @@ async function dispatch(opts: {
   >
   /** CYAU-295: the phone test, after the CI and before the cross-review. */
   emulatorTest?: (result: Record<string, unknown>) => Promise<{status: 'passed' | 'failed' | 'unavailable'; summary: string}>
+  /** CYAU-329: the Tester, after the phone test and before the cross-review. */
+  tester?: (engine: 'claude' | 'codex', ask: (prompt: string) => Promise<string | null>) => Promise<TesterReport>
+  /** CYAU-329: the browser proofs on staging, before the session that tags production. */
+  browserTester?: (engine: 'claude' | 'codex', ask: (prompt: string) => Promise<string | null>) => Promise<BrowserReport>
   /** CYAU-306: the cycle's answer to a red CI — one more round, or the round limit. */
   afterVerificationFailure?: (summary: string) => Promise<
     {outcome: 'retry'; retryPrompt: string} | {outcome: 'complete'; runStatus: 'failure'; errorCode: string}
@@ -154,6 +160,8 @@ async function dispatch(opts: {
         ...(opts.verify ? {verify: opts.verify} : {}),
         ...(opts.finalize ? {finalize: opts.finalize} : {}),
         ...(opts.emulatorTest ? {emulatorTest: opts.emulatorTest} : {}),
+        ...(opts.tester ? {tester: opts.tester} : {}),
+        ...(opts.browserTester ? {browserTester: opts.browserTester} : {}),
         ...(opts.afterVerificationFailure ? {afterVerificationFailure: opts.afterVerificationFailure} : {}),
         ...(opts.reviewOnDiff ? {reviewOnDiff: opts.reviewOnDiff} : {}),
       },
@@ -1135,5 +1143,101 @@ describe('runOnce — cost and model at delivery (CYRA-872)', () => {
     })
 
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({cost_usd: 0.3, model: 'claude-opus-5-5'}))
+  })
+})
+
+describe('runOnce — the Tester in a delivery (CYAU-329)', () => {
+  const block = (status: TesterBlock['status']): TesterBlock => ({
+    moment: 'delivery', status, engine: 'codex', commit: 'a'.repeat(40), summary: 'Prove eseguite.',
+    results: [{criterion_id: 'DOD-1', kind: 'test', status: status === 'passed' ? 'passed' : status === 'failed' ? 'failed' : 'not_run', evidence: 'Comando: bin/rspec → exit'}],
+  })
+  const passedCi = () => vi.fn(async () => ({status: 'passed' as const, summary: 'CI verde', headSha: 'a'.repeat(40)}))
+  const ok = () => vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+
+  it('runs with the engine that did not write the work and its outcome travels with the delivery', async () => {
+    const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'passed', summary: 'Tutte superate.', block: block('passed')}))
+    const deliver = ok()
+
+    const {action} = await dispatch({stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', verify: passedCi(), tester, deliver})
+
+    expect(tester).toHaveBeenCalledWith('codex', expect.any(Function), expect.anything())
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({tester: block('passed')}))
+    expect(action.status).toBe('success')
+  })
+
+  it('sends a failed proof back to the implementer and delivers nothing', async () => {
+    const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'failed', summary: 'Il Tester ha visto fallire: DOD-1.', block: block('failed')}))
+    // The cycle answers with the round limit here: a `retry` would run the session again, and this double always fails.
+    const afterVerificationFailure = vi.fn(async () => ({outcome: 'complete' as const, runStatus: 'failure' as const, errorCode: 'C409-CYCLE-002'}))
+    const deliver = ok()
+
+    const {action} = await dispatch({
+      stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', verify: passedCi(), tester, afterVerificationFailure, deliver,
+    })
+
+    expect(afterVerificationFailure).toHaveBeenCalledWith('Il Tester ha visto fallire: DOD-1.')
+    expect(deliver).not.toHaveBeenCalled()
+    expect(action.status).toBe('failure')
+  })
+
+  it('delivers a proof it could not run with its outcome: the server decides', async () => {
+    const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'unavailable', summary: 'Non eseguite: DOD-1.', block: block('unavailable')}))
+    const deliver = ok()
+
+    await dispatch({stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', verify: passedCi(), tester, deliver})
+
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({tester: block('unavailable')}))
+  })
+
+  it('delivers without a block when the machine could not run the Tester at all', async () => {
+    const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'unavailable', summary: 'bubblewrap non disponibile', block: null}))
+    const deliver = ok()
+
+    await dispatch({stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', verify: passedCi(), tester, deliver})
+
+    expect(deliver).toHaveBeenCalledTimes(1)
+    expect(deliver.mock.calls[0]?.[0]).not.toHaveProperty('tester')
+  })
+})
+
+describe('runOnce — the Tester on staging before the production tag (CYAU-329)', () => {
+  const RELEASED = {code: 'CYRA-2', state: 'production-released', tag: 'v1.2.3', commit: 'c'.repeat(40), awaiting_human_approval: true}
+  const block = (status: BrowserBlock['status']): BrowserBlock => ({
+    moment: 'staging', status, engine: 'codex', commit: 'c'.repeat(40), summary: 'Prove in browser eseguite.',
+    results: [{criterion_id: 'DOD-2', kind: 'browser', status: status === 'passed' ? 'passed' : status === 'failed' ? 'failed' : 'not_run', evidence: 'Pagina delle impostazioni'}],
+  })
+  const ok = () => vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+
+  it('runs before the release session, with the other engine, and its outcome travels with the delivery', async () => {
+    const order: string[] = []
+    const browserTester = vi.fn(async (): Promise<BrowserReport> => {
+      order.push('tester')
+      return {status: 'passed', summary: 'Tutte superate.', block: block('passed')}
+    })
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => {
+      order.push('deliver')
+      return {outcome: 'ok', status: 200}
+    })
+
+    const {action} = await dispatch({stdout: JSON.stringify(RELEASED), executionPhase: 'closer_production', browserTester, deliver})
+
+    expect(browserTester).toHaveBeenCalledWith('codex', expect.any(Function), undefined)
+    expect(order).toEqual(['tester', 'deliver'])
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({tester: block('passed')}))
+    expect(action.status).toBe('success')
+  })
+
+  it.each(['failed', 'unavailable'] as const)('a %s proof stops the release: no session, no delivery', async (status) => {
+    const browserTester = vi.fn(async (): Promise<BrowserReport> => ({status, summary: 'DOD-2 non superata.', block: block(status)}))
+    const implementer = runtimeWith(JSON.stringify(RELEASED), '/dev/null')
+    const execute = vi.spyOn(implementer, 'execute')
+    const deliver = ok()
+
+    const {result} = await dispatch({stdout: JSON.stringify(RELEASED), executionPhase: 'closer_production', browserTester, deliver, implementer})
+
+    expect(execute).not.toHaveBeenCalled()
+    expect(deliver).not.toHaveBeenCalled()
+    expect(result.executed).toHaveLength(0)
+    expect(result.preflightStopped).toEqual([expect.objectContaining({state: 'blocked', reason: expect.stringContaining('prove in browser')})])
   })
 })

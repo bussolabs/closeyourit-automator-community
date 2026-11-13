@@ -181,6 +181,9 @@ export function composeBuildArgs(confinement: BuildConfinement): string[] {
   }
   return [
     '--ro-bind', '/', '/',
+    // A fresh /dev: the device nodes of the read-only root cannot be opened from inside the cage (CYAU-329), so
+    // without it `2>/dev/null` fails and nothing reads /dev/urandom.
+    '--dev', '/dev',
     '--unshare-pid',
     '--proc', '/proc',
     ...(network ? [] : ['--unshare-net']),

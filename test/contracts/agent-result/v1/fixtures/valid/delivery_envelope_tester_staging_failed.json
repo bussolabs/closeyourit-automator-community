@@ -1,0 +1,37 @@
+{
+  "runtime": "claude",
+  "reviewer_runtime": "codex",
+  "result": {
+    "code": "CYAU-97",
+    "category": "backend",
+    "capabilities": [
+      "backend"
+    ],
+    "risk": "low",
+    "requires_human_approval": false,
+    "reasons": [
+      "Classificazione chiara"
+    ],
+    "state": "workable"
+  },
+  "review": {
+    "status": "accepted",
+    "summary": "Classificazione corretta e giustificata."
+  },
+  "tester": {
+    "moment": "staging",
+    "status": "failed",
+    "engine": "claude",
+    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "summary": "Una prova in browser fallita.",
+    "results": [
+      {
+        "criterion_id": "DOD-2",
+        "kind": "browser",
+        "status": "failed",
+        "evidence": "Il pulsante Salva non compare dopo il login.",
+        "attachment": "tester-DOD-2.png"
+      }
+    ]
+  }
+}

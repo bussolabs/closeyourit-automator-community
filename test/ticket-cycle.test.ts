@@ -1689,6 +1689,40 @@ describe('emulator test in the delivery path (CYAU-295)', () => {
     })
   })
 
+  // CYAU-329 — the Tester is offered only where the machine switched it on and the plan names a proof to run.
+  describe('the Tester', () => {
+    const testerCriteria = [{id: 'DOD-1', text: 'The spec passes', kind: 'test' as const, how: 'Run the spec'}]
+    const ask = async () => null
+
+    afterEach(() => { vi.unstubAllEnvs() })
+
+    it('is not offered while the machine has it off, nor for a plan with no proof to run', async () => {
+      const off = await provider(temporaryDirectory(), {loadGateAtRef: vi.fn(() => baseGate(null))}).prepare({...skillMode, testerCriteria})
+      expect(off.testerWorkflowDelivery).toBeUndefined()
+
+      vi.stubEnv('AUTOMATOR_TESTER', '1')
+      const noProof = await provider(temporaryDirectory(), {loadGateAtRef: vi.fn(() => baseGate(null))}).prepare({...skillMode, testerCriteria: []})
+      expect(noProof.testerWorkflowDelivery).toBeUndefined()
+    })
+
+    it('runs on the ticket worktree with the criteria of the plan and can send the work back', async () => {
+      vi.stubEnv('AUTOMATOR_TESTER', '1')
+      const report = {status: 'passed' as const, summary: 'Tutte superate.', block: null}
+      const runTester = vi.fn(async () => report)
+      const lifecycle = await provider(temporaryDirectory(), {loadGateAtRef: vi.fn(() => baseGate(null)), runTester})
+        .prepare({...skillMode, testerCriteria})
+      const controller = new AbortController()
+
+      await expect(lifecycle.testerWorkflowDelivery!('codex', ask, controller.signal)).resolves.toBe(report)
+
+      expect(runTester).toHaveBeenCalledWith(expect.objectContaining({
+        criteria: testerCriteria, cwd: workspace.worktreePath, ticket: input.ticket, engine: 'codex', askCommands: ask,
+        signal: controller.signal,
+      }))
+      expect(lifecycle.afterWorkflowVerificationFailure).toBeDefined()
+    })
+  })
+
   it('a refused screenshot stops the delivery until the next round', async () => {
     const runEmulatorTest = vi.fn(async () => ({status: 'passed' as const, summary: 'Superata.', screenshot: PNG}))
     const {lifecycle} = await lifecycleWith({}, {

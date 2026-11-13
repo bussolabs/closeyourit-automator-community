@@ -400,7 +400,7 @@ describe('pure helpers', () => {
     const confinement = {worktree: '/data/worktrees/P/P-1', scratch: '/state/b', script: 'make apk', hidden: {dirs: ['/data', '/state'], files: ['/home/a/.netrc']}, network: false}
     const args = composeBuildArgs(confinement)
     expect(args).toEqual([
-      '--ro-bind', '/', '/', '--unshare-pid', '--proc', '/proc', '--unshare-net', '--die-with-parent',
+      '--ro-bind', '/', '/', '--dev', '/dev', '--unshare-pid', '--proc', '/proc', '--unshare-net', '--die-with-parent',
       '--tmpfs', '/data', '--tmpfs', '/state', '--ro-bind', '/dev/null', '/home/a/.netrc',
       // After the masks: the worktree and the scratch folder are reopened inside their hidden parents.
       '--bind', '/data/worktrees/P/P-1', '/data/worktrees/P/P-1', '--bind', '/state/b', '/state/b',

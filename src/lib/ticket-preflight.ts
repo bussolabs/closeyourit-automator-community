@@ -1,3 +1,5 @@
+import {browserCriteria, browserTesterDelivery} from './browser-tester'
+import {testerCriteria, testerEnabled} from './tester'
 import {spawnSync} from 'node:child_process'
 import {randomUUID} from 'node:crypto'
 import {bindReleaseAuthority} from './session-settings'
@@ -191,7 +193,9 @@ export type TicketLeaseAcquireResult =
       workModel?: string;
       // CYRA-621: the version number (and the code point for the final one) decided by the server
       // before the phase starts. The machine executes it, does not choose it.
-      release?: {version: string; sha?: string}}
+      release?: {version: string; sha?: string};
+      // CYAU-329: the server asks for the plan's browser proofs on staging before the production tag.
+      browserProof?: boolean}
   | {outcome: 'held' | 'stale' | 'error'; reason: string}
 
 export interface TicketQueueSelection {
@@ -813,6 +817,7 @@ function queueCandidateToTicket(candidate: ClaimedTicketCandidate, cwd: string):
     reviewer: text(candidate.reviewer?.name),
     automationContext,
     approvedPlan,
+    ...(planSection && currentPlan ? {approvedDone: currentPlan.definition_of_done} : {}),
     ...(reworkFindings ? {reworkFindings} : {}),
     ...(previousReviewFindings ? {previousReviewFindings} : {}),
     ...(approvedSiblings ? {approvedSiblings} : {}),
@@ -1075,6 +1080,7 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
       ...(remote.work_engine ? {workEngine: remote.work_engine} : {}),
       ...(remote.work_model ? {workModel: remote.work_model} : {}),
       ...(remote.release ? {release: remote.release} : {}),
+      ...(remote.browser_proof ? {browserProof: true} : {}),
       ...(input.withAttempt && remote.attempt_id ? {
         attemptId: remote.attempt_id,
         deliverAttempt: async (payload: AttemptDelivery) => {
@@ -1691,6 +1697,8 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
                 ...(ticket.conditions ? {conditions: ticket.conditions} : {}),
                 // CYAU-237 — the reviewer of a new attempt rereads its own previous findings of this phase.
                 ...(ticket.previousReviewFindings ? {previousFindings: ticket.previousReviewFindings} : {}),
+                // CYAU-329 — the proofs the approved plan says are run by a test or a command.
+                ...(ticket.approvedDone ? {testerCriteria: testerCriteria(ticket.approvedDone)} : {}),
                 // CYAU-172 — the phase comes from the queue, so the server decides the outcome: the skill has
                 // already run the project checks, pushed and opened the proposal, and the server has
                 // already accepted. `profile` is set only with `queueTarget` (line 1018) and without a
@@ -1743,6 +1751,16 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               } : {}),
               ...(deliversPr && ticketRun?.emulatorTestWorkflowDelivery ? {
                 emulatorTest: ticketRun.emulatorTestWorkflowDelivery.bind(ticketRun),
+              } : {}),
+              ...(deliversPr && ticketRun?.testerWorkflowDelivery ? {
+                tester: ticketRun.testerWorkflowDelivery.bind(ticketRun),
+              } : {}),
+              // CYAU-329 — the browser proofs of the approved plan, on staging, before the production tag. Only where
+              // the server asked, this machine has the Tester on, and the commit to tag is known.
+              ...(phase === 'closer_production' && acquired.browserProof && testerEnabled() && acquired.release?.sha && ticket.approvedDone ? {
+                browserTester: browserTesterDelivery({
+                  criteria: browserCriteria(ticket.approvedDone), commit: acquired.release.sha, ticket: ticket.code, project,
+                }),
               } : {}),
               ...(deliversPr && ticketRun?.afterWorkflowVerificationFailure ? {
                 afterVerificationFailure: ticketRun.afterWorkflowVerificationFailure.bind(ticketRun),
