@@ -260,6 +260,16 @@ function git(cwd: string, args: string[]): {status: number | null; stdout: strin
   return {status: ran.status, stdout: ran.stdout ?? ''}
 }
 
+/**
+ * The daemon is started by its absolute path, so the service's PATH need not carry `node`. A proof that runs a
+ * suite calling it would then fail for the machine, not for the code: the node that runs the daemon goes last.
+ */
+function withDaemonNode(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const nodeBin = path.dirname(process.execPath)
+  const entries = (env.PATH ?? '').split(path.delimiter).filter(Boolean)
+  return entries.includes(nodeBin) ? env : {...env, PATH: [...entries, nodeBin].join(path.delimiter)}
+}
+
 export function defaultTesterIo(emulatorIo: EmulatorIo = defaultEmulatorIo()): TesterIo {
   return {
     async available() {
@@ -307,7 +317,7 @@ export function defaultTesterIo(emulatorIo: EmulatorIo = defaultEmulatorIo()): T
           worktree: opts.cwd, scratch, script: command, hidden: emulatorIo.hiddenPaths(), network: false, readOnly: gitData,
         })
         const ran = await emulatorIo.runContained(BWRAP, args, {
-          cwd: opts.cwd, env: buildEnvironment(process.env, scratch), timeoutMs: opts.timeoutSeconds * 1000, signal: opts.signal,
+          cwd: opts.cwd, env: withDaemonNode(buildEnvironment(process.env, scratch)), timeoutMs: opts.timeoutSeconds * 1000, signal: opts.signal,
         })
         return {code: ran.code, timedOut: ran.timedOut, stderr: ran.stderr.split('\n').slice(-5).join(' ')}
       } finally {

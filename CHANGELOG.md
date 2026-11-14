@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.57.2] - 2026-11-14
+
+### Fixed
+
+- **Un «già consegnato» con il motivo nel campo sbagliato non viene più buttato.** Se l'agente scrive il motivo nel riassunto, la macchina lo legge da lì. (CYAU-331)
+- **Le prove del Tester trovano `node`.** Una prova che lanciava tutti i test falliva per la macchina, non per il codice. (CYAU-331)
+
 ## [0.57.1] - 2026-11-14
 
 ### Fixed

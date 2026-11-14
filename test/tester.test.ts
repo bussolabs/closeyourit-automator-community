@@ -294,6 +294,24 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
     }
   })
 
+  // Seen on AAC: a proof ran the whole suite, the suite called `node`, and the service's PATH does not carry it —
+  // the daemon is started by its absolute path. Seven tests read as failed for the machine, not for the code.
+  it('puts the node that runs the daemon on the PATH of a proof', async () => {
+    const dir = repository()
+    // `git` must stay reachable for the fixture; the node directory must not be there already.
+    vi.stubEnv('PATH', '/usr/bin:/bin')
+    try {
+      const runContained = vi.fn(async () => ({code: 0, stdout: Buffer.from(''), stderr: '', timedOut: false}))
+      await defaultTesterIo(cage({runContained} as Partial<EmulatorIo>)).run('node --version', {cwd: dir, ticket: 'T-1', timeoutSeconds: 5})
+
+      const options = (runContained.mock.calls[0] as unknown as [string, string[], {env: NodeJS.ProcessEnv}])[2]
+      expect((options.env.PATH ?? '').split(path.delimiter)).toContain(path.dirname(process.execPath))
+    } finally {
+      vi.unstubAllEnvs()
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
   it('keeps the outcome readable when the command is very long', async () => {
     const long = `python3 -c '${'x'.repeat(900)}'`
     const report = await runTester(

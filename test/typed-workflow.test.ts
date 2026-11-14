@@ -129,6 +129,19 @@ describe('typed workflow', () => {
     expect(parseWorkflowResult(JSON.stringify({...base, reason: '  '}), 'autopilot')).toBeNull()
   })
 
+  // Seen on AAC-27: the session wrote why under `summary`, the name the work report uses, and left `reason` out.
+  // The delivery was real — PR open, one file — and was thrown away as not interpretable.
+  it('reads the reason an agent wrote under summary', () => {
+    const {reason: _reason, ...rest} = {code: 'AAC-27', state: 'already-delivered', cycles: 0, reason: '',
+      delivery: {prUrl: 'https://github.com/x/y/pull/20', cyiStatus: 'in_review', autoMerged: false}, security_findings: []}
+    const parsed = parseWorkflowResult(JSON.stringify({...rest, summary: 'already on the ticket branch and in PR #20'}), 'autopilot')
+    expect(parsed?.reason).toBe('already on the ticket branch and in PR #20')
+    // A reason that is there is never replaced.
+    expect(parseWorkflowResult(JSON.stringify({...rest, reason: 'mine', summary: 'other'}), 'autopilot')?.reason).toBe('mine')
+    // Neither field: still not interpretable.
+    expect(parseWorkflowResult(JSON.stringify(rest), 'autopilot')).toBeNull()
+  })
+
   // CYRA-675 (cross-review finding): same stumble as CYAU-139, with higher stakes — without the reviewer's
   // yes the server does not apply the outcome, and the ticket would get re-planned forever.
   it('does not require a plan from a planner that found the work already done (CYRA-675)', () => {

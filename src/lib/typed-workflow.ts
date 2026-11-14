@@ -534,6 +534,17 @@ function withContractVersion(candidate: Record<string, unknown>): Record<string,
   return {...rest, contract_version: 2}
 }
 
+/**
+ * Agents sometimes write why under `summary` — the name the work report uses — and leave `reason` out. On a state
+ * that requires a reason the result was rejected as uninterpretable and a real delivery was thrown away.
+ */
+function withReasonFromSummary(candidate: Record<string, unknown>): Record<string, unknown> {
+  const filled = (value: unknown): value is string => typeof value === 'string' && value.trim() !== ''
+  if (filled(candidate.reason) || !filled(candidate.summary)) return candidate
+  if (candidate.state !== 'already-delivered' && candidate.state !== 'blocked') return candidate
+  return {...candidate, reason: candidate.summary}
+}
+
 /** Schema of the phase, or of the version declared by the candidate; `null` if the pair does not exist. */
 function schemaFor(candidate: Record<string, unknown>, phase: ExecutionPhase): z.ZodTypeAny | null {
   const version = candidate.contract_version
@@ -597,7 +608,7 @@ export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhas
     // Only objects: a scalar or an array is never a result, and as the "closest candidate" with a
     // single issue ("expected object") it would hide the real object, the one explaining what is wrong.
     if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue
-    const object = withMeasuredFacts(withContractVersion(candidate as Record<string, unknown>), measured)
+    const object = withMeasuredFacts(withReasonFromSummary(withContractVersion(candidate as Record<string, unknown>)), measured)
     const schema = schemaFor(object, phase)
     let issues: string[]
     if (schema) {
