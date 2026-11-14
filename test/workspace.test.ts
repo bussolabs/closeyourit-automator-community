@@ -928,6 +928,23 @@ describe('prepareWorkspace / defaultWorkspaceGit (real git)', () => {
     expect((err as AutomatorError).code).toBe(ErrorCodes.Workspace.gitFailed)
   })
 
+  // CYAU-331 — two tickets prepared at once on one host: the tracking entry of the new branch needs the
+  // repository config lock, and the loser stopped as «workspace not attestable» with a half-made branch.
+  it('defaultWorkspaceGit.addWorktree creates a ticket branch while the repository config is locked', () => {
+    const res = prepare('CYAU-11')
+    const g = defaultWorkspaceGit()
+    const lock = path.join(res.repoPath, '.git', 'config.lock')
+    fs.writeFileSync(lock, '')
+    const worktree = path.join(root, 'second-worktree')
+    try {
+      g.addWorktree(res.repoPath, worktree, 'ticket/CYAU-12', true, 'origin/main')
+    } finally {
+      fs.rmSync(lock)
+    }
+    expect(g.isGitCheckout(worktree)).toBe(true)
+    expect(g.hasBranch(res.repoPath, 'ticket/CYAU-12')).toBe(true)
+  })
+
   it('defaultWorkspaceGit.addWorktree on a path already in use → AutomatorError gitFailed', () => {
     const res = prepare('CYAU-11')
     const g = defaultWorkspaceGit()

@@ -529,8 +529,11 @@ export function defaultWorkspaceGit(
       fs.mkdirSync(path.dirname(worktreeDir), {recursive: true})
       // `--` isolates the path (and the commit-ish) from the options; `-b <branch>` stays before the separator.
       // The starting point follows the path, as in the signature `git worktree add <path> [<commit-ish>]`.
+      // `--no-track`: starting from `origin/main` would record it as the upstream, a write that needs the
+      // repository config lock. Two tickets prepared at once on one host raced for it and the loser was left
+      // with a branch and no worktree. Nothing reads that upstream: the delivery pushes with `--set-upstream`.
       const args = createBranch
-        ? ['-C', repoDir, 'worktree', 'add', '-b', branch, '--', worktreeDir, ...(startPoint ? [startPoint] : [])]
+        ? ['-C', repoDir, 'worktree', 'add', '--no-track', '-b', branch, '--', worktreeDir, ...(startPoint ? [startPoint] : [])]
         : ['-C', repoDir, 'worktree', 'add', '--', worktreeDir, branch]
       const r = runGit(args)
       if (!r.ok) throw new AutomatorError(ErrorCodes.Workspace.gitFailed, `git worktree add fallito: ${r.stderr.trim() || branch}`, 1)

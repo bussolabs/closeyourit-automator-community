@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.6] - 2026-11-14
+
+### Fixed
+
+- **Due lavori preparati insieme sulla stessa macchina non si ostacolano più.** Il ramo del ticket nasce senza scrivere la configurazione del repository: prima uno dei due saltava il giro. (CYAU-331)
+
 ## [0.57.5] - 2026-11-14
 
 ### Fixed
