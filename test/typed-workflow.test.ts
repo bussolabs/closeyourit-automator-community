@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {buildWorkflowReviewPrompt, parseWorkflowResult, parseWorkflowReview} from '../src/lib/typed-workflow'
+import {buildWorkflowReviewPrompt, parseWorkflowResult, parseWorkflowReview, parseWorkflowResultDetailed} from '../src/lib/typed-workflow'
 
 describe('typed workflow', () => {
   it('extracts the plain JSON or the Claude result JSON (real triage)', () => {
@@ -140,6 +140,30 @@ describe('typed workflow', () => {
     expect(parseWorkflowResult(JSON.stringify({...rest, reason: 'mine', summary: 'other'}), 'autopilot')?.reason).toBe('mine')
     // Neither field: still not interpretable.
     expect(parseWorkflowResult(JSON.stringify(rest), 'autopilot')).toBeNull()
+  })
+
+  // Seen on AAC-46, twice on the same sound delivery. First the report carried one key the contract does not know
+  // (`notes`); then the retry said `already-delivered` with its one-line statement only in the decision card.
+  it('reads the reason from the decision card when nothing else says it', () => {
+    const result = {code: 'AAC-46', state: 'already-delivered', cycles: 0, security_findings: [],
+      delivery: {prUrl: 'https://github.com/x/y/pull/31', cyiStatus: 'in_review', autoMerged: false},
+      decision_card: {headline: 'The release test script says what it checks'}}
+    expect(parseWorkflowResult(JSON.stringify(result), 'autopilot')?.reason).toBe('The release test script says what it checks')
+  })
+
+  it('drops a key of the work report the contract does not know, instead of the whole delivery', () => {
+    const report = {summary: 'done', commit: 'a'.repeat(40), changed_files: [{path: 'a.sh', summary: 'header'}],
+      tests: [{command: 'bash -n a.sh', status: 'passed', summary: 'ok'}], risks: [], deviations: [],
+      acceptance_evidence: [{criterion_id: 'DOD-1', status: 'verified', evidence: 'line 2', source: 'reported'}]}
+    const result = {contract_version: 2, code: 'AAC-46', state: 'delivered', cycles: 1, gate: {passed: true},
+      review: {verdict: 'unavailable'}, security_findings: [],
+      delivery: {prUrl: 'https://github.com/x/y/pull/31', cyiStatus: 'in_review', autoMerged: false}}
+    const strict = parseWorkflowResultDetailed(JSON.stringify({...result, work_report: report}), 'autopilot')
+    const loose = parseWorkflowResultDetailed(JSON.stringify({...result, work_report: {...report, notes: 'extra'}}), 'autopilot')
+    // Whatever the strict report yields, the one with the extra key yields the same.
+    expect(loose.issues).toEqual(strict.issues)
+    expect((loose.value?.work_report as Record<string, unknown> | undefined)?.notes).toBeUndefined()
+    expect(JSON.stringify(loose.issues)).not.toContain('notes')
   })
 
   // CYRA-675 (cross-review finding): same stumble as CYAU-139, with higher stakes — without the reviewer's

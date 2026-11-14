@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.3] - 2026-11-14
+
+### Fixed
+
+- **Una consegna giusta con il resoconto un po' fuori forma non viene più buttata.** Un campo in più nel resoconto viene ignorato, e il motivo di un «già consegnato» viene letto anche dalla scheda della decisione. (CYAU-331)
+
 ## [0.57.2] - 2026-11-14
 
 ### Fixed

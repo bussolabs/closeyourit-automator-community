@@ -535,14 +535,34 @@ function withContractVersion(candidate: Record<string, unknown>): Record<string,
 }
 
 /**
- * Agents sometimes write why under `summary` — the name the work report uses — and leave `reason` out. On a state
- * that requires a reason the result was rejected as uninterpretable and a real delivery was thrown away.
+ * Agents sometimes say why somewhere else than `reason`: under `summary` (the name the work report uses), or only
+ * in the decision card. On a state that requires a reason the result was rejected as uninterpretable and a real
+ * delivery was thrown away. The first place that says it wins; a reason that is there is never replaced.
  */
 function withReasonFromSummary(candidate: Record<string, unknown>): Record<string, unknown> {
   const filled = (value: unknown): value is string => typeof value === 'string' && value.trim() !== ''
-  if (filled(candidate.reason) || !filled(candidate.summary)) return candidate
+  if (filled(candidate.reason)) return candidate
   if (candidate.state !== 'already-delivered' && candidate.state !== 'blocked') return candidate
-  return {...candidate, reason: candidate.summary}
+  const report = isPlainObject(candidate.work_report) ? candidate.work_report.summary : undefined
+  const card = isPlainObject(candidate.decision_card) ? candidate.decision_card.headline : undefined
+  const reason = [candidate.summary, report, card].find(filled)
+  return reason ? {...candidate, reason} : candidate
+}
+
+/**
+ * The work report is a closed shape, and an agent adding one key of its own (`notes`) made the whole delivery
+ * uninterpretable. The unknown key is dropped: what the contract asks for is still checked, field by field.
+ */
+function withKnownWorkReportKeys(candidate: Record<string, unknown>): Record<string, unknown> {
+  const report = candidate.work_report
+  if (!isPlainObject(report)) return candidate
+  const known = new Set(Object.keys(V2WorkReport.shape))
+  const entries = Object.entries(report).filter(([key]) => known.has(key))
+  return entries.length === Object.keys(report).length ? candidate : {...candidate, work_report: Object.fromEntries(entries)}
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Schema of the phase, or of the version declared by the candidate; `null` if the pair does not exist. */
@@ -608,7 +628,7 @@ export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhas
     // Only objects: a scalar or an array is never a result, and as the "closest candidate" with a
     // single issue ("expected object") it would hide the real object, the one explaining what is wrong.
     if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue
-    const object = withMeasuredFacts(withReasonFromSummary(withContractVersion(candidate as Record<string, unknown>)), measured)
+    const object = withMeasuredFacts(withKnownWorkReportKeys(withReasonFromSummary(withContractVersion(candidate as Record<string, unknown>))), measured)
     const schema = schemaFor(object, phase)
     let issues: string[]
     if (schema) {
