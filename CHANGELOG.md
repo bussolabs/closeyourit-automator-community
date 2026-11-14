@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.57.7] - 2026-11-15
+
+### Fixed
+
+- **Il Tester non boccia più per colpa della macchina.** Nella gabbia i programmi installati (`cyi`, `node`) ora si raggiungono: prima una prova che lanciava tutti i test falliva a torto. (CYAU-331)
+- **Il Tester sa come si lanciano i test del progetto.** Riceve le istruzioni del repository insieme alle modifiche. (CYAU-331)
+
 ## [0.57.6] - 2026-11-14
 
 ### Fixed

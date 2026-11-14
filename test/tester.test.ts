@@ -280,6 +280,27 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
     }
   })
 
+  // CYAU-331 — the mapping session cannot open files: asked for «the whole suite passes» it answered that the
+  // command is not documented in what it was given, and the proof stayed not run. The project's own
+  // instructions, where that command is written, now travel with the context.
+  it('hands the project instructions to the mapping session, as committed on the delivered branch', () => {
+    const dir = repository()
+    try {
+      fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# Project\nRun everything with `make verify`.\n')
+      spawnSync('git', ['-C', dir, 'add', 'CLAUDE.md'])
+      spawnSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'docs'])
+      fs.writeFileSync(path.join(dir, 'CLAUDE.md'), 'edited after the delivery, must not be read')
+
+      const context = defaultTesterIo(cage()).context(dir)
+
+      expect(context).toContain('## Project instructions (CLAUDE.md)')
+      expect(context).toContain('Run everything with `make verify`.')
+      expect(context).not.toContain('edited after the delivery')
+    } finally {
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
   it('shows the repository git data read-only in the cage, so a proof can ask git what changed', async () => {
     const dir = repository()
     try {
@@ -308,10 +329,48 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
     vi.stubEnv('PATH', '/usr/bin:/bin')
     try {
       const runContained = vi.fn(async () => ({code: 0, stdout: Buffer.from(''), stderr: '', timedOut: false}))
-      await defaultTesterIo(cage({runContained} as Partial<EmulatorIo>)).run('node --version', {cwd: dir, ticket: 'T-1', timeoutSeconds: 5})
+      await defaultTesterIo(cage({runContained} as Partial<EmulatorIo>), () => []).run('node --version', {cwd: dir, ticket: 'T-1', timeoutSeconds: 5})
 
       const options = (runContained.mock.calls[0] as unknown as [string, string[], {env: NodeJS.ProcessEnv}])[2]
       expect((options.env.PATH ?? '').split(path.delimiter)).toContain(path.dirname(process.execPath))
+    } finally {
+      vi.unstubAllEnvs()
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  // CYAU-331 — on a host whose PATH starts with a version-manager shim, `node` resolved to the shim, which cannot
+  // run inside the cage: a suite calling node failed for the machine (105 false failures on server-minion-1).
+  it('puts the daemon node before anything else on the PATH of a proof', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tester-node-first-'))
+    vi.stubEnv('PATH', `/home/x/.local/share/mise/shims:${path.dirname(process.execPath)}:/usr/bin`)
+    try {
+      const runContained = vi.fn(async () => ({code: 0, stdout: Buffer.from(''), stderr: '', timedOut: false}))
+      await defaultTesterIo(cage({runContained} as Partial<EmulatorIo>), () => []).run('node --version', {cwd: dir, ticket: 'T-1', timeoutSeconds: 5})
+
+      const options = (runContained.mock.calls[0] as unknown as [string, string[], {env: NodeJS.ProcessEnv}])[2]
+      expect((options.env.PATH ?? '').split(path.delimiter)[0]).toBe(path.dirname(process.execPath))
+    } finally {
+      vi.unstubAllEnvs()
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  // CYAU-331 — the service finds cyi and node through version-manager shims, and a shim needs the real HOME:
+  // inside the cage HOME is a scratch folder, so every suite calling cyi failed for the machine (16 deliveries
+  // out of 20 read as failed in one run). The real tool folders go on the PATH instead.
+  it('puts the real tool folders before the shims on the PATH of a proof', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tester-real-tools-'))
+    vi.stubEnv('PATH', '/home/x/.local/share/mise/shims:/usr/bin')
+    try {
+      const runContained = vi.fn(async () => ({code: 0, stdout: Buffer.from(''), stderr: '', timedOut: false}))
+      const io = defaultTesterIo(cage({runContained} as Partial<EmulatorIo>), () => ['/opt/tools/cyi/bin', '/opt/tools/gh/bin'])
+      await io.run('cyi --version', {cwd: dir, ticket: 'T-1', timeoutSeconds: 5})
+
+      const options = (runContained.mock.calls[0] as unknown as [string, string[], {env: NodeJS.ProcessEnv}])[2]
+      const entries = (options.env.PATH ?? '').split(path.delimiter)
+      expect(entries.slice(0, 3)).toEqual(['/opt/tools/cyi/bin', '/opt/tools/gh/bin', path.dirname(process.execPath)])
+      expect(entries.indexOf('/home/x/.local/share/mise/shims')).toBeGreaterThan(2)
     } finally {
       vi.unstubAllEnvs()
       fs.rmSync(dir, {recursive: true, force: true})

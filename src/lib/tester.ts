@@ -104,6 +104,8 @@ const MAX_TEXT = 600
 /** Room for the repository context in the mapping prompt: the diff, and each list of paths. */
 const CONTEXT_DIFF_MAX = 20_000
 const CONTEXT_LIST_MAX = 30_000
+const CONTEXT_INSTRUCTIONS_MAX = 6_000
+const INSTRUCTION_FILES = ['CLAUDE.md', 'AGENTS.md']
 /** Exit codes of a shell that did not find or could not run the tool: the machine, not the change. */
 const MISSING_TOOL_EXIT = new Set([126, 127])
 const SESSION_DIR = '.closeyourit/'
@@ -264,15 +266,33 @@ function git(cwd: string, args: string[]): {status: number | null; stdout: strin
 
 /**
  * The daemon is started by its absolute path, so the service's PATH need not carry `node`. A proof that runs a
- * suite calling it would then fail for the machine, not for the code: the node that runs the daemon goes last.
+ * suite calling it would then fail for the machine, not for the code. The node that runs the daemon goes FIRST:
+ * where the PATH starts with a version-manager shim, `node` resolved to the shim, which cannot run inside the cage.
  */
-function withDaemonNode(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const nodeBin = path.dirname(process.execPath)
-  const entries = (env.PATH ?? '').split(path.delimiter).filter(Boolean)
-  return entries.includes(nodeBin) ? env : {...env, PATH: [...entries, nodeBin].join(path.delimiter)}
+function withDaemonNode(env: NodeJS.ProcessEnv, toolPaths: string[]): NodeJS.ProcessEnv {
+  const first = [...new Set([...toolPaths, path.dirname(process.execPath)])]
+  const entries = (env.PATH ?? '').split(path.delimiter).filter((entry) => entry !== '' && !first.includes(entry))
+  return {...env, PATH: [...first, ...entries].join(path.delimiter)}
 }
 
-export function defaultTesterIo(emulatorIo: EmulatorIo = defaultEmulatorIo()): TesterIo {
+let cachedToolPaths: string[] | undefined
+
+/**
+ * The real folders of the tools the version manager installed. The service reaches cyi, gh and node through
+ * shims, and a shim reads the manager's config from HOME: inside the cage HOME is a scratch folder, so a shim
+ * answers "not a valid shim" and the suite reads as failed. Asked once, outside the cage; empty without mise.
+ */
+export function versionManagerToolPaths(spawn: typeof spawnSync = spawnSync): string[] {
+  if (cachedToolPaths) return cachedToolPaths
+  const ran = spawn('mise', ['bin-paths'], {encoding: 'utf8', timeout: 15_000})
+  const found = ran.status === 0
+    ? (ran.stdout ?? '').split('\n').map((line) => line.trim()).filter((line) => path.isAbsolute(line))
+    : []
+  if (ran.status === 0) cachedToolPaths = found
+  return found
+}
+
+export function defaultTesterIo(emulatorIo: EmulatorIo = defaultEmulatorIo(), toolPaths: () => string[] = versionManagerToolPaths): TesterIo {
   return {
     async available() {
       if (!emulatorIo.bwrapAvailable()) return {available: false, detail: 'bubblewrap non disponibile'}
@@ -295,6 +315,14 @@ export function defaultTesterIo(emulatorIo: EmulatorIo = defaultEmulatorIo()): T
         cut(git(cwd, ['diff', `${base}...HEAD`]).stdout.trim(), CONTEXT_DIFF_MAX),
         '## Tracked paths (git ls-files)',
         cut(git(cwd, ['ls-files']).stdout.trim(), CONTEXT_LIST_MAX),
+        // The session cannot open files, and «the whole suite passes» needs the command the project documents.
+        // Read from the delivered commit, not from the folder: what a run left behind is not the project's word.
+        ...INSTRUCTION_FILES.flatMap((file) => {
+          const shown = git(cwd, ['show', `HEAD:${file}`])
+          return shown.status === 0 && shown.stdout.trim() !== ''
+            ? [`## Project instructions (${file})`, cut(shown.stdout.trim(), CONTEXT_INSTRUCTIONS_MAX)]
+            : []
+        }),
       ].join('\n')
     },
     changedFiles(cwd) {
@@ -319,7 +347,7 @@ export function defaultTesterIo(emulatorIo: EmulatorIo = defaultEmulatorIo()): T
           worktree: opts.cwd, scratch, script: command, hidden: emulatorIo.hiddenPaths(), network: false, readOnly: gitData,
         })
         const ran = await emulatorIo.runContained(BWRAP, args, {
-          cwd: opts.cwd, env: withDaemonNode(buildEnvironment(process.env, scratch)), timeoutMs: opts.timeoutSeconds * 1000, signal: opts.signal,
+          cwd: opts.cwd, env: withDaemonNode(buildEnvironment(process.env, scratch), toolPaths()), timeoutMs: opts.timeoutSeconds * 1000, signal: opts.signal,
         })
         return {code: ran.code, timedOut: ran.timedOut, stderr: ran.stderr.split('\n').slice(-5).join(' ')}
       } finally {
