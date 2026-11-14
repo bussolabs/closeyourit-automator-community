@@ -636,7 +636,9 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         // CYAU-270 — a branch that does not align with GitHub keeps its own reason: the generic one would hide
         // a conflict that only a person can resolve.
         if (error instanceof AutomatorError && error.code === ErrorCodes.Workspace.diverged) throw error
-        throw new Error('workspace ticket non attestabile (fail-closed)')
+        // The underlying failure travels with the stop: the generic reason alone could not be diagnosed.
+        const cause = error instanceof Error ? error.message.replace(/\s+/gu, ' ').slice(0, 200) : ''
+        throw new Error(`workspace ticket non attestabile (fail-closed)${cause ? `: ${cause}` : ''}`)
       }
 
       // The remote policy comes from the already trusted BASE branch. Reading it from the worktree would let the same PR

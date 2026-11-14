@@ -404,6 +404,15 @@ describe('persistent ticket cycle', () => {
       .toEqual(['validating', 'blocked'])
   })
 
+  // CYAU-331 — the generic reason hid what failed: the stop was logged with no way to tell why.
+  it('a workspace that cannot be attested says what failed underneath', async () => {
+    const cycle = provider(temporaryDirectory(), {
+      inspectWorkspace: vi.fn(() => { throw new Error('branch divergente') }),
+    })
+
+    await expect(cycle.prepare(input)).rejects.toThrow(/attestabile \(fail-closed\): branch divergente/)
+  })
+
   // CYAU-270 — a ticket branch that conflicts with its GitHub copy blocks the run and keeps its own reason.
   it('a ticket branch that does not align with GitHub blocks the run with its own reason', async () => {
     const runsBase = temporaryDirectory()

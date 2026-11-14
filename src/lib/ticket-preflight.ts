@@ -1728,6 +1728,8 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               // The cause travels with the stop: «not attestable» alone left a claimed ticket idle with no trace
               // of what failed (seen on AAC-55, where the same step worked a minute later).
               const cause = error instanceof Error ? redactSecrets(error.message).replace(/\s+/gu, ' ').slice(0, 200) : ''
+              // The cycle already names the stop: repeating the label in front of it said the same thing twice.
+              if (cause.startsWith('workspace ticket non attestabile')) return denyDispatch(cause)
               return denyDispatch(`workspace ticket non attestabile (fail-closed)${cause ? `: ${cause}` : ''}`)
             }
           } else if (profile) {

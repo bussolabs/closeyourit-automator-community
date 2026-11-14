@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.5] - 2026-11-14
+
+### Fixed
+
+- **Lo stop «copia di lavoro non attestabile» dice la causa vera.** Prima ripeteva solo la stessa frase, e non si capiva cosa fosse fallito. (CYAU-331)
+
 ## [0.57.4] - 2026-11-14
 
 ### Fixed
