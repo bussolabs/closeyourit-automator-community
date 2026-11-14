@@ -280,6 +280,32 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
     }
   })
 
+  it('shows the repository git data read-only in the cage, so a proof can ask git what changed', async () => {
+    const dir = repository()
+    try {
+      const runContained = vi.fn(async () => ({code: 0, stdout: Buffer.from(''), stderr: '', timedOut: false}))
+      await defaultTesterIo(cage({runContained} as Partial<EmulatorIo>)).run('git diff --name-only', {cwd: dir, ticket: 'T-1', timeoutSeconds: 5})
+
+      const args = (runContained.mock.calls[0] as unknown as [string, string[]])[1]
+      const gitData = fs.realpathSync(path.join(dir, '.git'))
+      expect(args.map((arg) => (fs.existsSync(arg) ? fs.realpathSync(arg) : arg)).join(' ')).toContain(`--ro-bind ${gitData} ${gitData}`)
+    } finally {
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  it('keeps the outcome readable when the command is very long', async () => {
+    const long = `python3 -c '${'x'.repeat(900)}'`
+    const report = await runTester(
+      {criteria: criteria(), cwd: '/w', ticket: 'T-1', engine: 'codex', timeoutSeconds: 5,
+        askCommands: async () => answer([{criterion_id: 'DOD-1', command: long}, {criterion_id: 'DOD-2', command: 'true'}])},
+      fakeIo({run: vi.fn(async (command: string) => (command === long ? {code: 128, timedOut: false, stderr: 'fatal: not a git repository'} : outcome(0)))}),
+    )
+
+    expect(report.block?.results[0]?.evidence).toContain('exit 128')
+    expect(report.block?.results[0]?.evidence).toContain('not a git repository')
+  })
+
   it('counts an unreadable folder as changed and has no commit for it', () => {
     const io = defaultTesterIo(cage())
     const missing = path.join(os.tmpdir(), 'tester-no-such-repository')

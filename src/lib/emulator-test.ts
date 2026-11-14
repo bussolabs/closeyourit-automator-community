@@ -165,6 +165,8 @@ export interface BuildConfinement {
   script: string
   hidden: HiddenPaths
   network: boolean
+  /** Paths shown again read-only inside a hidden parent: the git data of the worktree's repository. */
+  readOnly?: string[]
 }
 
 /**
@@ -175,8 +177,8 @@ export interface BuildConfinement {
  * ancestor of the worktree (the managed data folder) is masked and the worktree alone is reopened inside it.
  */
 export function composeBuildArgs(confinement: BuildConfinement): string[] {
-  const {worktree, scratch, script, hidden, network} = confinement
-  for (const target of [worktree, scratch, ...hidden.dirs, ...hidden.files]) {
+  const {worktree, scratch, script, hidden, network, readOnly = []} = confinement
+  for (const target of [worktree, scratch, ...hidden.dirs, ...hidden.files, ...readOnly]) {
     if (!path.isAbsolute(target)) throw new Error('build confinement: non-absolute path')
   }
   return [
@@ -190,6 +192,7 @@ export function composeBuildArgs(confinement: BuildConfinement): string[] {
     '--die-with-parent',
     ...hidden.dirs.flatMap((dir) => ['--tmpfs', dir]),
     ...hidden.files.flatMap((file) => ['--ro-bind', '/dev/null', file]),
+    ...readOnly.flatMap((target) => ['--ro-bind', target, target]),
     '--bind', worktree, worktree,
     '--bind', scratch, scratch,
     '--chdir', worktree,

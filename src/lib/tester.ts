@@ -1,4 +1,6 @@
 import {spawnSync} from 'node:child_process'
+import path from 'node:path'
+
 import type {PlanDone} from './client'
 import {BWRAP, buildEnvironment, composeBuildArgs, defaultEmulatorIo, type EmulatorIo} from './emulator-test'
 import {redactSecrets} from './secret-redaction'
@@ -103,6 +105,7 @@ const CONTEXT_LIST_MAX = 30_000
 /** Exit codes of a shell that did not find or could not run the tool: the machine, not the change. */
 const MISSING_TOOL_EXIT = new Set([126, 127])
 const SESSION_DIR = '.closeyourit/'
+const COMMAND_SHOWN_MAX = 240
 
 /** The criteria a machine can run: proven by a test or a command, and carrying an id. */
 export function testerCriteria(done: PlanDone[]): TesterCriterion[] {
@@ -197,7 +200,8 @@ async function runCriterion(criterion: TesterCriterion, mapped: {command: string
   if (!mapped?.command) return result('not_run', `Nessun comando per questa prova. ${mapped?.note ?? ''}`)
 
   const ran = await io.run(mapped.command, {cwd: input.cwd, ticket: input.ticket, timeoutSeconds: input.timeoutSeconds, signal: input.signal})
-  const shown = `Comando: ${mapped.command}`
+  // A long command must not push the outcome out of the clipped evidence.
+  const shown = `Comando: ${mapped.command.length > COMMAND_SHOWN_MAX ? `${mapped.command.slice(0, COMMAND_SHOWN_MAX)}…` : mapped.command}`
   if (ran.timedOut) return result('not_run', `${shown} → oltre ${input.timeoutSeconds} s, interrotto.`)
   if (ran.code === null) return result('not_run', `${shown} → interrotto prima di finire. ${ran.stderr}`)
   if (MISSING_TOOL_EXIT.has(ran.code)) return result('not_run', `${shown} → non eseguibile su questa macchina (exit ${ran.code}). ${ran.stderr}`)
@@ -293,7 +297,13 @@ export function defaultTesterIo(emulatorIo: EmulatorIo = defaultEmulatorIo()): T
     async run(command, opts) {
       const scratch = emulatorIo.makeScratch(`tester-${opts.ticket}`)
       try {
-        const args = composeBuildArgs({worktree: opts.cwd, scratch, script: command, hidden: emulatorIo.hiddenPaths(), network: false})
+        // A ticket worktree keeps its git data in the managed checkout, which the cage hides: without it every
+        // proof that asks git what changed dies with "not a git repository" and reads as a failed proof.
+        const common = git(opts.cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+        const gitData = common.status === 0 && path.isAbsolute(common.stdout.trim()) ? [common.stdout.trim()] : []
+        const args = composeBuildArgs({
+          worktree: opts.cwd, scratch, script: command, hidden: emulatorIo.hiddenPaths(), network: false, readOnly: gitData,
+        })
         const ran = await emulatorIo.runContained(BWRAP, args, {
           cwd: opts.cwd, env: buildEnvironment(process.env, scratch), timeoutMs: opts.timeoutSeconds * 1000, signal: opts.signal,
         })

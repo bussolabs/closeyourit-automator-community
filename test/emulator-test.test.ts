@@ -407,6 +407,14 @@ describe('pure helpers', () => {
       '--chdir', '/data/worktrees/P/P-1', '--', 'sh', '-c', 'make apk',
     ])
     expect(composeBuildArgs({...confinement, network: true})).not.toContain('--unshare-net')
+    // The Tester's proofs often ask git what changed: the repository's git data, hidden with the managed checkouts,
+    // is shown again read-only, after the hiding mounts and before the writable worktree.
+    const withGit = composeBuildArgs({...confinement, readOnly: ['/data/repositories/app/.git']})
+    const shown = withGit.indexOf('/data/repositories/app/.git')
+    expect(withGit.slice(shown - 1, shown + 2)).toEqual(['--ro-bind', '/data/repositories/app/.git', '/data/repositories/app/.git'])
+    expect(shown).toBeGreaterThan(withGit.lastIndexOf('--tmpfs'))
+    expect(shown).toBeLessThan(withGit.indexOf('--bind'))
+    expect(() => composeBuildArgs({...confinement, readOnly: ['.git']})).toThrow()
     expect(() => composeBuildArgs({...confinement, worktree: 'w'})).toThrow()
     expect(() => composeBuildArgs({...confinement, scratch: 's'})).toThrow()
     expect(() => composeBuildArgs({...confinement, hidden: {dirs: ['.ssh'], files: []}})).toThrow()

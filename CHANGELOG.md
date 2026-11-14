@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.56.3] - 2026-11-14
+
+### Fixed
+
+- **Il Tester non boccia più le prove che usano git.** Nella gabbia git non trovava il repository, e ogni prova che chiedeva «cosa è cambiato» falliva a torto. Ora i dati git si vedono in sola lettura. (CYAU-329)
+- **Esito leggibile con comandi lunghi.** L'esito di una prova resta visibile anche quando il comando è molto lungo. (CYAU-329)
+
 ## [0.56.2] - 2026-11-14
 
 ### Fixed
