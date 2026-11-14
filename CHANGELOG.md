@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.57.4] - 2026-11-14
+
+### Fixed
+
+- **Chi rilegge non boccia più per il lavoro degli altri.** Il confronto parte dal punto in cui il ramo ha lasciato quello principale: prima le righe arrivate dopo da altri ticket sembravano tolte. (CYAU-331)
+- **Una copia di lavoro non pronta dice perché.** Lo stop ora riporta la causa vera. (CYAU-331)
+
 ## [0.57.3] - 2026-11-14
 
 ### Fixed

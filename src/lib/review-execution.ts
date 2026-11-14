@@ -429,6 +429,15 @@ export async function resolveReviewDiff(
   if (!/^[0-9a-f]{40}$/i.test(baseCommit)) {
     throw invalidExecution('Base della review non valida o non risolvibile')
   }
+  // The work is what the branch changed SINCE it left the base. Against the base as it is now, every line other
+  // tickets landed there meanwhile reads as removed by this work, and a sound change is rejected for it. Unrelated
+  // histories have no common ancestor: the base stays as given.
+  try {
+    const forkPoint = (await git(['merge-base', baseCommit, 'HEAD'])).toString('utf8').trim()
+    if (/^[0-9a-f]{40}$/i.test(forkPoint)) baseCommit = forkPoint
+  } catch (error) {
+    if (!(error instanceof ReviewSnapshotExecutionError) || error.gitExitCode !== 1) throw error
+  }
   const worktreeRoot = (await git(['rev-parse', '--show-toplevel'])).toString('utf8').trim()
   if (!isAbsolute(worktreeRoot)) throw invalidExecution('Root del worktree Git non valida')
   let snapshotRepository: SnapshotRepository

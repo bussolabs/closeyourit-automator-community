@@ -128,6 +128,8 @@ export function buildTesterPrompt(criteria: TesterCriterion[], context = ''): st
     '- the real test or check the criterion names, with the real paths you found in the repository;',
     '- one line, no pipes into `true`, no `|| true`, no command that passes whatever the code does;',
     '- it runs from the repository root, with no network and no credentials;',
+    '- to ask what the work changed, compare with three dots (`git diff --name-only <base>...HEAD`): two dots also',
+    '  count what the base branch gained meanwhile from other work, and a sound change then reads as failed;',
     '- if no command can prove it here (it needs a database, a network, a device, or the test does not exist),',
     '  give `null` and say why in `note`. Never invent a command to fill the gap.',
     '',

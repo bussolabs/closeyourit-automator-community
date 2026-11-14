@@ -576,6 +576,38 @@ describe('resolveReviewDiff', () => {
     })).rejects.toMatchObject({status: 'failed', gitExitCode: 128})
   })
 
+  // Seen on AAC-55: the branch started from main, other tickets landed on main meanwhile, and the diff was taken
+  // against the main of NOW. Their lines read as removed by this work, and a sound one-line change was rejected.
+  it('reviews what the branch changed since it left the base, not what the base gained meanwhile', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-git-'))
+    try {
+      const git = (args: string[]): string => {
+        const result = spawnSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=t@example.test', ...args], {encoding: 'utf8'})
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout.trim()
+      }
+      git(['init', '-q', '-b', 'main'])
+      fs.writeFileSync(path.join(repo, 'a.ts'), 'export const a = 1\n')
+      git(['add', '-A']); git(['commit', '-qm', 'base'])
+      const fork = git(['rev-parse', 'HEAD'])
+      git(['checkout', '-q', '-b', 'ticket/T-1'])
+      fs.writeFileSync(path.join(repo, 'a.ts'), 'export const a = 2\n')
+      git(['add', '-A']); git(['commit', '-qm', 'mine'])
+      git(['checkout', '-q', 'main'])
+      fs.writeFileSync(path.join(repo, 'other.ts'), 'export const other = 1\n')
+      git(['add', '-A']); git(['commit', '-qm', 'another ticket'])
+      const mainNow = git(['rev-parse', 'HEAD'])
+      git(['checkout', '-q', 'ticket/T-1'])
+
+      const resolved = await resolveReviewDiff(mainNow, repo, {})
+      expect(resolved.baseCommit).toBe(fork)
+      expect(resolved.diff).toContain('+export const a = 2')
+      expect(resolved.diff).not.toContain('other.ts')
+    } finally {
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  })
+
   it('resolves the base to a commit and computes the diff up to HEAD without using a shell', async () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-git-'))
     try {

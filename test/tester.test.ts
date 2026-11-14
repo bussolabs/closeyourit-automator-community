@@ -294,6 +294,12 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
     }
   })
 
+  // Seen on AAC-55: the Tester proved «only this file changed» with `git diff origin/main`, two dots. Main had moved,
+  // so other tickets' files showed up and the proof of a sound change failed.
+  it('tells the Tester to compare with the fork point when it asks what changed', () => {
+    expect(buildTesterPrompt(criteria())).toContain('<base>...HEAD')
+  })
+
   // Seen on AAC: a proof ran the whole suite, the suite called `node`, and the service's PATH does not carry it —
   // the daemon is started by its absolute path. Seven tests read as failed for the machine, not for the code.
   it('puts the node that runs the daemon on the PATH of a proof', async () => {

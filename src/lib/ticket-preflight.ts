@@ -76,6 +76,7 @@ import {
   type WorkflowDelivery,
 } from './runner'
 import {composeRetryRun, extractRetryFindings, RETRY_FINDINGS_SEPARATOR} from './claude'
+import {redactSecrets} from './secret-redaction'
 import {sessionCostUsd} from './session-cost'
 import {type Action} from './schema'
 import {authorizeActionCwd} from './executor'
@@ -1724,7 +1725,10 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               if (error instanceof AutomatorError && error.code === ErrorCodes.Workspace.diverged) {
                 return denyDispatch(`${error.message} (fail-closed)`)
               }
-              return denyDispatch('workspace ticket non attestabile (fail-closed)')
+              // The cause travels with the stop: «not attestable» alone left a claimed ticket idle with no trace
+              // of what failed (seen on AAC-55, where the same step worked a minute later).
+              const cause = error instanceof Error ? redactSecrets(error.message).replace(/\s+/gu, ' ').slice(0, 200) : ''
+              return denyDispatch(`workspace ticket non attestabile (fail-closed)${cause ? `: ${cause}` : ''}`)
             }
           } else if (profile) {
             // Read-only phases read the managed checkout itself: bring it forward first (best-effort).
