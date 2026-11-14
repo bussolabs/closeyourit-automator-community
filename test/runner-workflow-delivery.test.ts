@@ -1165,6 +1165,17 @@ describe('runOnce — the Tester in a delivery (CYAU-329)', () => {
     expect(action.status).toBe('success')
   })
 
+  it('delivers a failed proof without sending the work back when the outcome is advisory', async () => {
+    const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'failed', summary: 'Fallita: DOD-1.', block: block('failed'), advisory: true}))
+    const afterVerificationFailure = vi.fn(async () => ({outcome: 'complete' as const, runStatus: 'failure' as const, errorCode: 'C409-CYCLE-002'}))
+    const deliver = ok()
+
+    await dispatch({stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', verify: passedCi(), tester, afterVerificationFailure, deliver})
+
+    expect(afterVerificationFailure).not.toHaveBeenCalled()
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({tester: block('failed')}))
+  })
+
   it('sends a failed proof back to the implementer and delivers nothing', async () => {
     const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'failed', summary: 'Il Tester ha visto fallire: DOD-1.', block: block('failed')}))
     // The cycle answers with the round limit here: a `retry` would run the session again, and this double always fails.

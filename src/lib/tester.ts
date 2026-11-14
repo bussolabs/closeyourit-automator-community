@@ -52,6 +52,8 @@ export interface TesterReport {
   summary: string
   /** null when there is nothing to deliver: the machine could not run the Tester at all. */
   block: TesterBlock | null
+  /** The project has the Tester in a dry run: a failed proof travels with the delivery, the work is not sent back. */
+  advisory?: true
 }
 
 export interface TesterRunOutcome {

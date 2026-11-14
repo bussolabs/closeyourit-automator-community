@@ -1721,6 +1721,15 @@ describe('emulator test in the delivery path (CYAU-295)', () => {
       }))
       expect(lifecycle.afterWorkflowVerificationFailure).toBeDefined()
     })
+
+    it('marks the outcome as advisory when the project has the Tester in a dry run', async () => {
+      vi.stubEnv('AUTOMATOR_TESTER', '1')
+      const report = {status: 'failed' as const, summary: 'Fallita: DOD-1.', block: null}
+      const lifecycle = await provider(temporaryDirectory(), {loadGateAtRef: vi.fn(() => baseGate(null)), runTester: vi.fn(async () => report)})
+        .prepare({...skillMode, testerCriteria, testerDryRun: true})
+
+      await expect(lifecycle.testerWorkflowDelivery!('codex', ask)).resolves.toEqual({...report, advisory: true})
+    })
   })
 
   it('a refused screenshot stops the delivery until the next round', async () => {

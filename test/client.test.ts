@@ -401,6 +401,17 @@ describe('makeClient#claimNextTicket', () => {
     expect(result.outcome === 'claimed' ? result.lease.reviewer : 'not claimed').toBeUndefined()
   })
 
+  // CYAU-329
+  it("reads the project's Tester mode and drops a value it does not know", async () => {
+    const dry = fakeFetch({ok: true, status: 201, json: {data: {...claimed, tester: 'dry_run', candidate}}})
+    await expect(makeClient(cfg, dry.fn, 'cyi_ah_host').claimNextTicket(request))
+      .resolves.toMatchObject({outcome: 'claimed', lease: {tester: 'dry_run'}})
+
+    const odd = fakeFetch({ok: true, status: 201, json: {data: {...claimed, tester: 'maybe', candidate}}})
+    const result = await makeClient(cfg, odd.fn, 'cyi_ah_host').claimNextTicket(request)
+    expect(result.outcome === 'claimed' ? result.lease.tester : 'not claimed').toBeUndefined()
+  })
+
   // CYAU-228
   it('reads OpenCode as reviewer with the OpenRouter model it reviews with', async () => {
     const named = fakeFetch({ok: true, status: 201, json: {data: {

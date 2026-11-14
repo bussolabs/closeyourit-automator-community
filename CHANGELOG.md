@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-11-14
+
+### Added
+
+- **Il Tester segue la scelta del progetto.** Con il Tester spento sul progetto la macchina non lo esegue e non paga la sessione. Con il Tester «in prova» lo esegue e riporta l'esito, senza rimandare indietro il lavoro quando una prova fallisce. (CYAU-329)
+
 ## [0.56.3] - 2026-11-14
 
 ### Fixed

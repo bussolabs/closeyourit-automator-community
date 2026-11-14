@@ -271,6 +271,8 @@ export interface Lease {
   release?: {version: string; sha?: string}
   /** CYAU-329 — the server asks this machine to try the plan's browser proofs on staging before the production tag. */
   browser_proof?: boolean
+  /** CYAU-329 — the project's choice for the Tester. Missing from a server that does not send it: the machine decides alone. */
+  tester?: 'off' | 'dry_run' | 'on'
 }
 
 /** Review depth due to the phase. The server decides it; the host executes it. */
@@ -503,6 +505,7 @@ function parseLease(body: unknown): Lease | null {
   // it were, and an abbreviated identifier identifies nothing.
   // CYAU-329 — only a literal `true` asks for the browser proofs: anything else is not a request.
   if (d.browser_proof === true) lease.browser_proof = true
+  if (d.tester === 'off' || d.tester === 'dry_run' || d.tester === 'on') lease.tester = d.tester
   const release = d.release as {version?: unknown; sha?: unknown} | null | undefined
   const versione = release && typeof release.version === 'string' ? release.version : null
   if (versione && /^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/u.test(versione)) {

@@ -1283,7 +1283,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                   return asked.status === 'success' ? asked.stdout : null
                 }
                 const tested = await workflowDelivery.tester(testerEngine, askTester, lifecycleSignal)
-                if (tested.status === 'failed' && workflowDelivery.afterVerificationFailure) {
+                if (tested.status === 'failed' && !tested.advisory && workflowDelivery.afterVerificationFailure) {
                   lifecycleResult = await workflowDelivery.afterVerificationFailure(tested.summary)
                   return
                 }

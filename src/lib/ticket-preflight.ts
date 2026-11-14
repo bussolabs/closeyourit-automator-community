@@ -195,7 +195,9 @@ export type TicketLeaseAcquireResult =
       // before the phase starts. The machine executes it, does not choose it.
       release?: {version: string; sha?: string};
       // CYAU-329: the server asks for the plan's browser proofs on staging before the production tag.
-      browserProof?: boolean}
+      browserProof?: boolean;
+      // CYAU-329: the project's choice for the Tester (missing = the server did not say).
+      testerMode?: 'off' | 'dry_run' | 'on'}
   | {outcome: 'held' | 'stale' | 'error'; reason: string}
 
 export interface TicketQueueSelection {
@@ -1081,6 +1083,7 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
       ...(remote.work_model ? {workModel: remote.work_model} : {}),
       ...(remote.release ? {release: remote.release} : {}),
       ...(remote.browser_proof ? {browserProof: true} : {}),
+      ...(remote.tester ? {testerMode: remote.tester} : {}),
       ...(input.withAttempt && remote.attempt_id ? {
         attemptId: remote.attempt_id,
         deliverAttempt: async (payload: AttemptDelivery) => {
@@ -1698,7 +1701,9 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
                 // CYAU-237 — the reviewer of a new attempt rereads its own previous findings of this phase.
                 ...(ticket.previousReviewFindings ? {previousFindings: ticket.previousReviewFindings} : {}),
                 // CYAU-329 — the proofs the approved plan says are run by a test or a command.
-                ...(ticket.approvedDone ? {testerCriteria: testerCriteria(ticket.approvedDone)} : {}),
+                // Off on the project: no criteria, so the Tester does not run and no session is paid for it.
+                ...(ticket.approvedDone && acquired.testerMode !== 'off' ? {testerCriteria: testerCriteria(ticket.approvedDone)} : {}),
+                ...(acquired.testerMode === 'dry_run' ? {testerDryRun: true} : {}),
                 // CYAU-172 — the phase comes from the queue, so the server decides the outcome: the skill has
                 // already run the project checks, pushed and opened the proposal, and the server has
                 // already accepted. `profile` is set only with `queueTarget` (line 1018) and without a

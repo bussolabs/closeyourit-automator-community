@@ -140,6 +140,8 @@ export interface TicketCycleInput {
   previousFindings?: PreviousReviewFinding[]
   /** CYAU-329 — the done criteria of the approved plan a machine can run (a test or a command). */
   testerCriteria?: TesterCriterion[]
+  /** CYAU-329 — the project has the Tester in a dry run: it measures and reports, it never sends the work back. */
+  testerDryRun?: boolean
   /**
    * CYAU-172 — the outcome of this phase is decided by the SERVER, not by the local check.
    *
@@ -1173,10 +1175,11 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         } : {}),
         ...(testerEnabled() && input.outcomeOwnedByServer && input.testerCriteria?.length ? {
           async testerWorkflowDelivery(engine: TesterEngine, ask: (prompt: string) => Promise<string | null>, signal?: AbortSignal): Promise<TesterReport> {
-            return executeTester({
+            const report = await executeTester({
               criteria: input.testerCriteria!, cwd: prepared.worktreePath, ticket: input.ticket, engine,
               timeoutSeconds: TESTER_COMMAND_TIMEOUT_S, askCommands: ask, signal: signal ?? input.signal,
             })
+            return input.testerDryRun ? {...report, advisory: true} : report
           },
         } : {}),
         ...(remoteConfig || emulatorConfig || (testerEnabled() && input.testerCriteria?.length) ? {
