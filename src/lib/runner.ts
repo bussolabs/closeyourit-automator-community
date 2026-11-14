@@ -5,7 +5,7 @@ import {type Action, type Playbook} from './schema'
 import {selectDue} from './scheduler'
 import {quarantineCorruptState, readState, type RunStatus, saveState, updateAction} from './state'
 import {type RunResult, type SpawnFn} from './executor'
-import {claudeSessionCostUsd, composeRetryRun} from './claude'
+import {addRetryFindings, claudeSessionCostUsd} from './claude'
 import {sessionCostUsd} from './session-cost'
 import {CLAUDE_MODEL, CODEX_MODEL} from './models'
 import {type AgentRuntime, ClaudeRuntime, CodexRuntime, SpawnRuntime} from './runtime'
@@ -1024,7 +1024,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         }
         while (true) {
           const attemptAction = retryPrompt
-            ? {...effectiveAction, run: composeRetryRun(retryPrompt, originalRun)}
+            ? {...effectiveAction, run: addRetryFindings(retryPrompt, originalRun)}
             : effectiveAction
           let lifecycleResult: Awaited<ReturnType<TicketRunLifecycle['afterRuntime']>> | undefined
           // CYAU-285 — resume the conversation a restart interrupted, or start one and record its name before the

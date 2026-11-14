@@ -7,6 +7,7 @@ import {
   claudeIsError,
   claudeSessionCostUsd,
   CLAUDE_BIN,
+  addRetryFindings,
   composeRetryRun,
   extractRetryFindings,
   RETRY_FINDINGS_SEPARATOR,
@@ -389,5 +390,18 @@ describe('claudeSessionCostUsd — CYAU-155', () => {
     expect(claudeSessionCostUsd('{"total_cost_usd":-1}')).toBeNull()
     expect(claudeSessionCostUsd('{"total_cost_usd":"cinque"}')).toBeNull()
     expect(claudeSessionCostUsd('{"total_cost_usd":1e400}')).toBeNull()
+  })
+})
+
+describe('addRetryFindings', () => {
+  it('composes the findings with a plain run', () => {
+    expect(addRetryFindings('# Finding\nfix', 'base')).toBe(composeRetryRun('# Finding\nfix', 'base'))
+  })
+
+  it('keeps the approved plan already in front of the run, then the findings', () => {
+    const run = composeRetryRun('# Approved plan\nspec', 'base')
+    const retry = addRetryFindings('# Finding\nfix', run)
+    expect(extractRetryFindings(retry)).toBe('# Approved plan\nspec\n\n# Finding\nfix')
+    expect(retry.endsWith(`${RETRY_FINDINGS_SEPARATOR}base`)).toBe(true)
   })
 })

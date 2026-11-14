@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.1] - 2026-11-14
+
+### Fixed
+
+- **Il piano approvato resta nel giro di correzione.** Quando una consegna tornava indietro per una correzione, la macchina ripartiva senza il piano approvato e si fermava. Ora riceve il piano e poi le correzioni. (CYAU-329)
+
 ## [0.57.0] - 2026-11-14
 
 ### Added

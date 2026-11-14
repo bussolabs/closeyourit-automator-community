@@ -50,6 +50,17 @@ export function extractRetryFindings(run: string): string | undefined {
 }
 
 /**
+ * Adds a retry's findings to a `run` that may ALREADY carry a preamble (the approved plan, composed by the
+ * preflight). Reading stops at the first separator, so composing a second time in front would drop the plan:
+ * the corrected session would then work without its spec. Order: first what was there, then the findings.
+ */
+export function addRetryFindings(findings: string, run: string): string {
+  const preamble = extractRetryFindings(run)
+  if (!preamble) return composeRetryRun(findings, run)
+  return composeRetryRun(`${preamble}\n\n${findings}`, run.slice(preamble.length + RETRY_FINDINGS_SEPARATOR.length))
+}
+
+/**
  * `json` prints only the final result. `stream-json` (CYAU-282) prints one event per line and ends with a
  * result line carrying the same fields; the CLI requires `--verbose` for it in print mode.
  */
