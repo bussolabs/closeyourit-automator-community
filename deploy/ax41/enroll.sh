@@ -95,8 +95,9 @@ status=$?
 set -e
 [[ $status == 0 || $status == 3 ]] || exit "$status"
 # oneclick's install stage runs a bare `install --managed`, which turns skill-mode off and resets the secrets
-# project: the service is installed again with this host's options, last.
+# project: the service is installed again with this host's options, last, and restarted so the running daemon
+# takes them (install does not restart a running service). The Tester is on for this host (CYAU-329).
 # shellcheck disable=SC2016 # $HOME and $PATH belong to the daemon user's shell
 printf '%s\n' "$closeyourit_token" | as_user \
-  'IFS= read -r CLOSEYOURIT_TOKEN; export CLOSEYOURIT_TOKEN; export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"; automator install --managed --skills-enabled --secrets-project CYCL >/dev/null && automator status'
+  'IFS= read -r CLOSEYOURIT_TOKEN; export CLOSEYOURIT_TOKEN; export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"; AUTOMATOR_TESTER=1 automator install --managed --skills-enabled --secrets-project CYCL >/dev/null && systemctl --user restart closeyourit-automator.service && automator status'
 echo "enroll: oneclick exit $status (3 = waiting for a person)"

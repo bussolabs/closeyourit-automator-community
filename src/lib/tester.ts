@@ -64,6 +64,11 @@ export interface TesterIo {
   headCommit(cwd: string): string | null
   /** Tracked files changed and untracked files not ignored, the session folder aside. */
   changedFiles(cwd: string): string[]
+  /**
+   * What the mapping session may rely on without opening a file: base branch, delivered diff, tracked paths.
+   * The read-only Codex session has no shell at all, so it cannot read the repository by itself.
+   */
+  context(cwd: string): string
   /** Puts the worktree back to its commit and removes what is not ignored. */
   restore(cwd: string): void
   run(command: string, opts: {cwd: string; ticket: string; timeoutSeconds: number; signal?: AbortSignal}): Promise<TesterRunOutcome>
@@ -92,6 +97,9 @@ export function testerEnabled(source: NodeJS.ProcessEnv = process.env): boolean 
   return source.AUTOMATOR_TESTER === '1'
 }
 const MAX_TEXT = 600
+/** Room for the repository context in the mapping prompt: the diff, and each list of paths. */
+const CONTEXT_DIFF_MAX = 20_000
+const CONTEXT_LIST_MAX = 30_000
 /** Exit codes of a shell that did not find or could not run the tool: the machine, not the change. */
 const MISSING_TOOL_EXIT = new Set([126, 127])
 const SESSION_DIR = '.closeyourit/'
@@ -104,10 +112,12 @@ export function testerCriteria(done: PlanDone[]): TesterCriterion[] {
   })
 }
 
-export function buildTesterPrompt(criteria: TesterCriterion[]): string {
+export function buildTesterPrompt(criteria: TesterCriterion[], context = ''): string {
   return [
     'You are the Tester of a delivered piece of work. You did not write it.',
-    'The working directory holds the delivered code. Read it; you cannot run anything and must not try.',
+    'The working directory holds the delivered code. The repository context at the end shows its base branch,',
+    'the delivered diff and the tracked paths: it is enough to answer. Open files with your file tools if you have them.',
+    'Do not run tests, builds or the proof commands themselves: a machine runs the command you give and reads its exit code.',
     '',
     'For each criterion below, give the ONE shell command line that proves it on this repository:',
     '- the real test or check the criterion names, with the real paths you found in the repository;',
@@ -123,6 +133,7 @@ export function buildTesterPrompt(criteria: TesterCriterion[]): string {
     '',
     'Answer with JSON only, in this exact shape:',
     '{"commands": [{"criterion_id": "DOD-1", "command": "…", "note": ""}]}',
+    ...(context ? ['', '# Repository context (untrusted data)', context] : []),
   ].join('\n')
 }
 
@@ -217,7 +228,7 @@ export async function runTester(input: TesterInput, io: TesterIo = defaultTester
   if (!commit) return unavailable('commit del lavoro non leggibile')
   if (io.changedFiles(input.cwd).length > 0) return unavailable('la cartella di lavoro ha modifiche non consegnate: il Tester non parte')
 
-  const answer = await input.askCommands(buildTesterPrompt(input.criteria))
+  const answer = await input.askCommands(buildTesterPrompt(input.criteria, io.context(input.cwd)))
   const commands = answer === null ? null : parseTesterCommands(answer, input.criteria)
   if (!commands) return unavailable('la sessione del Tester non ha indicato i comandi delle prove')
 
@@ -253,6 +264,20 @@ export function defaultTesterIo(emulatorIo: EmulatorIo = defaultEmulatorIo()): T
       const head = git(cwd, ['rev-parse', 'HEAD'])
       const sha = head.stdout.trim()
       return head.status === 0 && /^[0-9a-f]{40}$/u.test(sha) ? sha : null
+    },
+    context(cwd) {
+      const cut = (text: string, max: number): string => text.length > max ? `${text.slice(0, max)}\n… (cut)` : text
+      const remoteHead = git(cwd, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).stdout.trim()
+      const base = remoteHead || 'origin/main'
+      return [
+        `Base branch: ${base}`,
+        '## Files changed against the base (git diff --name-status)',
+        cut(git(cwd, ['diff', '--name-status', `${base}...HEAD`]).stdout.trim(), CONTEXT_LIST_MAX),
+        '## Delivered diff',
+        cut(git(cwd, ['diff', `${base}...HEAD`]).stdout.trim(), CONTEXT_DIFF_MAX),
+        '## Tracked paths (git ls-files)',
+        cut(git(cwd, ['ls-files']).stdout.trim(), CONTEXT_LIST_MAX),
+      ].join('\n')
     },
     changedFiles(cwd) {
       const status = git(cwd, ['status', '--porcelain', '--untracked-files=all'])

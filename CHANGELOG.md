@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.56.2] - 2026-11-14
+
+### Fixed
+
+- **Il Tester ora trova i comandi delle prove.** Quando a fare il Tester era Codex, non riusciva a leggere il lavoro consegnato e nessuna prova veniva eseguita. Ora la macchina gli passa le modifiche e l'elenco dei file. (CYAU-329)
+
 ## [0.56.1] - 2026-11-13
 
 ### Fixed

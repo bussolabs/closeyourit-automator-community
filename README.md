@@ -200,7 +200,8 @@ Interruttori della macchina, spenti di default e mai accendibili dal server: si 
 salva nel servizio solo con il valore `1`. `AUTOMATOR_TESTER=1` esegue le prove del piano (CYAU-329);
 `AUTOMATOR_REVIEW_READS_CODE=1` fa leggere a chi rilegge una copia dei file tracciati (CYAU-328). Esempio:
 `AUTOMATOR_TESTER=1 automator install --managed --skills-enabled ...`. Un `install` lanciato senza la variabile
-la toglie.
+la toglie. Su un servizio già acceso `install` non lo riavvia: poi serve
+`systemctl --user restart closeyourit-automator.service`.
 
 Rimozione: `automator uninstall`.
 

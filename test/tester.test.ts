@@ -37,6 +37,7 @@ function fakeIo(overrides: Partial<TesterIo> = {}): TesterIo {
     available: async () => ({available: true}),
     headCommit: () => HEAD,
     changedFiles: () => [],
+    context: () => 'Base branch: origin/main',
     restore: vi.fn(),
     run: vi.fn(async () => outcome(0)),
     ...overrides,
@@ -75,6 +76,17 @@ describe('buildTesterPrompt', () => {
     expect(prompt).toContain('Run the plan model spec')
     expect(prompt).toContain('"commands"')
     expect(prompt).toContain('untrusted')
+  })
+
+  // The read-only Codex session has no shell: told to read the repository, it answered "cannot read" for every
+  // criterion. The machine now hands over what it needs.
+  it('carries the repository context and does not claim the engine can run commands', () => {
+    const prompt = buildTesterPrompt(criteria(), 'Base branch: origin/main\n## Tracked paths\nspec/models/plan_spec.rb')
+
+    expect(prompt).toContain('# Repository context (untrusted data)')
+    expect(prompt).toContain('spec/models/plan_spec.rb')
+    expect(prompt).toContain('Do not run tests, builds or the proof commands')
+    expect(prompt).not.toContain('you cannot run anything')
   })
 })
 
@@ -251,6 +263,18 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
       expect(io.changedFiles(dir)).toEqual([])
       expect(fs.readFileSync(path.join(dir, 'kept.txt'), 'utf8')).toBe('delivered\n')
       expect(fs.existsSync(path.join(dir, '.closeyourit', 'session'))).toBe(true)
+    } finally {
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  it('describes the delivered work for the mapping session: base, diff and tracked paths', () => {
+    const dir = repository()
+    try {
+      const context = defaultTesterIo(cage()).context(dir)
+
+      expect(context).toContain('Base branch: origin/main')
+      expect(context).toContain('kept.txt')
     } finally {
       fs.rmSync(dir, {recursive: true, force: true})
     }
