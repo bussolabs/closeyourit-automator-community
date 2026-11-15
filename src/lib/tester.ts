@@ -271,7 +271,10 @@ function git(cwd: string, args: string[]): {status: number | null; stdout: strin
  */
 function withDaemonNode(env: NodeJS.ProcessEnv, toolPaths: string[]): NodeJS.ProcessEnv {
   const first = [...new Set([...toolPaths, path.dirname(process.execPath)])]
-  const entries = (env.PATH ?? '').split(path.delimiter).filter((entry) => entry !== '' && !first.includes(entry))
+  // With the real folders known the shims leave the PATH: where python3 itself is a shim, it rewrote the PATH of
+  // everything it started and the suite found the shims again.
+  const isShims = (entry: string): boolean => toolPaths.length > 0 && /[\\/]mise[\\/]shims[\\/]?$/u.test(entry)
+  const entries = (env.PATH ?? '').split(path.delimiter).filter((entry) => entry !== '' && !first.includes(entry) && !isShims(entry))
   return {...env, PATH: [...first, ...entries].join(path.delimiter)}
 }
 

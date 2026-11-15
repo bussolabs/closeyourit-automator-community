@@ -370,7 +370,25 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
       const options = (runContained.mock.calls[0] as unknown as [string, string[], {env: NodeJS.ProcessEnv}])[2]
       const entries = (options.env.PATH ?? '').split(path.delimiter)
       expect(entries.slice(0, 3)).toEqual(['/opt/tools/cyi/bin', '/opt/tools/gh/bin', path.dirname(process.execPath)])
-      expect(entries.indexOf('/home/x/.local/share/mise/shims')).toBeGreaterThan(2)
+      // The shims leave the PATH: where python3 itself is a shim, it rewrote the PATH of everything it started,
+      // and the suite found the shims again (seen on server-minion-1).
+      expect(entries).not.toContain('/home/x/.local/share/mise/shims')
+      expect(entries).toContain('/usr/bin')
+    } finally {
+      vi.unstubAllEnvs()
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
+  })
+
+  it('keeps the shims on the PATH when the real tool folders are unknown', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tester-no-tools-'))
+    vi.stubEnv('PATH', '/home/x/.local/share/mise/shims:/usr/bin')
+    try {
+      const runContained = vi.fn(async () => ({code: 0, stdout: Buffer.from(''), stderr: '', timedOut: false}))
+      await defaultTesterIo(cage({runContained} as Partial<EmulatorIo>), () => []).run('cyi --version', {cwd: dir, ticket: 'T-1', timeoutSeconds: 5})
+
+      const options = (runContained.mock.calls[0] as unknown as [string, string[], {env: NodeJS.ProcessEnv}])[2]
+      expect((options.env.PATH ?? '').split(path.delimiter)).toContain('/home/x/.local/share/mise/shims')
     } finally {
       vi.unstubAllEnvs()
       fs.rmSync(dir, {recursive: true, force: true})

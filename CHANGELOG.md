@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.8] - 2026-11-15
+
+### Fixed
+
+- **Il Tester non boccia più per colpa della macchina, anche sui server Hetzner.** Lì anche `python3` passava da un collegamento che nella gabbia non funziona. (CYAU-331)
+
 ## [0.57.7] - 2026-11-15
 
 ### Fixed
