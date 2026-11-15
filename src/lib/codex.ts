@@ -108,7 +108,7 @@ function buildCodexSkillArgv(
   const step = skillStep(skill.command)
   const gitRoots = action.sandbox === 'workspace-write' ? ticketGitWritableRoots(cwd) : []
   const filesystem = ['":root"="read"', `":workspace_roots"="${action.sandbox === 'workspace-write' ? 'write' : 'read'}"`, ...gitRoots.map((root) => `${JSON.stringify(root)}="write"`),
-    ...ESCAPE_SOCKET_PATHS.map((socket) => `${JSON.stringify(socket)}="none"`)]
+    ...hiddenSocketPaths(options.resolvePath).map((socket) => `${JSON.stringify(socket)}="none"`)]
     .join(', ')
   const invocation = `Use $${step} at ${skill.plugin_dir}/skills/${step}/SKILL.md${skill.args ? ` with this input: ${skill.args}` : ''}`
   const retryFindings = extractRetryFindings(action.run)
@@ -151,6 +151,25 @@ export interface CodexArgvOptions {
    */
   conversation?: AgentConversation
   lastMessageFile?: string
+  /** Resolves a path through its links; a missing path comes back as it is. Injected by the tests. */
+  resolvePath?: (path: string) => string
+}
+
+function realPathOrSame(target: string): string {
+  try {
+    return fs.realpathSync(target)
+  } catch {
+    return target
+  }
+}
+
+/**
+ * The escape sockets to hide, each by its real path and only once. Where `/var/run` is a link to `/run` and the
+ * socket exists (a host with Docker), naming it through the link made the sandbox fail before the session started:
+ * every Codex phase session on the Raspberry hosts died in half a second (seen on AAC-13).
+ */
+function hiddenSocketPaths(resolvePath: (path: string) => string = realPathOrSame): string[] {
+  return [...new Set(ESCAPE_SOCKET_PATHS.map((socket) => resolvePath(socket)))]
 }
 
 /** What a Codex `--json` session told about itself: its conversation name and its last message. */

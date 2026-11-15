@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.16] - 2026-11-15
+
+### Fixed
+
+- **Le sessioni Codex partono anche sulle macchine con Docker.** Sui Raspberry ogni sessione di fase affidata a Codex moriva in mezzo secondo, prima di iniziare. (CYAU-331)
+
 ## [0.57.15] - 2026-11-15
 
 ### Fixed

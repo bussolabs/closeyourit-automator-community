@@ -137,8 +137,19 @@ describe('buildCodexArgv in skill-mode', () => {
   ]
   const skill = {command: '/closeyourit-skills:autopilot', args: 'CYRA-7', plugin_dir: '/opt/skills/current'}
 
+  // Seen on the Raspberry hosts (AAC-13): `/var/run` is a link to `/run`, Docker is installed, and the sandbox died
+  // in half a second trying to hide the same socket twice, once through the link.
+  it('hides each escape socket once, by its real path, never through a link', () => {
+    const resolvePath = (p: string): string => p.startsWith('/var/run/') ? p.replace('/var/run/', '/run/') : p
+    const argv = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined, {resolvePath})
+
+    expect(argv).toContain('permissions.automator.filesystem={":root"="read", ":workspace_roots"="read", ' +
+      '"/run/user"="none", "/run/dbus"="none", "/run/systemd"="none", ' +
+      '"/run/docker.sock"="none", "/var/lib/incus"="none", "/run/incus"="none"}')
+  })
+
   it('invokes the skill by path with the ticket, under the hooks, the domain allowlist and a read-only workspace by default', () => {
-    const argv = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails))
+    const argv = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined, {resolvePath: (p) => p})
 
     expect(argv.slice(0, 6)).toEqual(['--ask-for-approval', 'never', '--dangerously-bypass-hook-trust', 'exec', '--ignore-user-config', '--ignore-rules'])
     expect(argv).toContain('features.hooks=true')
@@ -173,7 +184,7 @@ describe('buildCodexArgv in skill-mode', () => {
     git(repo, 'commit', '-qm', 'base')
     git(repo, 'worktree', 'add', '-q', '-b', 'ticket/CYRA-7', worktree)
 
-    const argv = buildCodexArgv(codexAction({run: 'x', sandbox: 'workspace-write', skill}), settingsFile(guardrails), worktree)
+    const argv = buildCodexArgv(codexAction({run: 'x', sandbox: 'workspace-write', skill}), settingsFile(guardrails), worktree, {resolvePath: (p) => p})
 
     const common = path.join(repo, '.git')
     expect(argv).toContain(
