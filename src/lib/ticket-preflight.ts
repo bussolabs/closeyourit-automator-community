@@ -2024,6 +2024,9 @@ export function makeQueueClaimer(
           released = true
           await api.releaseLease(buildReleaseRequest({ticket: result.lease.ticket, hostId, runId})).catch(() => false)
         },
+        async reportFailure(reason: string) {
+          await api.reportAttemptFailure(result.lease.attempt_id, reason).catch(() => false)
+        },
       },
     }
   }

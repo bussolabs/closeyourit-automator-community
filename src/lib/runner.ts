@@ -91,6 +91,8 @@ export interface TicketQueueClaim {
   runId: string
   /** Gives the ticket back to the queue. Best-effort and idempotent: a missed release expires by itself server-side. */
   release(): Promise<void>
+  /** Says on the attempt why the ticket is given back unworked. Best-effort. */
+  reportFailure?(reason: string): Promise<void>
 }
 
 /**
@@ -747,6 +749,9 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           // before consulting it) would otherwise leave the ticket occupied until expiry. The exception is
           // the lease already adopted by the gate, which releases it together with its own local record.
           if (queueClaim?.outcome === 'claimed' && !decision.queueClaimAdopted) {
+            // Before the release: the claim opened an attempt, and one given back with no reason is closed minutes
+            // later as «lease released» (seen on AAC-13). The adopted lease reports through the gate instead.
+            await queueClaim.claim.reportFailure?.(redactSecrets(decision.reason).slice(0, 500)).catch(() => undefined)
             await queueClaim.claim.release().catch(() => undefined)
           }
           // This queue is not asked for another one in this round. The claim already marked the phase

@@ -457,8 +457,11 @@ export async function resolveReviewDiff(
     if (indexTags.split('\0').some((entry) => entry !== '' && !entry.startsWith('H '))) {
       throw invalidExecution('La review contiene flag speciali nell’indice Git (assume-unchanged/skip-worktree)')
     }
+    // The two folders the status check below leaves out are left out here too: they are never part of the work,
+    // and a copy of the tree kept there (a conflict round does it) carries the repository's own .gitignore files.
     const untrackedIgnoreFiles = await snapshotGit([
       'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.gitignore', ':(glob)**/.gitignore',
+      ':(exclude).closeyourit/session', ':(exclude).pnpm-store',
     ])
     if (untrackedIgnoreFiles.length > 0) {
       // Name the files: without them the cause of the refusal is readable only on the host.

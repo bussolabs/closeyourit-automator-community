@@ -1084,6 +1084,33 @@ describe('resolveReviewDiff', () => {
     }
   })
 
+  // Seen on AAC-13: a conflict round left a copy of the base tree in the skills' scratch folder, .gitignore
+  // files included, and every review of that delivery was refused.
+  it('does not count .gitignore files inside the session scratch folder', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-session-ignore-'))
+    try {
+      const git = (args: string[]): string => {
+        const result = spawnSync('git', ['-C', repo, ...args], {encoding: 'utf8'})
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout.trim()
+      }
+      git(['init', '-q', '-b', 'main'])
+      fs.writeFileSync(path.join(repo, '.gitignore'), '.closeyourit/session/\n')
+      fs.writeFileSync(path.join(repo, 'tracked.ts'), 'ok\n')
+      git(['add', '.gitignore', 'tracked.ts'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      const base = git(['rev-parse', 'HEAD'])
+      fs.writeFileSync(path.join(repo, 'tracked.ts'), 'changed\n')
+      git(['add', 'tracked.ts'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'work'])
+      fs.mkdirSync(path.join(repo, '.closeyourit/session/base/shared/tool'), {recursive: true})
+      fs.writeFileSync(path.join(repo, '.closeyourit/session/base/shared/tool/.gitignore'), 'out/\n')
+      await expect(resolveReviewDiff(base, repo)).resolves.toBeDefined()
+    } finally {
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  })
+
   it('rejects untracked files that would otherwise stay out of the diff', async () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-untracked-'))
     try {

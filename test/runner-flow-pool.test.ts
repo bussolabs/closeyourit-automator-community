@@ -362,6 +362,40 @@ describe('runOnce — atomic queue take-over (CYAU-169)', () => {
     expect(seen).toEqual(['CYAU-1', 'CYAU-2', 'CYAU-3'])
   })
 
+  // Seen on AAC-13: a machine took the ticket and gave it back at once, three times, and the ticket never said why.
+  it('a claimed ticket stopped by the gate says why on the attempt, before it is given back', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const {runtime} = queueRuntime()
+    const calls: string[] = []
+    const reportFailure = vi.fn(async (_reason: string) => { calls.push('report') })
+    let handed = false
+    const claimQueue = vi.fn(async () => {
+      if (handed) return {outcome: 'empty' as const}
+      handed = true
+      return {
+        outcome: 'claimed' as const,
+        claim: {
+          candidate: {code: 'AAC-13'} as never,
+          lease: {ticket: 'AAC-13', host_id: 'h1', run_id: 'run-1', attempt_id: 'at-1', expires_at: 'z'} as never,
+          runId: 'run-1',
+          release: async () => { calls.push('release') },
+          reportFailure,
+        },
+      }
+    })
+
+    await runOnce({
+      playbook: playbookWith(['q']), playbookDir: dir, now, ...p,
+      runtime, skillsMode: true, flowMaxParallel: 1,
+      ticketQueues: {q: target}, claimQueue,
+      preflight: async () => ({outcome: 'stop' as const, state: 'blocked' as const, reason: 'repository non attestato', audit: []}),
+    })
+
+    expect(reportFailure).toHaveBeenCalledWith('repository non attestato')
+    expect(calls).toEqual(['report', 'release'])
+  })
+
   it('queue exhausted mid-round: asking stops and the draining does not end up in the log as a wait', async () => {
     const p = paths()
     seedDue(p.stateFile, ['q'])

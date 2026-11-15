@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.57.13] - 2026-11-15
+
+### Fixed
+
+- **La rilettura non si ferma più per i file di lavoro della sessione.** Una copia interna lasciata nella cartella di appoggio bloccava ogni rilettura di quella consegna: ora quella cartella non conta. (CYAU-331)
+- **Un ticket preso e subito ridato dice perché.** Il motivo arriva sulla scheda anche quando la macchina lo lascia prima dei controlli iniziali. (CYAU-331)
+
 ## [0.57.12] - 2026-11-15
 
 ### Fixed
