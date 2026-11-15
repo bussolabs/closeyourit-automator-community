@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.12] - 2026-11-15
+
+### Fixed
+
+- **Un lavoro rimandato all'agente riparte davvero.** La macchina riceveva l'ordine di restare sul commit approvato prima del rifiuto e si fermava: ora quel limite vale solo per le fasi di rilascio. (CYAU-331)
+
 ## [0.57.11] - 2026-11-15
 
 ### Fixed

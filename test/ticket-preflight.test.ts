@@ -2049,11 +2049,26 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
       const con = await preflightCon({
         frozen_candidate: {repo: 'closeyourit/automator', number: 72, base_ref: 'main',
                            head_sha: '3f2a91c0d4e6b8079a1c5f3d2e7b4a6c8d0f1e29'},
-      })
+      }, 'closer_staging')
       const run = String(con.action?.run ?? '')
       expect(run).toContain('La versione approvata')
       expect(run).toContain('3f2a91c0d4e6b8079a1c5f3d2e7b4a6c8d0f1e29')
       expect(run).toContain('mai sulla punta del ramo')
+    })
+
+    // Seen on AAC-13: the work was sent back to the agent, and the round stopped three times because the branch
+    // was «not on the approved version». Work sent back is no longer approved, and the worker moves the branch.
+    it('the working phase is never told to stay on an approved sha', async () => {
+      const result = await preflightCon({
+        frozen_candidate: {repo: 'closeyourit/automator', number: 72, base_ref: 'main',
+                           head_sha: '3f2a91c0d4e6b8079a1c5f3d2e7b4a6c8d0f1e29'},
+      }, 'autopilot')
+
+      expect(result.outcome).toBe('admit')
+      const run = String(result.action?.run ?? '')
+      expect(run).toContain('# Vincolo di scope')
+      expect(run).not.toContain('La versione approvata')
+      expect(run).not.toContain('3f2a91c0d4e6b8079a1c5f3d2e7b4a6c8d0f1e29')
     })
 
     // If the gate let the phase start because the constraint was there, that constraint MUST reach the

@@ -589,7 +589,10 @@ function composeRelease(release: {version: string; sha?: string}): string {
  * instruction and with the plan, and the last one read would win. And the evidence is phrased as "observe it and report
  * the coordinates", not as "declare the outcome": whoever executes is not whoever judges.
  */
-function composeFrozenScope(scope: FrozenScope): string {
+function composeFrozenScope(scope: FrozenScope, phase: string | undefined): string {
+  // The approved code is the limit of the phases that RELEASE it. The working phase runs when there is no approved
+  // work, or when it was sent back: there the worker moves the branch, and «stay on that sha» stopped it (AAC-13).
+  const head = phase === 'autopilot' ? undefined : scope.head
   const righe = scope.items.map((item) => `- ${item.repo} (dal ramo ${item.base})`)
   return [
     '# Vincolo di scope (deciso da una persona, non modificabile)',
@@ -602,11 +605,11 @@ function composeFrozenScope(scope: FrozenScope): string {
     '## Come si proverà che è finito',
     `La prova è: ${scope.probe}. Non dichiararne l'esito: osservala e riporta le coordinate di ciò che hai`,
     'visto (versione, commit, ramo). A dire «fatto» è il sistema, guardando quella prova.',
-    ...(scope.head ? [
+    ...(head ? [
       '',
       '## La versione approvata',
-      `Il codice approvato è ${scope.head.headSha} sulla proposta #${scope.head.number} di ${scope.head.repo}`,
-      `(verso ${scope.head.baseRef}). Lavora su QUELLA sigla, mai sulla punta del ramo: fra l'approvazione e`,
+      `Il codice approvato è ${head.headSha} sulla proposta #${head.number} di ${head.repo}`,
+      `(verso ${head.baseRef}). Lavora su QUELLA sigla, mai sulla punta del ramo: fra l'approvazione e`,
       'adesso il ramo può essersi mosso, e ciò che ci trovi sopra nessuno lo ha guardato.',
     ] : []),
   ].join('\n')
@@ -781,7 +784,7 @@ function queueCandidateToTicket(candidate: ClaimedTicketCandidate, cwd: string):
   // would mean that a missing `approved_at` in the payload is enough for the gate to say yes and the session
   // to work without a limit — that is, a check that declares a guarantee and verifies a weaker one.
   const planSection = currentPlan && text(currentPlan.approved_at) ? composeApprovedPlan(currentPlan) : undefined
-  const scopeSection = frozenScope ? composeFrozenScope(frozenScope) : undefined
+  const scopeSection = frozenScope ? composeFrozenScope(frozenScope, text(candidate.workflow?.execution_phase)) : undefined
   const resolveSection = candidate.workflow?.conflict_resolution === true ? CONFLICT_RESOLUTION_SECTION : undefined
   const approvedPlan = [resolveSection, planSection, scopeSection].filter(Boolean).join('\n\n') || undefined
   const automationContext = currentPlan && !approvedPlan ? [
