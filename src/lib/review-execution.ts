@@ -461,7 +461,10 @@ export async function resolveReviewDiff(
       'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.gitignore', ':(glob)**/.gitignore',
     ])
     if (untrackedIgnoreFiles.length > 0) {
-      throw invalidExecution('La review contiene file .gitignore non tracciati che possono nascondere nuovi sorgenti')
+      // Name the files: without them the cause of the refusal is readable only on the host.
+      const names = untrackedIgnoreFiles.toString('utf8').split('\0').filter(Boolean)
+      const shown = names.slice(0, 3).map((name) => name.slice(0, 120)).join(', ')
+      throw invalidExecution(`La review contiene file .gitignore non tracciati che possono nascondere nuovi sorgenti: ${shown}${names.length > 3 ? ', …' : ''}`)
     }
 
     // The skills keep their scratch files (gate commands, commit message, PR body) under .closeyourit/session/,

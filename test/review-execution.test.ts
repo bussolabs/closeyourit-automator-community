@@ -1061,6 +1061,29 @@ describe('resolveReviewDiff', () => {
     }
   })
 
+  // Seen on AAC-13: the refusal did not say which file, and the cause lived only in the host's logs.
+  it('names the untracked .gitignore that stops the review', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-ignorefile-'))
+    try {
+      const git = (args: string[]): string => {
+        const result = spawnSync('git', ['-C', repo, ...args], {encoding: 'utf8'})
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout.trim()
+      }
+      git(['init', '-q', '-b', 'main'])
+      fs.writeFileSync(path.join(repo, 'tracked.ts'), 'ok\n')
+      git(['add', 'tracked.ts'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      const base = git(['rev-parse', 'HEAD'])
+      // What a tool cache writes: a directory that ignores itself.
+      fs.mkdirSync(path.join(repo, '.tool_cache'))
+      fs.writeFileSync(path.join(repo, '.tool_cache/.gitignore'), '*\n')
+      await expect(resolveReviewDiff(base, repo)).rejects.toThrow(/\.tool_cache\/\.gitignore/)
+    } finally {
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  })
+
   it('rejects untracked files that would otherwise stay out of the diff', async () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-untracked-'))
     try {

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.10] - 2026-11-15
+
+### Fixed
+
+- **Il rifiuto della rilettura dice quale file lo causa.** Quando un `.gitignore` non tracciato ferma la rilettura, il messaggio ora ne riporta il nome: prima la causa si leggeva solo sulla macchina. (CYAU-331)
+
 ## [0.57.9] - 2026-11-15
 
 ### Fixed
