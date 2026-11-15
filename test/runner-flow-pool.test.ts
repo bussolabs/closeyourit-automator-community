@@ -396,6 +396,41 @@ describe('runOnce — atomic queue take-over (CYAU-169)', () => {
     expect(calls).toEqual(['report', 'release'])
   })
 
+  it('a claimed ticket dropped because the service is stopping says so on the attempt', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const {runtime} = queueRuntime()
+    const calls: string[] = []
+    const stop = new AbortController()
+    const reportFailure = vi.fn(async (_reason: string) => { calls.push('report') })
+    let handed = false
+    const claimQueue = vi.fn(async () => {
+      if (handed) return {outcome: 'empty' as const}
+      handed = true
+      stop.abort()
+      return {
+        outcome: 'claimed' as const,
+        claim: {
+          candidate: {code: 'AAC-13'} as never,
+          lease: {ticket: 'AAC-13', host_id: 'h1', run_id: 'run-1', attempt_id: 'at-1', expires_at: 'z'} as never,
+          runId: 'run-1',
+          release: async () => { calls.push('release') },
+          reportFailure,
+        },
+      }
+    })
+
+    await runOnce({
+      playbook: playbookWith(['q']), playbookDir: dir, now, ...p,
+      runtime, skillsMode: true, flowMaxParallel: 1, signal: stop.signal,
+      ticketQueues: {q: target}, claimQueue,
+      preflight: async () => ({outcome: 'stop' as const, state: 'blocked' as const, reason: 'unused', audit: []}),
+    })
+
+    expect(reportFailure).toHaveBeenCalledWith(expect.stringMatching(/stopping/))
+    expect(calls).toEqual(['report', 'release'])
+  })
+
   it('queue exhausted mid-round: asking stops and the draining does not end up in the log as a wait', async () => {
     const p = paths()
     seedDue(p.stateFile, ['q'])

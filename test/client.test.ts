@@ -486,6 +486,15 @@ describe('makeClient#claimNextTicket', () => {
     expect(JSON.parse(release[0].opts.body as string)).toEqual({ticket: 'CYAU-34', host_id: 'h1', run_id: 'r1'})
   })
 
+  // Seen on AAC-13: machines took the ticket and gave it back at once, and the card only said «lease released».
+  it('a discarded claim that opened an attempt says why on it, before it is given back', async () => {
+    const {fn, calls} = fakeFetch({ok: true, status: 201, json: {data: {...claimed, candidate: {broken: true}}}})
+    await makeClient(cfg, fn, 'cyi_ah_host').claimNextTicket(request)
+    const after = calls.slice(1).map((call) => call.url.replace('https://app.closeyour.it/api/v1/', ''))
+    expect(after).toEqual([`agent_attempts/${claimed.attempt_id}/failure`, 'leases/CYAU-34/release'])
+    expect(JSON.parse(calls[1].opts.body as string).reason).toMatch(/candidate/)
+  })
+
   it('a 2xx without even a recognizable lease does not invent a release', async () => {
     const {fn, calls} = fakeFetch({ok: true, status: 201, json: {data: {candidate}}})
     await expect(makeClient(cfg, fn, 'cyi_ah_host').claimNextTicket(request))

@@ -1038,6 +1038,16 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
       return {outcome: 'error', reason: `lease del ticket ${ticket.code} legato a un'altra lavorazione (fail-closed)`}
     }
 
+    // The lease is ours but cannot be used: the attempt it opened is told why BEFORE the release, otherwise the
+    // card only shows «lease released» and the real error stays on the machine (seen on AAC-13).
+    const errorText = (error: unknown): string =>
+      redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 300)
+    const giveBack = async (reason: string): Promise<TicketLeaseAcquireResult> => {
+      if (remote.attempt_id) await api.reportAttemptFailure(remote.attempt_id, reason).catch(() => false)
+      await api.releaseLease(buildReleaseRequest({ticket: ticket.code, hostId, runId})).catch(() => false)
+      return {outcome: 'error', reason}
+    }
+
     try {
       if (repository) {
         adoptRun({
@@ -1050,9 +1060,8 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
           now,
         })
       }
-    } catch {
-      await api.releaseLease(buildReleaseRequest({ticket: ticket.code, hostId, runId})).catch(() => false)
-      return {outcome: 'error', reason: 'recovery run precedente non attestabile (fail-closed)'}
+    } catch (error) {
+      return giveBack(`recovery run precedente non attestabile (fail-closed): ${errorText(error)}`)
     }
 
     const at = now().toISOString()
@@ -1068,9 +1077,8 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
     }
     try {
       store.save(record)
-    } catch {
-      await api.releaseLease(buildReleaseRequest({ticket: ticket.code, hostId, runId})).catch(() => false)
-      return {outcome: 'error', reason: 'persistenza lease ticket non attestabile (fail-closed)'}
+    } catch (error) {
+      return giveBack(`persistenza lease ticket non attestabile (fail-closed): ${errorText(error)}`)
     }
 
     let released = false

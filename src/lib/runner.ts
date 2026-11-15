@@ -704,7 +704,10 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       // by the signal in the executor; here we only avoid starting the next ones. CYAU-169: if the dispatch
       // had already claimed a ticket, it must be given back — nobody will work on it in this round.
       if (opts.signal?.aborted) {
-        if (queueClaim?.outcome === 'claimed') await queueClaim.claim.release().catch(() => undefined)
+        if (queueClaim?.outcome === 'claimed') {
+          await queueClaim.claim.reportFailure?.('service stopping: ticket claimed but not started').catch(() => undefined)
+          await queueClaim.claim.release().catch(() => undefined)
+        }
         return 'stop'
       }
       // CYAU-169: the same queue action runs several times in the same round, one per ticket. The log therefore takes
@@ -782,6 +785,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       // any lease already acquired must be released explicitly because the runtime will not take charge of it.
       if (opts.signal?.aborted) {
         if (ticketRun) await ticketRun.block().catch(() => undefined)
+        await workflowDelivery?.reportFailure?.('service stopping: session not started').catch(() => undefined)
         if (executionLease) await executionLease.release().catch(() => undefined)
         return 'stop'
       }

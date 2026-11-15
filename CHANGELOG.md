@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.14] - 2026-11-15
+
+### Fixed
+
+- **Nessun ticket viene più ridato senza motivo.** Coperti gli ultimi casi: lavoro precedente non recuperabile, risposta del server non usabile, servizio in arresto. Il motivo arriva sulla scheda del ticket. (CYAU-331)
+
 ## [0.57.13] - 2026-11-15
 
 ### Fixed

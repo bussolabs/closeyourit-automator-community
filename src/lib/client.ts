@@ -750,6 +750,13 @@ export function makeClient(cfg: SyncConfig, fetchFn: FetchFn = globalThis.fetch,
           // given back immediately. Leaving it occupied until expiry because of a server error would mean the
           // queue stuck on a ticket nobody is working on.
           if (lease?.ticket) {
+            // Before the release: an attempt given back with no reason is closed later as «lease released» (AAC-13).
+            if (lease.attempt_id) {
+              await fetchFn(`${base}/api/v1/agent_attempts/${encodeURIComponent(lease.attempt_id)}/failure`, {
+                method: 'POST', headers: opHeaders, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+                body: JSON.stringify({reason: 'claim discarded by the machine: the candidate in the server answer is not usable'}),
+              }).catch(() => undefined)
+            }
             await releaseHeldLease({ticket: lease.ticket, host_id: req.host_id, run_id: req.run_id}).catch(() => false)
           }
           return {outcome: 'rejected', status: res.status, ...(code ? {serverCode: code} : {})}

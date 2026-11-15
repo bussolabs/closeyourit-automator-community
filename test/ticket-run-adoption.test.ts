@@ -81,6 +81,42 @@ function inReviewRun(runId: string, worktree: string, adoptedFrom?: string): Run
 }
 
 describe('crash-safe adoption of an in_review delivery', () => {
+  // Seen on AAC-13: the lease was given back with no word on the attempt, and the real error was swallowed.
+  it('a claim whose previous run cannot be adopted says why on the attempt, before it is given back', async () => {
+    const calls: string[] = []
+    const reportAttemptFailure = vi.fn(async (_id: string, _reason: string) => { calls.push('report'); return true })
+    const client = {
+      acquireLease: vi.fn(),
+      claimTicketQueue: vi.fn(),
+      renewLease: vi.fn(),
+      releaseLease: vi.fn(async () => { calls.push('release'); return true }),
+      deliverAttempt: vi.fn(),
+      reportAttemptFailure,
+      sendLiveEvents: vi.fn(),
+    }
+    const provider = makeTicketLeaseProvider(
+      {sync: {}, host: {id: 'host-1', token: 'cyi_ah_valid'}} as Secrets,
+      {
+        client: client as never,
+        store: {save: vi.fn(), update: vi.fn(), remove: vi.fn()},
+        adoptRun: () => { throw new Error('worktree of the previous run is missing') },
+      },
+    )
+    const ticket = {project: 'CYAU', code: 'CYAU-37', cwd: '/repo', title: 'Delivery', comments: []}
+
+    const result = await provider.adopt!({
+      actionName: 'worker', ticket, ttlSeconds: 600, repository: 'closeyourit/automator',
+      claim: {
+        runId: 'run-1',
+        lease: {ticket: 'CYAU-37', host_id: 'host-1', run_id: 'run-1', attempt_id: 'at-1', expires_at: '2026-07-14T11:00:00.000Z'},
+      } as never,
+    })
+
+    expect(result.outcome).toBe('error')
+    expect(reportAttemptFailure).toHaveBeenCalledWith('at-1', expect.stringContaining('worktree of the previous run is missing'))
+    expect(calls).toEqual(['report', 'release'])
+  })
+
   it('two claims with different run-ids adopt the leaf and the delivery restarts without duplicating the effects', async () => {
     const root = temporaryDirectory()
     const runsBase = path.join(root, 'runs')
