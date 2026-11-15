@@ -321,6 +321,11 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
     expect(buildTesterPrompt(criteria())).toContain('<base>...HEAD')
   })
 
+  it('tells the Tester not to write its own program to judge how the code is shaped', () => {
+    // AAC-177: a hand-made source inspector counted direct calls and failed four sound tests that call through a helper.
+    expect(buildTesterPrompt(criteria())).toContain('do not write your own program to inspect the source')
+  })
+
   // Seen on AAC: a proof ran the whole suite, the suite called `node`, and the service's PATH does not carry it —
   // the daemon is started by its absolute path. Seven tests read as failed for the machine, not for the code.
   it('puts the node that runs the daemon on the PATH of a proof', async () => {

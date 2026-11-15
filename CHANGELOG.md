@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.9] - 2026-11-15
+
+### Fixed
+
+- **Il Tester non inventa più un suo controllo sulla forma del codice.** Bocciava a torto un lavoro giusto scritto in un altro modo: ora quelle prove restano a una persona. (CYAU-331)
+
 ## [0.57.8] - 2026-11-15
 
 ### Fixed
