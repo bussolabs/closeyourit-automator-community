@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.15] - 2026-11-15
+
+### Fixed
+
+- **Una sessione che muore senza consegnare dice perché.** Prima la scheda del ticket mostrava solo «prenotazione rilasciata»: ora riporta l'errore e la coda del registro. (CYAU-331)
+
 ## [0.57.14] - 2026-11-15
 
 ### Fixed

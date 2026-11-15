@@ -828,6 +828,40 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     expect(action.delivery).toMatchObject({outcome: 'ok', reviewStatus: 'unavailable', errorCode: 'C409-WORKFLOW-002'})
   })
 
+  // Seen on AAC-13: three machines took the ticket and their session died within a minute. The lease was
+  // released with no word, and the card only said «lease released».
+  it('a session that dies without delivering says so on the attempt', async () => {
+    const s = scenario()
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const reportFailure = vi.fn(async (_reason: string) => undefined)
+    const dead: AgentRuntime = {
+      id: 'fake-claude', healthCheck: async () => ({available: true}),
+      execute: () => ({
+        result: Promise.resolve<RunResult>({
+          status: 'failure', exitCode: 137, errorCode: 'C001-EXEC-003', durationMs: 1,
+          logPath: '', stdout: '', stdoutTruncated: false,
+        }),
+        cancel: () => undefined,
+      }),
+    }
+
+    await runOnce({
+      playbook, playbookDir: dir, now,
+      stateFile: s.stateFile, logDir: s.logDir, lockFile: s.lockFile,
+      claudeRuntime: dead,
+      preflight: async () => ({
+        outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+        executionLease: {renewEveryMs: 60_000, renew: async () => true, release: async () => undefined},
+        workflowDelivery: {executionPhase: 'triage', attemptId: 'attempt-1', deliver, reportFailure},
+      }),
+    })
+
+    expect(deliver).not.toHaveBeenCalled()
+    expect(reportFailure).toHaveBeenCalledTimes(1)
+    expect(reportFailure.mock.calls[0][0]).toMatch(/C001-EXEC-003/)
+    expect(reportFailure.mock.calls[0][0]).toMatch(/137/)
+  })
+
   it('a non-writable log is declared, not hidden', async () => {
     const s = scenario()
     const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()

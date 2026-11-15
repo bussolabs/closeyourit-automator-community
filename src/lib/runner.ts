@@ -1544,6 +1544,17 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         ? noteQuotaFailure(effectiveAction.type, `${execution.result.stdout}\n${readLogTail(execution.result.logPath)}`, opts.now)
         : null
       if (quotaResetAt) agentRuntimeReadiness.invalidate()
+      // A session that ended without delivering anything used to close as «lease released», with the cause only in
+      // this host's logs (seen on AAC-13: three machines in a row, a minute each). The attempt is told why. A quota
+      // pause, a shutdown and a lost lease keep their own path: none of them is a failure of the work.
+      if (workflowDelivery?.reportFailure && !deliveryRecord && execution.result.status !== 'success' &&
+          !quotaResetAt && !execution.leaseLost && !opts.signal?.aborted) {
+        const tail = redactSecrets(readLogTail(execution.result.logPath)).replace(/\s+/gu, ' ').trim().slice(-300)
+        const reason = `session ended without a delivery: status=${execution.result.status}, ` +
+          `error=${execution.result.errorCode ?? 'none'}, exit=${execution.result.exitCode ?? 'none'}` +
+          (tail ? `; log tail: ${tail}` : '')
+        await workflowDelivery.reportFailure(reason.slice(0, 500)).catch(() => undefined)
+      }
       try {
         ticketAttempt?.settleQuotaPause?.(quotaResetAt !== null)
       } catch {
