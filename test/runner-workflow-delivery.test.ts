@@ -170,6 +170,39 @@ async function dispatch(opts: {
   return {result, log: fs.readFileSync(s.logPath, 'utf8'), action: result.executed[0]}
 }
 
+// Seen on AAC-13: a ticket left before the session started carried no cause on the server.
+describe('runOnce — a ticket left before the session', () => {
+  it('reports the underlying cause on the attempt, before releasing the lease', async () => {
+    const s = scenario()
+    const calls: string[] = []
+    const reportFailure = vi.fn(async (_reason: string) => { calls.push('report') })
+    const result = await runOnce({
+      playbook, playbookDir: dir, now,
+      stateFile: s.stateFile, logDir: s.logDir, lockFile: s.lockFile,
+      claudeRuntime: runtimeWith('{}', s.logPath), codexRuntime: approvingReviewer(),
+      preflight: async () => ({
+        outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+        executionLease: {renewEveryMs: 60_000, renew: async () => true, release: async () => { calls.push('release') }},
+        ticketRun: {
+          runId: 'run-1', authorizedCwd: dir, branch: 'ticket/AAC-13',
+          beforeRuntime: async () => { throw new Error('ticket branch has local commits missing on GitHub') },
+          afterRuntime: async () => ({outcome: 'complete' as const, runStatus: 'success' as const, errorCode: null}),
+          block: async () => undefined,
+        },
+        workflowDelivery: {
+          executionPhase: 'autopilot', attemptId: 'attempt-1', reportFailure,
+          deliver: async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}),
+        },
+      }),
+    })
+
+    expect(result.executed).toHaveLength(0)
+    expect(reportFailure.mock.calls[0]![0]).toContain('ticket branch has local commits missing on GitHub')
+    expect(result.preflightStopped[0]!.reason).toContain('ticket branch has local commits missing on GitHub')
+    expect(calls).toEqual(['report', 'release'])
+  })
+})
+
 describe('runOnce — phase result delivery (CYAU-105)', () => {
   it('attests the CI before the cross-review and makes the PR ready only before the server delivery', async () => {
     const verify = vi.fn(async () => ({status: 'passed' as const, summary: 'CI verde', headSha: 'a'.repeat(40)}))

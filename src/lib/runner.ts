@@ -165,6 +165,8 @@ export interface WorkflowDelivery {
   deliver(payload: AttemptDelivery): Promise<AttemptDeliveryResult>
   /** CYAU-282 — sends the session's live steps to the attempt while it runs. */
   sendLiveEvents?(records: LiveRecord[]): Promise<LiveEventsSendResult>
+  /** Says on the attempt why the machine leaves the ticket before the session starts. Best-effort. */
+  reportFailure?(reason: string): Promise<void>
   /** Authoritative CI gate run after the parse and before spending the cross-review. */
   verify?(result: Record<string, unknown>, signal?: AbortSignal): Promise<WorkflowDeliveryVerification>
   /** Promotes the draft PR only after green CI and cross-review, re-attesting the SHA. */
@@ -805,6 +807,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         }
         if (!(await attestExecutionLease(executionLease, opts.signal))) {
           await ticketRun.block().catch(() => undefined)
+          await workflowDelivery?.reportFailure?.('lease ticket non riattestabile prima del runtime (fail-closed)').catch(() => undefined)
           await executionLease.release().catch(() => undefined)
           preflightStopped.push({
             name,
@@ -919,14 +922,19 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             return 'stop'
           }
           effectiveAction = {...effectiveAction, cwd: ticketRun.authorizedCwd}
-        } catch {
+        } catch (error) {
           await ticketRun.block().catch(() => undefined)
+          // The cause travels with the stop and reaches the attempt: the label alone sent whoever reads the ticket
+          // to the host's logs (seen on AAC-13).
+          const cause = error instanceof Error ? redactSecrets(error.message).replace(/\s+/gu, ' ').slice(0, 200) : ''
+          const reason = `workspace o stato ticket non attestabile prima del runtime (fail-closed)${cause ? `: ${cause}` : ''}`
+          await workflowDelivery?.reportFailure?.(reason).catch(() => undefined)
           await executionLease.release().catch(() => undefined)
           preflightStopped.push({
             name,
             state: 'blocked',
-            reason: 'workspace o stato ticket non attestabile prima del runtime (fail-closed)',
-            audit: [{phase: 'workspace', state: 'failed', reason: 'workspace o stato ticket non attestabile prima del runtime (fail-closed)'}],
+            reason,
+            audit: [{phase: 'workspace', state: 'failed', reason}],
           })
           updateAction(state, name, {last_run: nowIso, last_status: 'skipped'})
           return 'continue'

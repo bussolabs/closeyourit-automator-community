@@ -175,6 +175,8 @@ function attestTicketRepository(cwd: string, repository: string): boolean {
 export type TicketLeaseAcquireResult =
   | {outcome: 'acquired'; runId: string; lease: ActionExecutionLease; attemptId?: string;
       deliverAttempt?: (payload: AttemptDelivery) => Promise<AttemptDeliveryResult>;
+      // Says on the attempt why the machine leaves the ticket without delivering. Best-effort.
+      reportFailure?: (reason: string) => Promise<void>;
       sendLiveEvents?: (records: LiveRecord[]) => Promise<LiveEventsSendResult>;
       // Host-first (CYAU-87): the authoritative phase + the profile fingerprint signed in the post-claim lease, for the
       // DRIFT-CHECK (twin ↔ server) before running the skill.
@@ -235,7 +237,7 @@ interface TicketLeaseStore {
 }
 
 export interface TicketLeaseProviderOptions {
-  client?: Pick<AutomatorClient, 'acquireLease' | 'claimTicketQueue' | 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'sendLiveEvents'>
+  client?: Pick<AutomatorClient, 'acquireLease' | 'claimTicketQueue' | 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'reportAttemptFailure' | 'sendLiveEvents'>
   store?: TicketLeaseStore
   now?: () => Date
   runId?: () => string
@@ -999,7 +1001,7 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
     update: (lease) => void saveLeaseIfHeld(lease),
     remove: (lease) => removeLeaseIfHeld(lease.ticket, lease.run_id),
   }
-  const client = (): Pick<AutomatorClient, 'acquireLease' | 'claimTicketQueue' | 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'sendLiveEvents'> | null => {
+  const client = (): Pick<AutomatorClient, 'acquireLease' | 'claimTicketQueue' | 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'reportAttemptFailure' | 'sendLiveEvents'> | null => {
     if (options.client) return options.client
     if (!secrets.sync || !hasOperationalHostIdentity(secrets)) return null
     return makeClient(secrets.sync, globalThis.fetch, secrets.host.token)
@@ -1012,7 +1014,7 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
    * held without knowing how to use it is worse than no lease. Only then are renewal and release built.
    */
   const finalize = async (input: {
-    api: Pick<AutomatorClient, 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'sendLiveEvents'>
+    api: Pick<AutomatorClient, 'renewLease' | 'releaseLease' | 'deliverAttempt' | 'reportAttemptFailure' | 'sendLiveEvents'>
     hostId: string
     actionName: string
     ticket: TicketDetail
@@ -1096,6 +1098,9 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
         sendLiveEvents: async (records: LiveRecord[]) => {
           const current = client()
           return current ? current.sendLiveEvents(remote.attempt_id!, records) : {outcome: 'unavailable' as const}
+        },
+        reportFailure: async (reason: string) => {
+          await client()?.reportAttemptFailure(remote.attempt_id!, reason)
         },
       } : {}),
       lease: {
@@ -1754,6 +1759,7 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               ...(acquired.reviewerModel ? {reviewerModel: acquired.reviewerModel} : {}),
               deliver: acquired.deliverAttempt,
               ...(acquired.sendLiveEvents ? {sendLiveEvents: acquired.sendLiveEvents} : {}),
+              ...(acquired.reportFailure ? {reportFailure: acquired.reportFailure} : {}),
               ...(deliversPr && ticketRun?.verifyWorkflowDelivery ? {
                 verify: ticketRun.verifyWorkflowDelivery.bind(ticketRun),
               } : {}),
@@ -1817,6 +1823,11 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
       const result = await coordinator.preflight(input)
       if (result.outcome === 'stop') {
         if (ticketRun) await ticketRun.block().catch(() => undefined)
+        // Before the release: the server retires the lease with the report, and an attempt whose lease is
+        // already gone is closed later with «lease released» and no cause (seen on AAC-13).
+        if (acquired?.outcome === 'acquired' && result.reason) {
+          await acquired.reportFailure?.(redactSecrets(result.reason).slice(0, 500)).catch(() => undefined)
+        }
         if (acquired?.outcome === 'acquired') await acquired.lease.release().catch(() => undefined)
         if (acquired?.outcome === 'error') {
           const last = result.audit.at(-1)
@@ -1856,8 +1867,9 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
       }
     } catch {
       if (ticketRun) await ticketRun.block().catch(() => undefined)
-      if (acquired?.outcome === 'acquired') await acquired.lease.release().catch(() => undefined)
       const reason = 'preflight ticket non completabile (fail-closed)'
+      if (acquired?.outcome === 'acquired') await acquired.reportFailure?.(reason).catch(() => undefined)
+      if (acquired?.outcome === 'acquired') await acquired.lease.release().catch(() => undefined)
       return {
         outcome: 'stop', state: 'blocked', reason,
         audit: [{phase: 'guidance', state: 'failed', reason}],

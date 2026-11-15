@@ -326,6 +326,40 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
     expect(p.loadTicket).not.toHaveBeenCalled()
   })
 
+  // Seen on AAC-13: a machine left the claimed ticket three times and the ticket only said «lease released».
+  it('reports why it leaves a claimed ticket, before releasing it', async () => {
+    const calls: string[] = []
+    const lease = {
+      renewEveryMs: 1000, renew: vi.fn(async () => true),
+      release: vi.fn(async () => { calls.push('release') }),
+    }
+    const reportFailure = vi.fn(async (_reason: string) => { calls.push('report') })
+    const ticketCycle = fakeTicketCycle('/managed/worktrees/CYAU/CYAU-34')
+    ticketCycle.prepare.mockRejectedValue(new Error('worktree is dirty: 3 files left by a previous session'))
+    const preflight = buildTicketPreflight({
+      probe: probe(), guidance, now: () => instant,
+      queue: {getTicketQueue: vi.fn(async () => ({outcome: 'candidate' as const, candidate: queueCandidate}))},
+      authorizeCwd: () => '/repo', attestRepository: () => true,
+      lease: {acquire: vi.fn(async () => ({
+        outcome: 'acquired' as const, runId: 'run-1', lease, attemptId: 'attempt-1',
+        deliverAttempt: vi.fn(async () => true), reportFailure, ...hostFirstLease('autopilot'),
+      }))},
+      ticketCycle,
+      reserveLimits: async (policy, snapshot, cost) =>
+        ({decision: evaluateLimits(policy, {...snapshot, pending_runs: 1, pending_cost: cost}, 'dispatch'), usage: null}),
+      skills: {pluginDir: presentPluginDir, enabled: true},
+      attestConfinement: () => ({attested: true}),
+    })
+
+    const result = await preflight('worker', claudeAction, queueContext)
+
+    expect(result).toMatchObject({outcome: 'stop'})
+    expect(reportFailure).toHaveBeenCalledTimes(1)
+    expect(reportFailure.mock.calls[0]![0]).toContain('worktree is dirty')
+    // The server retires the lease with the report: releasing first would leave the attempt with no reason.
+    expect(calls).toEqual(['report', 'release'])
+  })
+
   // CYAU-226
   it('hands the reviewer named on the server to the ticket cycle', async () => {
     const lease = {renewEveryMs: 1000, renew: vi.fn(async () => true), release: vi.fn(async () => undefined)}

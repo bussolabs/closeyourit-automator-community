@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.11] - 2026-11-15
+
+### Fixed
+
+- **La macchina dice perché lascia un ticket già preso.** Se lo lascia prima di iniziare la sessione, il motivo arriva sulla scheda del ticket: prima compariva solo «prenotazione rilasciata». (CYAU-331)
+
 ## [0.57.10] - 2026-11-15
 
 ### Fixed

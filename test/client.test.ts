@@ -881,6 +881,21 @@ describe('makeClient#deferTicketQueue — CYAU-101', () => {
   })
 })
 
+describe('reportAttemptFailure', () => {
+  it('POSTs the reason on the attempt', async () => {
+    const {fn, calls} = fakeFetch({ok: true, status: 200})
+    await expect(makeClient(cfg, fn, 'cyi_ah_host').reportAttemptFailure('at/1', 'worktree is dirty')).resolves.toBe(true)
+    expect(calls[0].url).toBe('https://app.closeyour.it/api/v1/agent_attempts/at%2F1/failure')
+    expect(calls[0].opts.method).toBe('POST')
+    expect(JSON.parse(String(calls[0].opts.body))).toEqual({reason: 'worktree is dirty'})
+  })
+
+  it('is best-effort: a refusal is false, never an exception', async () => {
+    const {fn} = fakeFetch({ok: false, status: 409})
+    await expect(makeClient(cfg, fn, 'cyi_ah_host').reportAttemptFailure('at/1', 'x')).resolves.toBe(false)
+  })
+})
+
 // CYAU-282 — the live steps of an attempt. The answer says how far the app got and whether the project keeps code.
 describe('sendLiveEvents', () => {
   const records = [{seq: 1, at: '2026-11-02T15:00:00.000Z', event: {kind: 'file_read' as const, path: 'app/a.rb'}}]

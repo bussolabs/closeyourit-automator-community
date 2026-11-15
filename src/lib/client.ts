@@ -464,6 +464,8 @@ export interface AutomatorClient {
    * did not arrive — a single `false` made the two the same silence.
    */
   deliverAttempt(attemptId: string, payload: AttemptDelivery): Promise<AttemptDeliveryResult>
+  // Tells the server the attempt ended on the machine without a delivery, and why. Best-effort: true only on 2xx.
+  reportAttemptFailure(attemptId: string, reason: string): Promise<boolean>
   /** CYAU-282 — the agent's steps while the attempt runs, in numbered batches the app stores once. */
   sendLiveEvents(attemptId: string, records: LiveRecord[]): Promise<LiveEventsSendResult>
 }
@@ -786,6 +788,20 @@ export function makeClient(cfg: SyncConfig, fetchFn: FetchFn = globalThis.fetch,
         return code ? {outcome: 'rejected', status: res.status, code} : {outcome: 'rejected', status: res.status}
       } catch {
         return {outcome: 'unavailable'}
+      }
+    },
+
+    // The reason goes on the attempt (the card shows it as written). Without this call the server only learns that
+    // the lease was released and closes the attempt minutes later, with no cause.
+    async reportAttemptFailure(attemptId, reason) {
+      if (!opHeaders) return false
+      try {
+        const res = await fetchFn(`${base}/api/v1/agent_attempts/${encodeURIComponent(attemptId)}/failure`, {
+          method: 'POST', headers: opHeaders, body: JSON.stringify({reason}), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        })
+        return res.ok
+      } catch {
+        return false
       }
     },
 
