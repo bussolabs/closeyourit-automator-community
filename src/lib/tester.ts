@@ -198,6 +198,9 @@ function clip(text: string): string {
   return safe.length > MAX_TEXT ? `${safe.slice(0, MAX_TEXT - 1)}…` : safe
 }
 
+/** What `redactSecrets` leaves in place of a value it masked. */
+const REDACTION_MARKER = '[REDACTED]'
+
 function unavailable(summary: string): TesterReport {
   return {status: 'unavailable', summary: clip(summary), block: null}
 }
@@ -207,6 +210,11 @@ async function runCriterion(criterion: TesterCriterion, mapped: {command: string
   const result = (status: TesterResultStatus, evidence: string): TesterResult =>
     ({criterion_id: criterion.id, kind: criterion.kind, status, evidence: clip(evidence)})
   if (!mapped?.command) return result('not_run', `Nessun comando per questa prova. ${mapped?.note ?? ''}`)
+  // The session's answer is read after the secret filter: a masked command is no longer the one it gave (a file
+  // name holding `cyi_<word>` comes back masked). Running it would judge the work on a command nobody wrote.
+  if (mapped.command.includes(REDACTION_MARKER)) {
+    return result('not_run', 'Il comando di questa prova è stato mascherato dal filtro dei segreti: non è più quello indicato, quindi non è stato eseguito. Va verificata da una persona.')
+  }
 
   const ran = await io.run(mapped.command, {cwd: input.cwd, ticket: input.ticket, timeoutSeconds: input.timeoutSeconds, signal: input.signal})
   // A long command must not push the outcome out of the clipped evidence.

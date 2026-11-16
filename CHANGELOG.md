@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.57.17] - 2026-11-16
+
+### Fixed
+
+- **Il Tester non boccia più un lavoro per un comando mascherato.** Se il filtro dei segreti altera il comando di una prova, la prova resta «non eseguita» e va a una persona, invece di risultare fallita. (CYAU-331)
+
 ## [0.57.16] - 2026-11-15
 
 ### Fixed

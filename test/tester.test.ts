@@ -172,6 +172,24 @@ describe('runTester', () => {
     expect(slow.block?.results.map((entry) => entry.status)).toEqual(['not_run', 'not_run'])
   })
 
+  // CYAU-331 — the answer of the mapping session goes through the secret filter before it is read: a file name
+  // such as test_check_cyi_sensitive.py came back as test_check_[REDACTED].py, the machine ran that, the file did
+  // not exist, and a correct delivery was marked failed.
+  it('does not run a command the secret filter has masked: it is not the command the session gave', async () => {
+    const io = fakeIo({run: vi.fn(async () => outcome(1, {stderr: 'No such file'}))})
+    const masked = answer([
+      {criterion_id: 'DOD-1', command: 'python3 -m unittest tests/test_check_[REDACTED].py'},
+      {criterion_id: 'DOD-2', command: 'bin/rubocop'},
+    ])
+
+    const report = await runTester({...base, askCommands: async () => masked}, fakeIo({run: io.run}))
+
+    expect(report.block?.results[0]).toMatchObject({criterion_id: 'DOD-1', status: 'not_run'})
+    expect(report.block?.results[0]?.evidence).toContain('filtro dei segreti')
+    expect(io.run).toHaveBeenCalledTimes(1)
+    expect(io.run).not.toHaveBeenCalledWith(expect.stringContaining('[REDACTED]'), expect.anything())
+  })
+
   it('is unavailable, with no outcome to deliver, when the machine cannot confine a command', async () => {
     const io = fakeIo({available: async () => ({available: false, detail: 'bubblewrap missing'})})
 
