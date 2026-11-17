@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.58.1] - 2026-11-17
+
+### Fixed
+
+- **La revisione non si ferma più per le cartelle di Python.** I file .gitignore che venv, pytest e ruff scrivono nelle proprie cartelle, già ignorate dal progetto, non bloccano più la rilettura. Un .gitignore che può nascondere codice nuovo la ferma ancora. (CYAU-333)
+
 ## [0.58.0] - 2026-11-17
 
 ### Changed

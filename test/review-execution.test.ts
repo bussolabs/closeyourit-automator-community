@@ -1377,6 +1377,61 @@ describe('resolveReviewDiff', () => {
     }
   }, 30_000)
 
+  it('accepts the .gitignore a tool writes inside a folder the repository already ignores', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-tool-cache-ignore-'))
+    try {
+      const git = (args: string[]): string => {
+        const result = spawnSync('git', ['-C', repo, ...args], {encoding: 'utf8'})
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout.trim()
+      }
+      git(['init', '-q', '-b', 'main'])
+      fs.writeFileSync(path.join(repo, 'tracked.ts'), 'base\n')
+      fs.writeFileSync(path.join(repo, '.gitignore'), '.venv/\n.pytest_cache/\n')
+      git(['add', 'tracked.ts', '.gitignore'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      const base = git(['rev-parse', 'HEAD'])
+      // What python -m venv and pytest write: a "*" .gitignore inside their own, already ignored, folder.
+      for (const folder of ['.venv', '.pytest_cache']) {
+        fs.mkdirSync(path.join(repo, folder))
+        fs.writeFileSync(path.join(repo, folder, '.gitignore'), '*\n')
+        fs.writeFileSync(path.join(repo, folder, 'cache.bin'), 'cache\n')
+      }
+      fs.writeFileSync(path.join(repo, 'tracked.ts'), 'changed\n')
+
+      await expect(resolveReviewDiff(base, repo)).resolves.toMatchObject({baseCommit: base})
+    } finally {
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  }, 30_000)
+
+  it('still rejects an untracked .gitignore next to an ignored tool folder', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-mixed-ignore-'))
+    try {
+      const git = (args: string[]): string => {
+        const result = spawnSync('git', ['-C', repo, ...args], {encoding: 'utf8'})
+        if (result.status !== 0) throw new Error(result.stderr)
+        return result.stdout.trim()
+      }
+      git(['init', '-q', '-b', 'main'])
+      fs.writeFileSync(path.join(repo, 'tracked.ts'), 'base\n')
+      fs.writeFileSync(path.join(repo, '.gitignore'), '.venv/\n')
+      git(['add', 'tracked.ts', '.gitignore'])
+      git(['-c', 'user.name=Test', '-c', 'user.email=t@example.test', 'commit', '-qm', 'base'])
+      const base = git(['rev-parse', 'HEAD'])
+      fs.mkdirSync(path.join(repo, '.venv'))
+      fs.writeFileSync(path.join(repo, '.venv', '.gitignore'), '*\n')
+      fs.mkdirSync(path.join(repo, 'src'))
+      fs.writeFileSync(path.join(repo, 'src', '.gitignore'), '*\n')
+      fs.writeFileSync(path.join(repo, 'src', 'hidden-source.ts'), 'new source\n')
+      fs.writeFileSync(path.join(repo, 'tracked.ts'), 'changed\n')
+
+      await expect(resolveReviewDiff(base, repo)).rejects.toThrow(/\.gitignore non tracciati.*src\/\.gitignore/i)
+    } finally {
+      fs.rmSync(repo, {recursive: true, force: true})
+    }
+  }, 30_000)
+
   it('rejects submodules with tracked or untracked changes not fully included in the diff', async () => {
     const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-submodule-'))
     const child = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-review-submodule-child-'))

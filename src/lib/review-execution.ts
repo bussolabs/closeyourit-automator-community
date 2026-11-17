@@ -463,9 +463,14 @@ export async function resolveReviewDiff(
       'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.gitignore', ':(glob)**/.gitignore',
       ':(exclude).closeyourit/session', ':(exclude).pnpm-store',
     ])
-    if (untrackedIgnoreFiles.length > 0) {
+    // A .gitignore inside a folder the repository already ignores hides nothing more: Git never reads it while
+    // walking the tree. That is what python -m venv, pytest and ruff write in .venv/, .pytest_cache/, .ruff_cache/.
+    const candidateIgnoreFiles = untrackedIgnoreFiles.toString('utf8').split('\0').filter(Boolean)
+    const ignoredFolders = await ignoredDirectories(candidateIgnoreFiles, snapshotGit)
+    const hidingIgnoreFiles = candidateIgnoreFiles.filter((name) => !ignoredFolders.has(posixDirname(name)))
+    if (hidingIgnoreFiles.length > 0) {
       // Name the files: without them the cause of the refusal is readable only on the host.
-      const names = untrackedIgnoreFiles.toString('utf8').split('\0').filter(Boolean)
+      const names = hidingIgnoreFiles
       const shown = names.slice(0, 3).map((name) => name.slice(0, 120)).join(', ')
       throw invalidExecution(`La review contiene file .gitignore non tracciati che possono nascondere nuovi sorgenti: ${shown}${names.length > 3 ? ', …' : ''}`)
     }
@@ -787,6 +792,29 @@ function isDirtyIgnoreEntry(entry: string): boolean {
 
 function isIgnorePath(path: string | undefined): boolean {
   return path === '.gitignore' || path?.endsWith('/.gitignore') === true
+}
+
+/**
+ * The folders holding these .gitignore files that the repository's rules already ignore. Asked without the
+ * trailing slash, so a folder's own .gitignore does not take part in the answer. The repository root never counts.
+ */
+async function ignoredDirectories(ignoreFiles: string[], snapshotGit: (args: string[]) => Promise<Buffer>): Promise<Set<string>> {
+  const folders = [...new Set(ignoreFiles.map(posixDirname))].filter((folder) => folder !== '.')
+  if (folders.length === 0) return new Set()
+  try {
+    // One path per line (-z needs --stdin). A name Git has to quote matches no folder: it stays a refusal.
+    const output = await snapshotGit(['check-ignore', '--', ...folders])
+    return new Set(output.toString('utf8').split('\n').filter((line) => folders.includes(line)))
+  } catch (error) {
+    // Exit 1 is Git's answer "none of them is ignored", not a failure.
+    if (error instanceof ReviewSnapshotExecutionError && error.gitExitCode === 1) return new Set()
+    throw error
+  }
+}
+
+function posixDirname(file: string): string {
+  const slash = file.lastIndexOf('/')
+  return slash < 0 ? '.' : file.slice(0, slash)
 }
 
 async function runReviewGit(
