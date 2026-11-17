@@ -215,15 +215,15 @@ function ticketBlock(content: PrContent): string {
 
 /** The conditions that fit in `budget` characters, in order; those left out become a pointer to the ticket. */
 function conditionsBlock(content: PrContent, budget: number): string {
-  const heading = '### Condizioni di fatto\n\n'
+  const heading = '### Criteri di accettazione\n\n'
   if (content.conditions === undefined || content.conditions === null) {
-    return `${heading}Condizioni non disponibili: le trovi sul ticket ${content.ticket}.`
+    return `${heading}Criteri non disponibili: li trovi sul ticket ${content.ticket}.`
   }
   const conditions = content.conditions.map(conditionText).filter((text) => text !== '').map((text) => `- ${text}`)
-  if (conditions.length === 0) return `${heading}Il ticket non ha condizioni di fatto.`
+  if (conditions.length === 0) return `${heading}Il ticket non ha criteri di accettazione.`
 
   const pointer = (left: number): string =>
-    `- …${left === 1 ? 'un\'altra condizione' : `altre ${left} condizioni`} sul ticket ${content.ticket}, non riportate per stare nel limite della descrizione.`
+    `- …${left === 1 ? 'un altro criterio' : `altri ${left} criteri`} sul ticket ${content.ticket}, non riportati per stare nel limite della descrizione.`
   const included: string[] = []
   let used = heading.length
   for (const [index, line] of conditions.entries()) {

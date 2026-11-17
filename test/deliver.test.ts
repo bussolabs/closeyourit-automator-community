@@ -240,7 +240,7 @@ describe('PR template with ticket code, link and conditions (CYAU-279)', () => {
     expect(plan.body).toContain('- Titolo con il codice')
     expect(plan.body).toContain('- Descrizione con link e condizioni')
     expect(plan.body.indexOf('## Ticket')).toBe(0)
-    expect(plan.body.indexOf('### Condizioni di fatto')).toBeLessThan(plan.body.indexOf('## Riepilogo'))
+    expect(plan.body.indexOf('### Criteri di accettazione')).toBeLessThan(plan.body.indexOf('## Riepilogo'))
     expect(plan.body).toMatch(/Ticket:\s*CYRA-981$/)
   })
 
@@ -285,7 +285,7 @@ describe('PR template with ticket code, link and conditions (CYAU-279)', () => {
     const body = composePrBody(content({summary: 'r'.repeat(10_000), conditions: []}))
     expectWholeTicket(body, 'CYRA-981', url)
     expect(body).toContain('_Resoconto accorciato per stare nel limite della descrizione: il testo completo è sul ticket CYRA-981._')
-    expect(body).toContain('Il ticket non ha condizioni di fatto.')
+    expect(body).toContain('Il ticket non ha criteri di accettazione.')
     // Only the summary got shorter: tests and risks keep their sections.
     expect(body).toContain('## Test\n\n4 passati, 0 falliti — deliver verde')
     expect(body).toContain('## Rischi\n\nNessun rischio segnalato.')
@@ -299,7 +299,7 @@ describe('PR template with ticket code, link and conditions (CYAU-279)', () => {
     expect(body).toContain(conditions[0])
     expect(body).not.toContain(conditions[39])
     const shown = conditions.filter((condition) => body.includes(condition)).length
-    expect(body).toContain(`- …altre ${40 - shown} condizioni sul ticket CYRA-981`)
+    expect(body).toContain(`- …altri ${40 - shown} criteri sul ticket CYRA-981`)
     // The report is untouched when it fits its own cap: only the conditions got shorter.
     expect(body).toContain('## Riepilogo\n\nCollega la PR al ticket')
     expect(body).not.toContain('Resoconto accorciato')
@@ -309,21 +309,21 @@ describe('PR template with ticket code, link and conditions (CYAU-279)', () => {
     const conditions = ['Breve', `Lunga ${'x'.repeat(5000)}`]
     const body = composePrBody(content({conditions}))
     expect(body).toContain('- Breve')
-    expect(body).toContain('- …un\'altra condizione sul ticket CYRA-981')
+    expect(body).toContain('- …un altro criterio sul ticket CYRA-981')
   })
 
   it('SC-7: a ticket with 0 conditions says so, with code and link still there', () => {
     const body = composePrBody(content({conditions: []}))
     expectWholeTicket(body, 'CYRA-981', url)
-    expect(body).toContain('Il ticket non ha condizioni di fatto.')
-    expect(composePrBody(content({conditions: ['  ', '']}))).toContain('Il ticket non ha condizioni di fatto.')
+    expect(body).toContain('Il ticket non ha criteri di accettazione.')
+    expect(composePrBody(content({conditions: ['  ', '']}))).toContain('Il ticket non ha criteri di accettazione.')
   })
 
   it('conditions that could not be read point to the ticket instead of claiming there are none', () => {
     for (const conditions of [undefined, null]) {
       const body = composePrBody(content({conditions}))
       expectWholeTicket(body, 'CYRA-981', url)
-      expect(body).toContain('Condizioni non disponibili: le trovi sul ticket CYRA-981.')
+      expect(body).toContain('Criteri non disponibili: li trovi sul ticket CYRA-981.')
     }
   })
 
@@ -345,12 +345,12 @@ describe('PR template with ticket code, link and conditions (CYAU-279)', () => {
       ticketUrl: longUrl, conditions: Array.from({length: 40}, () => 'c'.repeat(400)),
     })
     expectWholeTicket(body, ticket, longUrl)
-    const ticketBlock = body.slice(0, body.indexOf('\n\n### Condizioni di fatto'))
+    const ticketBlock = body.slice(0, body.indexOf('\n\n### Criteri di accettazione'))
     expect(ticketBlock.length).toBeLessThanOrEqual(PR_TICKET_BLOCK_MAX_LENGTH)
     const report = body.slice(body.indexOf('## Riepilogo'), body.lastIndexOf('\n\n---\nTicket:'))
     expect(report.length).toBeLessThanOrEqual(PR_REPORT_MAX_LENGTH)
     expect(report).toContain('Resoconto accorciato')
-    expect(body).toContain('condizioni sul ticket')
+    expect(body).toContain('criteri sul ticket')
   })
 
   it('a cut report never ends on half of a surrogate pair', () => {

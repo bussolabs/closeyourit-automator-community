@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.58.0] - 2026-11-17
+
+### Changed
+
+- **Un solo elenco di criteri per agente, revisore e GitHub.** L'agente, la revisione e la descrizione della modifica leggono le voci del ticket con il loro codice, non più due liste diverse. (CYAU-332)
+
 ## [0.57.17] - 2026-11-16
 
 ### Fixed

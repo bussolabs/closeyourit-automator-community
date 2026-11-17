@@ -136,7 +136,7 @@ describe('ticket delivery integrata', () => {
     // Without the card data the description says what is missing and builds nothing.
     expect(opened[1].body).toContain('- **Codice:** CYAU-37')
     expect(opened[1].body).toContain('- **Collegamento:** non disponibile')
-    expect(opened[1].body).toContain('Condizioni non disponibili')
+    expect(opened[1].body).toContain('Criteri non disponibili')
   })
 
   it('if the remote capability is missing persists the local commit and stays suspended without push/PR/Knowledge', async () => {

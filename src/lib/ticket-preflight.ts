@@ -291,7 +291,7 @@ function enrichTicketAction(action: Action, result: TicketPreflightResult): Acti
     '',
     ...(ticket.automationContext ? ['## Contesto automazione', ticket.automationContext, ''] : []),
     ...scenarios,
-    ...(ticket.conditions?.length ? ['## Definition of Done', ...ticket.conditions.map((condition) => `- ${condition}`), ''] : []),
+    ...(ticket.conditions?.length ? ['## Criteri di accettazione', ...ticket.conditions.map((condition) => `- ${condition}`), ''] : []),
     ...comments,
     ...siblingsMaterial(ticket.approvedSiblings),
   ].join('\n')
@@ -429,6 +429,25 @@ function composeQueueSkillAction(
   }
 }
 
+/**
+ * CYRA-1318 — the ticket's acceptance items as one list, each with its code (AC-N): the same codes the
+ * approved plan and the delivery proofs use. `undefined` when the server does not send them yet.
+ */
+export function acceptanceLines(items: unknown): string[] | undefined {
+  if (!Array.isArray(items)) return undefined
+  return items.filter(isRecord).map((item) => {
+    const code = text(item.code) ?? '?'
+    if (item.format !== 'scenario') return `${code}: ${text(item.text) ?? ''}`
+    const parts = [
+      text(item.step_given) ? `Given ${text(item.step_given)}` : '',
+      text(item.step_when) ? `When ${text(item.step_when)}` : '',
+      text(item.step_then) ? `Then ${text(item.step_then)}` : '',
+      text(item.step_expected) ? `Expected ${text(item.step_expected)}` : '',
+    ].filter(Boolean).join(' / ')
+    return `${code}: ${text(item.title) ?? 'Caso'}${parts ? ` — ${parts}` : ''}`
+  })
+}
+
 export function reviewRequirements(ticket: TicketDetail): string {
   const scenarios = (ticket.scenarios ?? []).flatMap((scenario, index) => [
     `Scenario ${index + 1}: ${scenario.title ?? '(senza titolo)'}`,
@@ -442,7 +461,7 @@ export function reviewRequirements(ticket: TicketDetail): string {
     ticket.description ?? '',
     ticket.technicalAnalysis ?? '',
     ...scenarios,
-    ...(ticket.conditions ?? []).map((condition) => `Definition of Done: ${condition}`),
+    ...(ticket.conditions ?? []).map((condition) => `Criterio di accettazione: ${condition}`),
     // CYAU-240 — without these the review judged a choice settled by an answer, or written in the approved
     // plan, as a choice the implementer took alone, and rejected it.
     ...(ticket.answeredQuestions ?? []).map(({question, answer}) => `Decisione presa: ${question} → ${answer}`),
@@ -725,12 +744,17 @@ const CONFLICT_RESOLUTION_SECTION = [
   'Non rifare il lavoro del ticket. Se le due parti non possono stare insieme, fermati come `blocked` con `merge_conflict` e spiega cosa chiede ciascuna: decide una persona.',
 ].join('\n\n')
 
-/** A v1 plan lists its Definition of Done as strings, a v2 plan as {id, text} (CYRA-877). */
+/** A v1 plan lists its Definition of Done as strings, a v2 plan as {id, text} (CYRA-877), a v3 plan the ticket's items. */
 function doneLine(entry: PlanDone): string {
   if (typeof entry === 'string') return entry
   // CYRA-1298 — the worker proves a criterion the way the approved plan says, when it says so.
   const proof = entry.verification ? ` (verify by ${entry.verification.kind}: ${entry.verification.how})` : ''
-  return `${entry.id}: ${entry.text}${proof}`
+  // CYRA-1319 — a v3 entry that is a case carries its clauses: the worker needs them, not only the title.
+  const clauses = [
+    entry.given ? `Given ${entry.given}` : '', entry.when ? `When ${entry.when}` : '',
+    entry.then ? `Then ${entry.then}` : '', entry.expected ? `Expected ${entry.expected}` : '',
+  ].filter(Boolean).join(' / ')
+  return `${entry.id}: ${entry.text}${clauses ? ` — ${clauses}` : ''}${proof}`
 }
 
 /**
@@ -754,7 +778,8 @@ function composeApprovedPlan(plan: NonNullable<NonNullable<TicketQueueCandidate[
     plan.technical_analysis,
     ...(scenarios.length > 0 ? ['', '## Scenari', ...scenarios] : []),
     ...(plan.definition_of_done.length > 0
-      ? ['', '## Definition of Done', ...plan.definition_of_done.map((entry) => `- ${doneLine(entry)}`)]
+      ? ['', plan.contract_version === 3 ? '## Criteri di accettazione del ticket e come provarli' : '## Definition of Done',
+        ...plan.definition_of_done.map((entry) => `- ${doneLine(entry)}`)]
       : []),
     ...(plan.notes.length > 0 ? ['', '## Note', ...plan.notes.map((entry) => `- ${entry}`)] : []),
   ].join('\n')
@@ -831,12 +856,14 @@ function queueCandidateToTicket(candidate: ClaimedTicketCandidate, cwd: string):
     ...(approvedSiblings ? {approvedSiblings} : {}),
     comments: (Array.isArray(candidate.comments) ? candidate.comments : []).filter(isRecord)
       .map((comment) => ({id: text(comment.id) ?? '', body: text(comment.body) ?? ''})),
-    scenarios: (Array.isArray(candidate.scenarios) ? candidate.scenarios : []).filter(isRecord).map((scenario) => ({
-      title: text(scenario.title), given: text(scenario.step_given), when: text(scenario.step_when),
-      then: text(scenario.step_then), expected: text(scenario.step_expected),
-    })),
-    conditions: (Array.isArray(candidate.conditions) ? candidate.conditions : []).filter(isRecord)
-      .map((condition) => text(condition.text)).filter((entry): entry is string => Boolean(entry)),
+    // CYRA-1318 — a server that sends the acceptance items gives ONE list: the cases are items, not a second list.
+    scenarios: acceptanceLines(candidate.acceptance_items) ? [] : (Array.isArray(candidate.scenarios) ? candidate.scenarios : [])
+      .filter(isRecord).map((scenario) => ({
+        title: text(scenario.title), given: text(scenario.step_given), when: text(scenario.step_when),
+        then: text(scenario.step_then), expected: text(scenario.step_expected),
+      })),
+    conditions: acceptanceLines(candidate.acceptance_items) ?? (Array.isArray(candidate.conditions) ? candidate.conditions : [])
+      .filter(isRecord).map((condition) => text(condition.text)).filter((entry): entry is string => Boolean(entry)),
     // CYAU-1: structured guidance from the candidate (additive); missing → key omitted (backward compat).
     ...(guidance ? {guidance} : {}),
     answeredQuestions: (Array.isArray(candidate.answered_questions) ? candidate.answered_questions : []).filter(isRecord)
@@ -860,7 +887,8 @@ export function parseTicketDetail(raw: unknown, project: string, cwd: string): T
       ? {id: text(comment.id) ?? '', body: text(comment.body) ?? ''}
       : {id: '', body: ''})
     : []
-  const scenarios = Array.isArray(data.scenarios)
+  const items = acceptanceLines(data.acceptance_items)
+  const scenarios = !items && Array.isArray(data.scenarios)
     ? data.scenarios.filter(isRecord).map((scenario) => ({
         title: text(scenario.title),
         given: text(scenario.step_given),
@@ -869,9 +897,9 @@ export function parseTicketDetail(raw: unknown, project: string, cwd: string): T
         expected: text(scenario.step_expected),
       }))
     : []
-  const conditions = Array.isArray(data.conditions)
+  const conditions = items ?? (Array.isArray(data.conditions)
     ? data.conditions.filter(isRecord).map((condition) => text(condition.text)).filter((condition): condition is string => Boolean(condition))
-    : []
+    : [])
   const explicitLabels = Array.isArray(data.labels)
     ? data.labels.map((label) => typeof label === 'string'
       ? text(label)

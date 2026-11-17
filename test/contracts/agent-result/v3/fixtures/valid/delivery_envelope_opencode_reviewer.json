@@ -1,0 +1,55 @@
+{
+  "runtime": "claude",
+  "reviewer_runtime": "opencode",
+  "result": {
+    "contract_version": 3,
+    "code": "CYRA-660",
+    "state": "submitted-for-approval",
+    "plan": {
+      "summary": "Rendere il piano leggibile.",
+      "work_items": [
+        {
+          "id": "WI-1",
+          "title": "Salvare la struttura",
+          "description": "Conservare il contenuto canonico.",
+          "files": [
+            {
+              "path": "app/models/agents/plan.rb",
+              "reason": "Possiede il piano."
+            }
+          ],
+          "dependencies": []
+        }
+      ],
+      "rationale": [
+        "Una sorgente sola."
+      ],
+      "risks": [],
+      "open_points": [],
+      "sources": [
+        {
+          "path": "app/models/agents/plan.rb",
+          "reason": "Fonte persistita."
+        }
+      ]
+    },
+    "mixed_parts": null,
+    "notes": [],
+    "item_verifications": [
+      {
+        "code": "AC-1",
+        "revision": 1,
+        "verification": {
+          "kind": "manual",
+          "how": "A person checks it on the page."
+        }
+      }
+    ],
+    "proposed_items": []
+  },
+  "review": {
+    "status": "accepted",
+    "summary": "Il piano è concreto e verificabile.",
+    "findings": []
+  }
+}

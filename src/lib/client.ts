@@ -25,7 +25,18 @@ const REQUEST_TIMEOUT_MS = 15_000
 // the local checkout by comparing the Git remotes (CYAU-10). `default_branch` is not needed for the checkout
 // mapping but is part of the contract (future on-demand auto-clone).
 /** A Definition of Done entry: a string in a v1 plan, {id, text} in a v2 plan (CYRA-877). */
-export type PlanDone = string | {id: string; text: string; verification?: {kind: string; how: string}}
+export type PlanDone = string | {
+  id: string
+  text: string
+  verification?: {kind: string; how: string}
+  // CYRA-1319 — a v3 entry is a ticket item (AC-N) at a revision; a case carries its clauses.
+  revision?: number
+  title?: string
+  given?: string
+  when?: string
+  then?: string
+  expected?: string
+}
 
 export interface ProjectTarget {
   key: string
@@ -62,6 +73,8 @@ export interface ClaimedTicketCandidate {
   platforms?: Array<{id?: string; code?: string; label?: string}>
   scenarios?: Array<{title?: string | null; step_given?: string | null; step_when?: string | null; step_then?: string | null; step_expected?: string | null}>
   conditions?: Array<{text?: string | null}>
+  /** CYRA-1318 — the acceptance items as one list with their codes; missing on older servers. */
+  acceptance_items?: Array<Record<string, unknown>>
   /** CYAU-279 — the ticket page as composed by the service. Untrusted: checked by `serviceTicketUrl`. */
   url?: string | null
   /** Structured guidance resolved SERVER-side (CYAU-1): references/procedures/rules. Additive, missing on legacy servers. */
@@ -97,6 +110,8 @@ export interface ClaimedTicketCandidate {
     snapshot_digest?: string | null
     current_plan?: {
       version: number
+      /** CYRA-1319 — 3 when the plan proves the ticket's acceptance items; missing on older servers. */
+      contract_version?: number
       technical_analysis: string
       scenarios: Array<{given: string; when: string; then: string; expected: string}>
       definition_of_done: PlanDone[]

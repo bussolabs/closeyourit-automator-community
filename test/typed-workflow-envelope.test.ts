@@ -296,7 +296,7 @@ describe('parseWorkflowResultDetailed — the rejection reason, not only the rej
   })
 
   it('contract_version not allowed for the phase: spelled out', () => {
-    const detailed = parseWorkflowResultDetailed(JSON.stringify({contract_version: 3, code: 'X-1', state: 'blocked'}), 'planner')
+    const detailed = parseWorkflowResultDetailed(JSON.stringify({contract_version: 4, code: 'X-1', state: 'blocked'}), 'planner')
     expect(detailed.value).toBeNull()
     expect(detailed.issues).toEqual([expect.stringMatching(/^contract_version: /u)])
   })

@@ -453,7 +453,7 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
     expect(requirements).toContain('Scenario 1: Claim')
     expect(requirements).toContain('Given: un ticket')
     expect(requirements).toContain('Expected: atomico')
-    expect(requirements).toContain('Definition of Done: Nessun doppio avvio')
+    expect(requirements).toContain('Criterio di accettazione: Nessun doppio avvio')
   })
 
   // CYRA-921 — a machine set to work with Codex: same skill, same worktree, Codex does it and Claude reviews it.
@@ -677,6 +677,20 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
     expect(provenRun).toContain('- DOD-2: Nessun link rotto\n')
     expect(run).toContain('- DOD-2: Nessun link rotto')
     expect(run).not.toContain('[object Object]')
+  })
+
+  // CYRA-1319 — a v3 plan lists the ticket's acceptance items with their proofs; a case keeps its clauses.
+  it('renders a v3 plan as the ticket acceptance items with their codes, clauses and proofs', async () => {
+    const v3Plan = {...approvedPlan, contract_version: 3, scenarios: [], definition_of_done: [
+      {id: 'AC-1', revision: 1, text: 'Templates inspected', verification: {kind: 'manual', how: 'A person reads them'}},
+      {id: 'AC-2', revision: 2, text: 'Link present', given: 'a client', when: 'opens the page', expected: 'sees the link',
+        verification: {kind: 'test', how: 'A request spec'}},
+    ]}
+    const run = (await autopilotPreflight(v3Plan as unknown as typeof approvedPlan)('worker', claudeAction, queueContext)).action?.run ?? ''
+    expect(run).toContain('## Criteri di accettazione del ticket e come provarli')
+    expect(run).toContain('- AC-1: Templates inspected (verify by manual: A person reads them)')
+    expect(run).toContain('- AC-2: Link present — Given a client / When opens the page / Expected sees the link (verify by test: A request spec)')
+    expect(run).not.toContain('## Definition of Done')
   })
 
   // CYAU-236 — a retry after a review that asked for changes must see what it found, otherwise it finds its

@@ -125,7 +125,8 @@ const V2WorkReport = z.object({
   risks: z.array(V2Risk),
   deviations: z.array(z.object({title: NonEmpty, reason: NonEmpty, impact: NonEmpty}).strict()),
   acceptance_evidence: z.array(z.object({
-    criterion_id: z.string().regex(/^DOD-[1-9][0-9]*$/u),
+    // CYRA-1316 — a v3 delivery proves the ticket's acceptance items (AC-N); the server checks which by version.
+    criterion_id: z.string().regex(/^(?:DOD|AC)-[1-9][0-9]*$/u),
     status: z.enum(['verified', 'partial', 'missing']), evidence: NonEmpty,
     source: z.enum(['reported', 'attested']),
   }).strict()).min(1),
@@ -164,8 +165,47 @@ const PlannerV2 = z.object({
   } else if (!value.failure) fail(ctx, ['failure'], 'failure richiesto per blocked v2')
 })
 
+// CYRA-1316 — agent-result v3: the plan proves the ticket's acceptance items and keeps no list of its own.
+const V3ItemVerification = z.object({
+  code: z.string().regex(/^AC-[1-9][0-9]*$/u), revision: z.number().int().min(1), verification: V2Verification,
+}).strict()
+const V3ProposedItem = z.object({
+  ref: z.string().regex(/^NEW-[1-9][0-9]*$/u), format: z.enum(['text', 'scenario']),
+  text: NonEmpty.optional(), title: NonEmpty.optional(), given: NonEmpty.optional(), when: NonEmpty.optional(),
+  then: NonEmpty.optional(), expected: NonEmpty.optional(), verification: V2Verification,
+}).strict().superRefine((value, ctx) => {
+  if (value.format === 'text' && !value.text) fail(ctx, ['text'], 'text richiesto per una voce di testo')
+  if (value.format === 'scenario' && !(value.given && value.when && value.expected)) {
+    fail(ctx, ['expected'], 'given, when ed expected richiesti per un caso')
+  }
+})
+const PlannerV3 = z.object({
+  contract_version: z.literal(3), code: NonEmpty,
+  state: z.enum(['submitted-for-approval', 'blocked', 'already-done']),
+  decision_brief: NonEmpty.optional(),
+  decision_card: DecisionCard.optional(),
+  causa: z.enum(['needs_decision', 'unreachable']).optional(),
+  plan: V2Plan.optional(),
+  item_verifications: z.array(V3ItemVerification).optional(),
+  proposed_items: z.array(V3ProposedItem).optional(),
+  mixed_parts: z.object({}).passthrough().nullable().optional(), notes: z.array(z.string()).optional(),
+  failure: V2Failure.optional(), already_done: V2AlreadyDone.optional(),
+}).passthrough().superRefine((value, ctx) => {
+  if (value.state === 'submitted-for-approval') {
+    if (!value.plan) fail(ctx, ['plan'], 'plan richiesto per submitted-for-approval v3')
+    if (!value.item_verifications) fail(ctx, ['item_verifications'], 'item_verifications richiesto per submitted-for-approval v3')
+    if (!value.proposed_items) fail(ctx, ['proposed_items'], 'proposed_items richiesto per submitted-for-approval v3')
+    if (!value.notes) fail(ctx, ['notes'], 'notes richiesto per submitted-for-approval v3')
+    if ((value.item_verifications?.length ?? 0) + (value.proposed_items?.length ?? 0) === 0) {
+      fail(ctx, ['item_verifications'], 'un piano v3 prova almeno una voce, esistente o proposta')
+    }
+  } else if (value.state === 'already-done') {
+    if (!value.already_done) fail(ctx, ['already_done'], 'already_done richiesto per already-done v3')
+  } else if (!value.failure) fail(ctx, ['failure'], 'failure richiesto per blocked v3')
+})
+
 const AutopilotV2 = z.object({
-  contract_version: z.literal(2), code: NonEmpty, state: z.enum(['delivered', 'blocked', 'already-delivered']),
+  contract_version: z.union([z.literal(2), z.literal(3)]), code: NonEmpty, state: z.enum(['delivered', 'blocked', 'already-delivered']),
   decision_card: DecisionCard.optional(),
   gate: z.object({passed: z.boolean().nullable().optional()}).passthrough().optional(),
   review: z.object({verdict: z.enum(['approved', 'changes_requested', 'blocked', 'unavailable']).optional()}).passthrough().optional(),
@@ -395,6 +435,8 @@ const SCHEMAS_V2: Record<ExecutionPhase, z.ZodTypeAny> = {
   closer_staging: CloserStaging,
   closer_production: CloserProduction,
 }
+// CYRA-1316 — v3 changes only the planner; the other phases read as in v2.
+const SCHEMAS_V3: Record<ExecutionPhase, z.ZodTypeAny> = {...SCHEMAS_V2, planner: PlannerV3}
 /**
  * A reviewer finding, in the shape the `agent-result` contract already provides for `review.findings`:
  * missing `aspect` and `detail` become `null`, as `parseFinding` does on the path that re-reads the diff. The
@@ -574,6 +616,7 @@ function schemaFor(candidate: Record<string, unknown>, phase: ExecutionPhase): z
   // truly unknown version stays fail-closed: better uninterpretable than interpreted
   // with the wrong rules.
   if (version === 2) return SCHEMAS_V2[phase] ?? null
+  if (version === 3) return SCHEMAS_V3[phase] ?? null
   return null
 }
 

@@ -579,6 +579,39 @@ describe('v2 declared as "version" instead of "contract_version"', () => {
   })
 
   it('leaves a result that declares both fields to contract_version', () => {
-    expect(parseWorkflowResult(JSON.stringify({...blocked, contract_version: 3}), 'autopilot')).toBeNull()
+    expect(parseWorkflowResult(JSON.stringify({...blocked, contract_version: 4}), 'autopilot')).toBeNull()
+  })
+})
+
+describe('agent-result v3 planner (CYRA-1316)', () => {
+  const plan = {
+    summary: 'Fix the link.',
+    work_items: [{id: 'WI-1', title: 'Fix', description: 'Fix the link', files: [{path: 'app/x.rb', reason: 'link'}], dependencies: []}],
+    rationale: ['Simple.'], risks: [], open_points: [], sources: [{path: 'app/x.rb', reason: 'link'}],
+  }
+  const base = {contract_version: 3, code: 'CYRA-1', state: 'submitted-for-approval', plan, notes: []}
+  const proof = {kind: 'test', how: 'A request spec'}
+
+  it('takes a plan that proves ticket items and proposes a new one', () => {
+    const result = parseWorkflowResult(JSON.stringify({
+      ...base,
+      item_verifications: [{code: 'AC-1', revision: 2, verification: proof}],
+      proposed_items: [{ref: 'NEW-1', format: 'text', text: 'Opens in the same tab', verification: proof}],
+    }), 'planner')
+    expect(result).not.toBeNull()
+  })
+
+  it('refuses a v3 plan with its own lists, or with nothing to prove', () => {
+    expect(parseWorkflowResult(JSON.stringify({
+      ...base, scenarios: [], definition_of_done: [{id: 'DOD-1', text: 'Done'}],
+    }), 'planner')).toBeNull()
+    expect(parseWorkflowResult(JSON.stringify({...base, item_verifications: [], proposed_items: []}), 'planner')).toBeNull()
+  })
+
+  it('refuses a proposed case without what it expects', () => {
+    expect(parseWorkflowResult(JSON.stringify({
+      ...base, item_verifications: [],
+      proposed_items: [{ref: 'NEW-1', format: 'scenario', given: 'a client', when: 'opens', verification: proof}],
+    }), 'planner')).toBeNull()
   })
 })

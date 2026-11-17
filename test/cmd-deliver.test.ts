@@ -220,7 +220,7 @@ describe('deliver command — link and conditions from the ticket card (CYAU-279
     const {result} = await runCaptured(TestDeliver, [...base, '--summary', 'x', '--dry-run'])
     const body = (result as DeliverPayload).body!
     expect(body).toContain('- **Collegamento:** non disponibile')
-    expect(body).toContain('Il ticket non ha condizioni di fatto.')
+    expect(body).toContain('Il ticket non ha criteri di accettazione.')
   })
 
   it('an unreadable card, a failing read or the card of another ticket leave link and conditions unavailable', async () => {
@@ -230,7 +230,7 @@ describe('deliver command — link and conditions from the ticket card (CYAU-279
       const body = (result as DeliverPayload).body!
       expect(body).toContain('- **Codice:** CYAU-24')
       expect(body).toContain('- **Collegamento:** non disponibile')
-      expect(body).toContain('Condizioni non disponibili: le trovi sul ticket CYAU-24.')
+      expect(body).toContain('Criteri non disponibili: li trovi sul ticket CYAU-24.')
       expect(body).not.toContain(url)
     }
   })
