@@ -20,7 +20,7 @@
     "/playbook.example.yml"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "os": [
     "linux"
@@ -30,8 +30,8 @@
     "arm64"
   ],
   "dependencies": {
-    "@oclif/core": "^4",
-    "@oclif/plugin-help": "^6",
+    "@oclif/core": "^5.1.12",
+    "@oclif/plugin-help": "^7.0.10",
     "croner": "^8",
     "yaml": "^2",
     "zod": "^4.6.7"

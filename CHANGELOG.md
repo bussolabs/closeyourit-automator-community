@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-11-17
+
+### Changed
+
+- **Serve Node 22 o più.** L'automator passa alla nuova versione di oclif, la libreria su cui è costruito, che non funziona più con Node 20. I comandi non cambiano.
+
 ## [0.58.1] - 2026-11-17
 
 ### Fixed
