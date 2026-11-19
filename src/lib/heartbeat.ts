@@ -10,6 +10,7 @@ import {readUpdateFailure, type UpdateFailureStop} from './update-outcome'
 import {type HangBeatTarget, type HangReport} from './hang-watchdog'
 import {detectPlatform} from './service'
 import {agentQuotaReport, type AgentQuotaReport} from './agent-quota'
+import {hostEngines, parseHostEngines, type HostEngines, type HostEnginesStore} from './host-engines'
 import {browserTesterRuntimes} from './browser-tester'
 import {emulatorToolRuntimes} from './emulator-test'
 
@@ -179,21 +180,29 @@ export async function sendHeartbeat(
   capabilities?: BeatPayload,
   fetchFn: FetchFn = globalThis.fetch,
 ): Promise<boolean> {
-  return (await postHeartbeat(cfg, hostToken, ok, capabilities, fetchFn)) === null
+  return (await postHeartbeat(cfg, hostToken, ok, capabilities, fetchFn)).rejection === null
 }
 
 // Only a well-formed server error code reaches the log: the body is untrusted input.
 const ERROR_CODE = /^[A-Z][A-Z0-9-]{2,39}$/
 
-/** `null` when the server accepted the beat, otherwise a short reason without secrets (CYAU-247). */
+/**
+ * `rejection` is `null` when the server accepted the beat, otherwise a short reason without secrets (CYAU-247).
+ * `body` is the accepted response, `null` when unreadable: untrusted input, each reader validates its own field.
+ */
+interface BeatOutcome {
+  rejection: string | null
+  body: unknown
+}
+
 async function postHeartbeat(
   cfg: HeartbeatConfig,
   hostToken: string | undefined,
   ok: boolean,
   capabilities: BeatPayload | ReducedHangPayload | undefined,
   fetchFn: FetchFn,
-): Promise<string | null> {
-  if (!isHostToken(hostToken)) return 'no valid host token'
+): Promise<BeatOutcome> {
+  if (!isHostToken(hostToken)) return {rejection: 'no valid host token', body: null}
   const url = `${cfg.apiUrl ?? DEFAULT_API}/api/v1/projects/${cfg.projectId}/crons/${cfg.slug}/check_in`
   let res: Response
   try {
@@ -211,12 +220,12 @@ async function postHeartbeat(
       }),
     })
   } catch {
-    return 'network error'
+    return {rejection: 'network error', body: null}
   }
-  if (res.ok) return null
-  const body = (await Promise.resolve().then(() => res.json()).catch(() => null)) as {error?: {code?: unknown}} | null
-  const code = body?.error?.code
-  return typeof code === 'string' && ERROR_CODE.test(code) ? `HTTP ${res.status} ${code}` : `HTTP ${res.status}`
+  const body = (await Promise.resolve().then(() => res.json()).catch(() => null)) as unknown
+  if (res.ok) return {rejection: null, body}
+  const code = (body as {error?: {code?: unknown}} | null)?.error?.code
+  return {rejection: typeof code === 'string' && ERROR_CODE.test(code) ? `HTTP ${res.status} ${code}` : `HTTP ${res.status}`, body: null}
 }
 
 interface ReducedHangPayload {
@@ -260,6 +269,11 @@ export interface HeartbeatOptions {
    * does not know the field yet drops it, so it costs nothing until the panel shows it.
    */
   agentQuota?: () => AgentQuotaReport[]
+  /**
+   * CYAU-305: where the engines the server declares in the response are kept, for the claim to read. Every beat
+   * replaces the list; a rejected, failed or unreadable beat clears it. Default: the process-wide list.
+   */
+  engines?: HostEnginesStore
   /** CYAU-304: the current machine name, read at every beat. Default `os.hostname()`; injectable in tests. */
   hostname?: () => string
 }
@@ -306,6 +320,7 @@ export function makeHeartbeat(secrets: Secrets, opts: HeartbeatOptions = {}): ((
   const bundle = opts.skillsBundle ?? (() => skillsBundleRuntime())
   const updateFailure = opts.updateFailure ?? (() => readUpdateFailure())
   const agentQuota = opts.agentQuota ?? (() => agentQuotaReport())
+  const engines = opts.engines ?? hostEngines
   // One line per change of outcome, not per beat: the daemon beats every minute.
   let lastRejection: string | null = null
   const report = (rejection: string | null) => {
@@ -314,7 +329,7 @@ export function makeHeartbeat(secrets: Secrets, opts: HeartbeatOptions = {}): ((
     else opts.log?.('heartbeat accepted again by CloseYourIt')
     lastRejection = rejection
   }
-  return async (ok, stops) => {
+  const beat = async (ok: boolean, stops: PreflightStop[] | undefined): Promise<HostEngines | null> => {
     // `stops` undefined = the caller does not wire it (or no round completed yet) → field omitted (backward compat).
     // An array (even empty) is instead an observed fact: `[]` explicitly says "no recent block", so
     // the panel can clear a no longer current reason instead of showing a stale one.
@@ -335,7 +350,18 @@ export function makeHeartbeat(secrets: Secrets, opts: HeartbeatOptions = {}): ((
     })()
     const hang = readHang(opts.hang)
     const hostname = readHostname(opts.hostname)
-    report(await postHeartbeat(cfg, secrets.host.token, ok, {...capabilities, ...(hostname ? {hostname} : {}), runtimes, ...activity(), ...lastStops, ...quota, ...(hang ? {hang} : {})}, opts.fetchFn ?? globalThis.fetch))
+    const outcome = await postHeartbeat(cfg, secrets.host.token, ok, {...capabilities, ...(hostname ? {hostname} : {}), runtimes, ...activity(), ...lastStops, ...quota, ...(hang ? {hang} : {})}, opts.fetchFn ?? globalThis.fetch)
+    report(outcome.rejection)
+    return outcome.rejection === null ? parseHostEngines(outcome.body) : null
+  }
+  return async (ok, stops) => {
+    // CYAU-305: whatever happens in the beat, it decides the list — a throw clears it like a rejection.
+    let declared: HostEngines | null = null
+    try {
+      declared = await beat(ok, stops)
+    } finally {
+      engines.replace(declared)
+    }
   }
 }
 

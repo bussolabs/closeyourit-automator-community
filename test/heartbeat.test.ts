@@ -1,5 +1,7 @@
 import {describe, expect, it, vi} from 'vitest'
 import {buildCapabilities as buildCapabilitiesRaw, collectRuntimes, combineBeats, heartbeatMissingReason, makeHeartbeat as makeHeartbeatRaw, sendHangBeat, sendHeartbeat, type HostCapabilities} from '../src/lib/heartbeat'
+import {HOST_TOKEN_PREFIX} from '../src/lib/credential-format'
+import {makeHostEnginesStore} from '../src/lib/host-engines'
 import {type HostActivity, IDLE_ACTIVITY} from '../src/lib/activity'
 import {type HeartbeatConfig} from '../src/lib/config'
 import {type ProbeResult} from '../src/lib/deps'
@@ -436,6 +438,100 @@ describe('makeHeartbeat', () => {
     )
     await hb!(true)
     expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('last_stops')
+  })
+})
+
+// CYAU-305 — the beat response says which engines this machine uses; every beat replaces the list.
+describe('makeHeartbeat — engines in use', () => {
+  // Built from the prefix: a credential-shaped literal would stop the review of this diff.
+  const secrets = {heartbeat: cfg, host: {id: 'h1', token: `${HOST_TOKEN_PREFIX}prova`}}
+  const allCodex = {work: 'codex', reviewer: 'codex', supporter: 'codex'}
+  type Reply = {ok: boolean; status: number; body: unknown} | 'network-error'
+
+  function beatWith(replies: Reply[], activity: () => HostActivity = () => IDLE_ACTIVITY) {
+    const fn = vi.fn(async () => {
+      const reply = replies.shift()
+      if (!reply || reply === 'network-error') throw new Error('network down')
+      return {ok: reply.ok, status: reply.status, json: async () => reply.body} as unknown as Response
+    }) as unknown as typeof globalThis.fetch
+    const engines = makeHostEnginesStore()
+    const hb = makeHeartbeat(secrets, {version: '0.0.1', runtimes: [], fetchFn: fn, activity, engines})
+    return {hb: hb!, engines}
+  }
+
+  it('an accepted beat with a complete list stores it', async () => {
+    const {hb, engines} = beatWith([{ok: true, status: 202, body: {data: {engines: allCodex}}}])
+    await hb(true)
+    expect(engines.current()).toEqual(allCodex)
+  })
+
+  it('an accepted beat without engines leaves no list (the server does not send them yet)', async () => {
+    const {hb, engines} = beatWith([{ok: true, status: 202, body: {data: {}}}])
+    await hb(true)
+    expect(engines.current()).toBeNull()
+  })
+
+  it('a valid beat followed by one with invalid engines clears the list', async () => {
+    const {hb, engines} = beatWith([
+      {ok: true, status: 202, body: {data: {engines: allCodex}}},
+      {ok: true, status: 202, body: {data: {engines: {work: 'codex', reviewer: 'gemini', supporter: 'codex'}}}},
+    ])
+    await hb(true)
+    expect(engines.current()).toEqual(allCodex)
+    await hb(true)
+    expect(engines.current()).toBeNull()
+  })
+
+  it('a valid beat followed by an incomplete one clears the list', async () => {
+    const {hb, engines} = beatWith([
+      {ok: true, status: 202, body: {data: {engines: allCodex}}},
+      {ok: true, status: 202, body: {data: {engines: {work: 'codex', reviewer: 'codex'}}}},
+    ])
+    await hb(true)
+    await hb(true)
+    expect(engines.current()).toBeNull()
+  })
+
+  it('a valid beat followed by a failed one clears the list', async () => {
+    const {hb, engines} = beatWith([{ok: true, status: 202, body: {data: {engines: allCodex}}}, 'network-error'])
+    await hb(true)
+    expect(engines.current()).toEqual(allCodex)
+    await hb(true)
+    expect(engines.current()).toBeNull()
+  })
+
+  it('a valid beat followed by a rejected one clears the list, even if the rejection carries engines', async () => {
+    const {hb, engines} = beatWith([
+      {ok: true, status: 202, body: {data: {engines: allCodex}}},
+      {ok: false, status: 422, body: {data: {engines: allCodex}}},
+    ])
+    await hb(true)
+    await hb(true)
+    expect(engines.current()).toBeNull()
+  })
+
+  it('a beat that throws before sending clears the list', async () => {
+    let broken = false
+    const {hb, engines} = beatWith([{ok: true, status: 202, body: {data: {engines: allCodex}}}], () => {
+      if (broken) throw new Error('state dir unreadable')
+      return IDLE_ACTIVITY
+    })
+    await hb(true)
+    expect(engines.current()).toEqual(allCodex)
+    broken = true
+    await expect(hb(true)).rejects.toThrow('state dir unreadable')
+    expect(engines.current()).toBeNull()
+  })
+
+  it('a later valid beat replaces the list entirely', async () => {
+    const mixed = {work: 'codex', reviewer: 'codex', supporter: 'claude'}
+    const {hb, engines} = beatWith([
+      {ok: true, status: 202, body: {data: {engines: allCodex}}},
+      {ok: true, status: 202, body: {data: {engines: mixed}}},
+    ])
+    await hb(true)
+    await hb(true)
+    expect(engines.current()).toEqual(mixed)
   })
 })
 

@@ -61,6 +61,7 @@ import {
   settleQuotaPause,
 } from './ticket-attempts'
 import {agentQuotaGate, type QuotaReadiness} from './agent-quota'
+import {enginesInUse, hostEngines, type EngineRole, type HostEnginesStore} from './host-engines'
 import {composeSkillInvocation, phaseToStep} from './flow-engine'
 import {createWriteConfinementAttestor, type WriteConfinementAttestation} from './write-confinement'
 import {type ExecutionPhase, type PhaseProfile, phaseProfile, phaseProfileDigest} from './phase-profile'
@@ -1965,6 +1966,19 @@ export function makeQueueDeferrer(secrets: Secrets): ((intent: QueueDeferralInte
 }
 
 /**
+ * CYAU-305 — the stop reason names, for each engine that stopped the machine, the roles the server gave it here,
+ * so the panel says why an engine this machine "does not work with" still matters (e.g. the supporter). Without
+ * a valid list there are no roles to name and the reason stays as it was.
+ */
+function withRoles(detail: string, stopped: readonly RuntimeId[], inUse: ReadonlyMap<RuntimeId, readonly EngineRole[]>): string {
+  const named = stopped
+    .map((runtime) => ({runtime, roles: inUse.get(runtime) ?? []}))
+    .filter(({roles}) => roles.length > 0)
+    .map(({runtime, roles}) => `${runtime} serve a questa macchina per ${roles.join(', ')}`)
+  return named.length > 0 ? `${detail} (${named.join('; ')})` : detail
+}
+
+/**
  * ATOMIC claim probe used by the dispatch (CYAU-169), twin of `makeQueueDeferrer`: it asks a project's queue
  * for work and comes back with the candidate AND the lease already taken. `undefined` when the channel is not
  * configured — without an operational host identity there is nobody to ask, and the dispatch stays the
@@ -1980,9 +1994,12 @@ export function makeQueueClaimer(
     /** CYAU-170: outcome of the comparison between the active manual and the pinned one. Injectable in tests. */
     checkBundlePin?: () => Promise<BundlePinCheck>
     /** CYAU-206: real probe of the runtimes, before asking for work. Injectable in tests. */
-    checkRuntimes?: () => Promise<RuntimeReadiness>
+    checkRuntimes?: (runtimes?: readonly RuntimeId[]) => Promise<RuntimeReadiness>
     /** CYAU-275: quota pause and remaining quota, before asking for work. Injectable in tests. */
-    checkQuota?: () => Promise<QuotaReadiness>
+    checkQuota?: (runtimes?: readonly RuntimeId[]) => Promise<QuotaReadiness>
+    /** CYAU-305: the engines the last beat declared, shared with the heartbeat. Default: the process-wide list. */
+    engines?: HostEnginesStore
+    now?: () => Date
   } = {},
 ): ((target: TicketQueueTarget) => Promise<QueueClaimOutcome>) | undefined {
   if (!secrets.sync || !hasOperationalHostIdentity(secrets)) return undefined
@@ -1993,6 +2010,8 @@ export function makeQueueClaimer(
   const attestConfinement = options.attestConfinement ?? attestConfinementOnce
   const checkRuntimes = options.checkRuntimes ?? agentRuntimeReadiness
   const checkQuota = options.checkQuota ?? agentQuotaGate
+  const engines = options.engines ?? hostEngines
+  const now = options.now ?? (() => new Date())
   // The path passed is THE ONE the session runs (`pluginDir`), not an inferred one: with
   // AUTOMATOR_SKILLS_DIR the two diverge, and verifying the second would give the green light looking at
   // a manual different from the one that then runs.
@@ -2027,13 +2046,20 @@ export function makeQueueClaimer(
     if (!confinement.attested) {
       return {ready: false, detail: `write-confinement OS non attestato: ${confinement.detail ?? 'motivo non disponibile'}`}
     }
+    // CYAU-305 — only the engines this machine uses for work, review and support, as the last beat declared
+    // them. No valid list (missing, stale, unknown names, a failed beat) → both, as before.
+    const inUse = enginesInUse(engines.current(now()))
+    const runtimes = [...inUse.keys()]
     // CYAU-275 — with the quota gone (or nearly) a claimed ticket cannot finish. It goes before the runtime
     // probe, which is itself a paid request and would only fail.
-    const quota = await checkQuota()
-    if (!quota.ready) return quota
+    const quota = await checkQuota(runtimes)
+    if (!quota.ready) return {ready: false, detail: withRoles(quota.detail, quota.runtime ? [quota.runtime] : [], inUse)}
     // CYAU-206 — on 23/09 Codex was disconnected and the machine took tickets for 24 hours: every session
     // was paid for and then rejected because the review did not start.
-    return checkRuntimes()
+    const answer = await checkRuntimes(runtimes)
+    // The probe says "<runtime>: <reason>" for each engine that did not answer, joined by "; ".
+    if (!answer.ready) return {ready: false, detail: withRoles(answer.detail, runtimes.filter((runtime) => answer.detail.split('; ').some((part) => part.startsWith(`${runtime}:`))), inUse)}
+    return answer
   }
   return async (target) => {
     const ready = await executionReady()

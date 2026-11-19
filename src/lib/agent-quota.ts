@@ -142,10 +142,11 @@ function readPauseRecord(file: string): {record: PauseRecord; corrupt: boolean} 
 }
 
 /**
- * The active pause that ends last, or `null`. An unreadable record is a SHORT pause from when it was written —
- * never a green light, and never a stop that outlives the prudent wait either.
+ * The active pause that ends last among `runtimes` (both by default), or `null`. An unreadable record is a SHORT
+ * pause from when it was written, whatever the engines asked — never a green light, and never a stop that
+ * outlives the prudent wait either.
  */
-export function readQuotaPause(now: Date, file: string = quotaPausePath()): QuotaPause | null {
+export function readQuotaPause(now: Date, file: string = quotaPausePath(), runtimes: readonly QuotaRuntime[] = RUNTIMES): QuotaPause | null {
   const {record, corrupt} = readPauseRecord(file)
   if (corrupt) {
     let written = now.getTime()
@@ -159,6 +160,7 @@ export function readQuotaPause(now: Date, file: string = quotaPausePath()): Quot
   }
   let latest: QuotaPause | null = null
   for (const runtime of RUNTIMES) {
+    if (!runtimes.includes(runtime)) continue
     const value = record[runtime]
     if (!value) continue
     const until = new Date(value)
@@ -349,7 +351,8 @@ export async function readCodexQuota(deps: {spawnFn?: AppServerSpawn; timeoutMs?
 
 // --- Claim gate and heartbeat report ----------------------------------------------------------------------
 
-export type QuotaReadiness = {ready: true} | {ready: false; detail: string}
+/** `runtime` names the engine that stopped the machine; `null` when unknown (an unreadable pause record). */
+export type QuotaReadiness = {ready: true} | {ready: false; detail: string; runtime?: QuotaRuntime | null}
 
 /** What the heartbeat says about one engine. Unknown values are `null`, never zero. */
 export interface AgentQuotaReport {
@@ -359,12 +362,15 @@ export interface AgentQuotaReport {
   paused_until: string | null
 }
 
-export type QuotaGate = (() => Promise<QuotaReadiness>) & {report(now: Date, file?: string): AgentQuotaReport[]}
+export type QuotaGate = ((runtimes?: readonly QuotaRuntime[]) => Promise<QuotaReadiness>) & {report(now: Date, file?: string): AgentQuotaReport[]}
 
 /**
- * Gate run before asking for work: an active pause stops it; then the remaining quota of both engines is read
+ * Gate run before asking for work: an active pause stops it; then the remaining quota of the engines is read
  * and a window below the threshold starts a pause until it resets. A reading that fails lets the machine work —
  * a broken check must not stop the work, and the pause read from the error still applies (R-2).
+ *
+ * CYAU-305 — `runtimes` are the engines this machine uses, from the server's list; without it, both. The pause
+ * and the quota of an engine not in use do not stop the machine; an unreadable pause record always does.
  */
 export function makeQuotaGate(deps: {
   now?: () => Date
@@ -384,16 +390,16 @@ export function makeQuotaGate(deps: {
     return reading
   }
 
-  const gate = async (): Promise<QuotaReadiness> => {
+  const gate = async (runtimes: readonly QuotaRuntime[] = RUNTIMES): Promise<QuotaReadiness> => {
     const instant = now()
     let pause: QuotaPause | null
     try {
-      pause = readQuotaPause(instant, fileOf())
+      pause = readQuotaPause(instant, fileOf(), runtimes)
     } catch {
       pause = null
     }
-    if (pause) return {ready: false, detail: `${pause.runtime ?? 'agent'} quota exhausted: paused until ${pause.until.toISOString()}`}
-    const readings = await Promise.all(RUNTIMES.map((runtime) => read(runtime, instant.getTime())))
+    if (pause) return {ready: false, detail: `${pause.runtime ?? 'agent'} quota exhausted: paused until ${pause.until.toISOString()}`, runtime: pause.runtime}
+    const readings = await Promise.all(RUNTIMES.filter((runtime) => runtimes.includes(runtime)).map((runtime) => read(runtime, instant.getTime())))
     for (const reading of readings) {
       const low = reading?.windows
         .filter((window) => window.remaining_percent < QUOTA_MIN_REMAINING_PERCENT)
@@ -413,6 +419,7 @@ export function makeQuotaGate(deps: {
       return {
         ready: false,
         detail: `${reading.runtime} quota below ${QUOTA_MIN_REMAINING_PERCENT}% (${low.remaining_percent}% left): paused until ${until.toISOString()}`,
+        runtime: reading.runtime,
       }
     }
     return {ready: true}

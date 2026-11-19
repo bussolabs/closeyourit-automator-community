@@ -4,9 +4,10 @@ import {BaseCommand} from '../base'
 import {loadPlaybook} from '../lib/playbook'
 import {selectDue} from '../lib/scheduler'
 import {loadState} from '../lib/state'
-import {runOnce} from '../lib/runner'
-import {loadSecrets, secretCapabilities} from '../lib/config'
+import {runOnce, type RunOnceOptions, type RunOnceResult} from '../lib/runner'
+import {loadSecrets, secretCapabilities, type Secrets} from '../lib/config'
 import {combineBeats, heartbeatMissingReason, makeHeartbeat} from '../lib/heartbeat'
+import {hostEngines} from '../lib/host-engines'
 import {makeLeaseRenewer} from '../lib/lease'
 import {makeOrgClaudeCredentialReconciler} from '../lib/org-claude-credential'
 import {makeOrgOpenrouterKeyReconciler} from '../lib/org-openrouter-credential'
@@ -34,6 +35,16 @@ export default class Tick extends BaseCommand {
   /** Test seam: a real operational iteration is available only on Linux. */
   protected currentPlatform(): OsPlatform {
     return detectPlatform()
+  }
+
+  /** Test seam: the monitor beat, which writes the engines the server declares into the shared list. */
+  protected hostBeat(secrets: Secrets): ReturnType<typeof makeHeartbeat> {
+    return makeHeartbeat(secrets, {version: this.config.version, engines: hostEngines})
+  }
+
+  /** Test seam: the iteration itself. */
+  protected runIteration(options: RunOnceOptions): Promise<RunOnceResult> {
+    return runOnce(options)
   }
 
   async run(): Promise<unknown> {
@@ -89,7 +100,13 @@ export default class Tick extends BaseCommand {
     // CYAU-224: the tick sees the same Claude credential the daemon would.
     await makeOrgClaudeCredentialReconciler(secrets, {log: (message) => this.log(message)})?.(true)
     await makeOrgOpenrouterKeyReconciler(secrets, {log: (message) => this.log(message)})?.(true)
-    const result = await runOnce({
+    // CYAU-305: a single tick is a new process, so its list of engines starts empty, and the round beats only after
+    // its claims. One beat now reads the list before asking for work; without it a machine all on Codex would stop
+    // on Claude's quota at every tick. `last_stops` is left untouched: the beat at the end of the round sends the
+    // real outcome and replaces the list again.
+    const beat = this.hostBeat(secrets)
+    await beat?.(true).catch(() => undefined)
+    const result = await this.runIteration({
       playbook,
       playbookDir,
       now,
@@ -102,7 +119,7 @@ export default class Tick extends BaseCommand {
       // reconciliation of the skill bundle with the server pin (CYAU-129). A single `tick` runs it too: whoever
       // debugs by hand must see the same machine the daemon will see, not one with a different bundle.
       heartbeat: combineBeats(
-        makeHeartbeat(secrets, {version: this.config.version}),
+        beat,
         makeLeaseRenewer(secrets),
         makeSkillsReconciler(secrets, {log: (message) => this.log(message)}),
       ),
@@ -114,7 +131,7 @@ export default class Tick extends BaseCommand {
       deferQueue: makeQueueDeferrer(secrets),
       // CYAU-169: the dispatch asks for work with the atomic claim, so several tickets of the SAME queue
       // can run together up to the cap instead of waiting one tick each.
-      claimQueue: makeQueueClaimer(secrets),
+      claimQueue: makeQueueClaimer(secrets, {engines: hostEngines}),
       // CYAU-248: each ticket session gets a one-hour GitHub token for its own repository.
       githubToken: makeGithubTokenFetcher(secrets, {log: (message) => this.log(message)}),
       // CYAU-285: a phase interrupted by a restart resumes its agent conversation when its file is still here.

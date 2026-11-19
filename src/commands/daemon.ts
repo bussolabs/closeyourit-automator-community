@@ -9,6 +9,7 @@ import {combineBeats, heartbeatMissingReason, makeHeartbeat} from '../lib/heartb
 import {makeHostRegistrar} from '../lib/host'
 import {makeLeaseRenewer} from '../lib/lease'
 import {agentRuntimeReadiness} from '../lib/runtime-probe'
+import {hostEngines} from '../lib/host-engines'
 import {makeOrgClaudeCredentialReconciler} from '../lib/org-claude-credential'
 import {makeOrgOpenrouterKeyReconciler} from '../lib/org-openrouter-credential'
 import {makeSkillsReconciler} from '../lib/skills-manifest'
@@ -94,7 +95,8 @@ export default class Daemon extends BaseCommand {
       // stay its own; if it dies, the beats stop and the server expires them → recovery) + reconciliation of the
       // skill bundle with the server pin (CYAU-129: without it, the bundle only arrived by hand and never updated).
       heartbeat: combineBeats(
-        makeHeartbeat(secrets, {version: this.config.version, log, hang: () => hangReports.take()}),
+        // CYAU-305: the beat writes the engines the server declares, the claim below reads the same list.
+        makeHeartbeat(secrets, {version: this.config.version, log, hang: () => hangReports.take(), engines: hostEngines}),
         makeLeaseRenewer(secrets),
         makeSkillsReconciler(secrets, {log}),
         claudeCredential,
@@ -109,7 +111,7 @@ export default class Daemon extends BaseCommand {
       deferQueue: makeQueueDeferrer(secrets),
       // CYAU-169: the dispatch asks for work with the atomic claim, so several tickets of the SAME queue
       // can run together up to the cap instead of waiting one tick each.
-      claimQueue: makeQueueClaimer(secrets),
+      claimQueue: makeQueueClaimer(secrets, {engines: hostEngines}),
       // CYAU-248: each ticket session gets a one-hour GitHub token for its own repository.
       githubToken: makeGithubTokenFetcher(secrets, {log}),
       // CYAU-285: a phase interrupted by a restart resumes its agent conversation when its file is still here.

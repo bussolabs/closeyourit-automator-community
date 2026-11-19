@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.59.1] - 2026-11-18
+
+### Changed
+
+- **Prima di chiedere lavoro la macchina controlla solo i motori che usa.** Legge dal server, a ogni battito, i motori di lavoro, rilettura e supporto: una macchina tutta su Codex non si ferma più perché Claude ha finito la quota. Se l'elenco manca, è incompleto, ha nomi sconosciuti o ha più di 5 minuti, controlla entrambi come prima; il motivo del fermo dice quale motore manca e per quale ruolo. (CYAU-305)
+
 ## [0.59.0] - 2026-11-17
 
 ### Changed

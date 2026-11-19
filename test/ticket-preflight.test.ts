@@ -3,8 +3,12 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import {afterAll, beforeEach, describe, expect, it, vi} from 'vitest'
+import {IDLE_ACTIVITY} from '../src/lib/activity'
+import {makeQuotaGate, recordQuotaPause} from '../src/lib/agent-quota'
 import {buildClaudeArgv} from '../src/lib/claude'
-import {type Secrets} from '../src/lib/config'
+import {makeHeartbeat} from '../src/lib/heartbeat'
+import {makeHostEnginesStore} from '../src/lib/host-engines'
+import {HOST_TOKEN_PREFIX, type Secrets} from '../src/lib/config'
 import {resolveActionCwd} from '../src/lib/executor'
 import {type GuidanceDeps} from '../src/lib/guidance'
 import {evaluateLimits} from '../src/lib/limits'
@@ -2584,6 +2588,144 @@ describe('makeQueueClaimer — CYAU-169', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+
+  // CYAU-305 — the engines the last beat declared decide whose quota and answer are checked before asking.
+  // The beat, the list and the quota gate are the real ones; only the network and the readings are faked.
+  describe('engines in use', () => {
+    const allCodex = {work: 'codex', reviewer: 'codex', supporter: 'codex'}
+    // Built from the prefix: a credential-shaped literal would stop the review of this diff.
+    const beatSecrets = {heartbeat: {projectId: 'PID', slug: 'automator-tick', token: 'token-di-prova'}, host: {id: 'host-1', token: `${HOST_TOKEN_PREFIX}prova`}} as never
+    type Reply = unknown
+
+    function machine(options: {paused?: Array<'claude' | 'codex'>; corruptPause?: boolean; now?: () => Date} = {}) {
+      const file = path.join(fs.mkdtempSync(path.join(stateRoot, 'quota-')), 'quota-pause.json')
+      for (const runtime of options.paused ?? []) recordQuotaPause(runtime, new Date(Date.now() + 60 * 60_000), new Date(), file)
+      if (options.corruptPause) fs.writeFileSync(file, '{not json')
+      const engines = makeHostEnginesStore()
+      const replies: Reply[] = []
+      const beat = makeHeartbeat(beatSecrets, {
+        platform: 'linux', arch: 'x64', runtimes: [], activity: () => IDLE_ACTIVITY, updateFailure: () => null, agentQuota: () => [],
+        skillsBundle: () => ({name: 'closeyourit-skills', present: true, version: null, required: false}),
+        engines,
+        fetchFn: (async () => {
+          const reply = replies.shift()
+          if (reply === 'network-error') throw new Error('network down')
+          return {ok: true, status: 202, json: async () => reply} as unknown as Response
+        }) as unknown as typeof globalThis.fetch,
+      })!
+      const checkRuntimes = vi.fn(async (_runtimes?: readonly string[]) => ({ready: true as const}))
+      const claimer = makeQueueClaimer(secrets, {
+        ...ready, checkRuntimes, engines, now: options.now,
+        checkQuota: makeQuotaGate({file, readers: {claude: async () => null, codex: async () => null}}),
+      })!
+      return {
+        checkRuntimes,
+        claimer,
+        async beatWith(reply: Reply) {
+          replies.push(reply)
+          await beat(true)
+        },
+      }
+    }
+
+    async function withServer<T>(run: () => Promise<T>): Promise<T> {
+      vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, status: 200, json: async () => ({data: null})} as unknown as Response)))
+      try {
+        return await run()
+      } finally {
+        vi.unstubAllGlobals()
+      }
+    }
+
+    it('scenario 1: all on Codex and Claude out of quota → asks for work, probing only Codex', async () => {
+      const m = machine({paused: ['claude']})
+      await m.beatWith({data: {engines: allCodex}})
+      await expect(withServer(() => m.claimer(target))).resolves.toEqual({outcome: 'empty'})
+      expect(m.checkRuntimes).toHaveBeenCalledWith(['codex'])
+    })
+
+    it('scenario 2: work on Claude and Claude out of quota → stays still and says the engine and the role', async () => {
+      const m = machine({paused: ['claude']})
+      await m.beatWith({data: {engines: {work: 'claude', reviewer: 'codex', supporter: 'codex'}}})
+      const result = await withServer(() => m.claimer(target))
+      expect(result).toMatchObject({outcome: 'unready'})
+      expect((result as {detail: string}).detail).toMatch(/^claude quota exhausted: paused until .+ \(claude serve a questa macchina per lavoro\)$/)
+    })
+
+    it('scenario 3: work and review on Codex, supporter on Claude, Claude out of quota → stays still', async () => {
+      const m = machine({paused: ['claude']})
+      await m.beatWith({data: {engines: {work: 'codex', reviewer: 'codex', supporter: 'claude'}}})
+      const result = await withServer(() => m.claimer(target))
+      expect(result).toMatchObject({outcome: 'unready'})
+      expect((result as {detail: string}).detail).toContain('(claude serve a questa macchina per supporto)')
+    })
+
+    it('scenario 4: a server that names no engines → both checked, stays still as before', async () => {
+      const m = machine({paused: ['claude']})
+      await m.beatWith({data: {}})
+      const result = await withServer(() => m.claimer(target))
+      expect(result).toMatchObject({outcome: 'unready'})
+      expect((result as {detail: string}).detail).toMatch(/^claude quota exhausted: paused until [^(]+$/)
+    })
+
+    it('scenario 5: an unknown engine name → both checked', async () => {
+      const m = machine({paused: ['claude']})
+      await m.beatWith({data: {engines: {work: 'codex', reviewer: 'codex', supporter: 'gemini'}}})
+      await expect(withServer(() => m.claimer(target))).resolves.toMatchObject({outcome: 'unready'})
+    })
+
+    it('scenario 6: a valid beat all on Codex, then an invalid one → the list is gone, both checked', async () => {
+      const m = machine({paused: ['claude']})
+      await m.beatWith({data: {engines: allCodex}})
+      await expect(withServer(() => m.claimer(target))).resolves.toEqual({outcome: 'empty'})
+      await m.beatWith({data: {engines: {work: 'codex', reviewer: 'codex'}}})
+      await expect(withServer(() => m.claimer(target))).resolves.toMatchObject({outcome: 'unready'})
+    })
+
+    it('scenario 7: a valid beat all on Codex, then a failed one → both checked', async () => {
+      const m = machine({paused: ['claude']})
+      await m.beatWith({data: {engines: allCodex}})
+      await expect(withServer(() => m.claimer(target))).resolves.toEqual({outcome: 'empty'})
+      await m.beatWith('network-error')
+      await expect(withServer(() => m.claimer(target))).resolves.toMatchObject({outcome: 'unready'})
+    })
+
+    it('scenario 8: a list older than five minutes no longer narrows the check', async () => {
+      const m = machine({paused: ['claude'], now: () => new Date(Date.now() + 6 * 60_000)})
+      await m.beatWith({data: {engines: allCodex}})
+      await expect(withServer(() => m.claimer(target))).resolves.toMatchObject({outcome: 'unready'})
+    })
+
+    it('scenario 9: all on Codex and Codex out of quota → stays still, naming every role', async () => {
+      const m = machine({paused: ['codex']})
+      await m.beatWith({data: {engines: allCodex}})
+      const result = await withServer(() => m.claimer(target))
+      expect((result as {detail: string}).detail).toContain('(codex serve a questa macchina per lavoro, rilettura, supporto)')
+    })
+
+    it('scenario 10: all on Codex and the pause record unreadable → stays still for the short wait', async () => {
+      const m = machine({corruptPause: true})
+      await m.beatWith({data: {engines: allCodex}})
+      const result = await withServer(() => m.claimer(target))
+      expect(result).toMatchObject({outcome: 'unready'})
+      expect((result as {detail: string}).detail).toMatch(/^agent quota exhausted: paused until [^(]+$/)
+    })
+
+    it('scenario 11: work on Codex, review by OpenCode, supporter off, Claude out of quota → asks for work', async () => {
+      const m = machine({paused: ['claude']})
+      await m.beatWith({data: {engines: {work: 'codex', reviewer: 'opencode', supporter: null}}})
+      await expect(withServer(() => m.claimer(target))).resolves.toEqual({outcome: 'empty'})
+      expect(m.checkRuntimes).toHaveBeenCalledWith(['codex'])
+    })
+
+    it('an engine in use that does not answer is named with its roles', async () => {
+      const m = machine()
+      m.checkRuntimes.mockResolvedValueOnce({ready: false, detail: 'codex: exit 1'} as never)
+      await m.beatWith({data: {engines: {work: 'codex', reviewer: 'opencode', supporter: null}}})
+      await expect(withServer(() => m.claimer(target)))
+        .resolves.toEqual({outcome: 'unready', detail: 'codex: exit 1 (codex serve a questa macchina per lavoro)'})
+    })
   })
 
   it('without an operational host identity no work is asked from anyone', () => {

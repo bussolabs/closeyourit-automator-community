@@ -114,6 +114,24 @@ describe('quota pause store', () => {
     expect(readQuotaPause(new Date(Date.now() + QUOTA_FALLBACK_PAUSE_MS + 1000), file)).toBeNull()
   })
 
+  // CYAU-305 — only the engines this machine uses count; an unreadable record counts whatever they are.
+  it('reads only the pauses of the engines asked for', () => {
+    const file = pauseFile()
+    recordQuotaPause('claude', new Date('2026-11-03T13:00:00.000Z'), now, file)
+    recordQuotaPause('codex', new Date('2026-11-03T12:00:00.000Z'), now, file)
+    expect(readQuotaPause(now, file, ['codex'])).toEqual({runtime: 'codex', until: new Date('2026-11-03T12:00:00.000Z')})
+    expect(readQuotaPause(now, file, [])).toBeNull()
+    const onlyClaude = pauseFile()
+    recordQuotaPause('claude', new Date('2026-11-03T13:00:00.000Z'), now, onlyClaude)
+    expect(readQuotaPause(now, onlyClaude, ['codex'])).toBeNull()
+  })
+
+  it('an unreadable record is a short pause even for an engine list without it', () => {
+    const file = pauseFile()
+    fs.writeFileSync(file, '{not json')
+    expect(readQuotaPause(new Date(), file, ['codex'])?.runtime).toBeNull()
+  })
+
   it('noteQuotaFailure pauses the engine only on a clear quota signal', () => {
     const file = pauseFile()
     expect(noteQuotaFailure('claude', 'exit 1: something broke', now, file)).toBeNull()
@@ -133,8 +151,60 @@ describe('makeQuotaGate', () => {
     const claude = vi.fn(async () => plenty)
     const gate = makeQuotaGate({now: () => now, file, readers: {claude, codex: claude}})
 
-    expect(await gate()).toEqual({ready: false, detail: 'codex quota exhausted: paused until 2026-11-03T12:00:00.000Z'})
+    expect(await gate()).toEqual({ready: false, detail: 'codex quota exhausted: paused until 2026-11-03T12:00:00.000Z', runtime: 'codex'})
     expect(claude).not.toHaveBeenCalled()
+  })
+
+  // CYAU-305 — scenario 1: a machine all on Codex is not stopped by Claude's pause, nor reads Claude's quota.
+  it('a pause of an engine not in use does not stop the claim', async () => {
+    const file = pauseFile()
+    recordQuotaPause('claude', new Date('2026-11-03T12:00:00.000Z'), now, file)
+    const claude = vi.fn(async () => plenty)
+    const codex = vi.fn(async () => ({runtime: 'codex' as const, windows: [{remaining_percent: 80, resets_at: null}]}))
+    const gate = makeQuotaGate({now: () => now, file, readers: {claude, codex}})
+
+    expect(await gate(['codex'])).toEqual({ready: true})
+    expect(claude).not.toHaveBeenCalled()
+    expect(codex).toHaveBeenCalledTimes(1)
+  })
+
+  // Scenario 4: without a list both engines count, as before.
+  it('without a list of engines a pause of either one stops the claim', async () => {
+    const file = pauseFile()
+    recordQuotaPause('claude', new Date('2026-11-03T12:00:00.000Z'), now, file)
+    const gate = makeQuotaGate({now: () => now, file, readers: {claude: async () => plenty, codex: async () => null}})
+
+    expect(await gate()).toEqual({ready: false, detail: 'claude quota exhausted: paused until 2026-11-03T12:00:00.000Z', runtime: 'claude'})
+  })
+
+  // Scenario 9: the engine in use is paused.
+  it('a pause of the engine in use stops the claim', async () => {
+    const file = pauseFile()
+    recordQuotaPause('codex', new Date('2026-11-03T12:00:00.000Z'), now, file)
+    const gate = makeQuotaGate({now: () => now, file, readers: {claude: async () => plenty, codex: async () => null}})
+
+    expect(await gate(['codex'])).toEqual({ready: false, detail: 'codex quota exhausted: paused until 2026-11-03T12:00:00.000Z', runtime: 'codex'})
+  })
+
+  // Scenario 10: which engine is paused is unknown, so the pause holds whatever the engines in use.
+  it('an unreadable pause record stops a machine all on Codex for the short wait', async () => {
+    const file = pauseFile()
+    fs.writeFileSync(file, '{not json')
+    const gate = makeQuotaGate({file, readers: {claude: async () => plenty, codex: async () => null}})
+
+    const result = await gate(['codex'])
+    expect(result).toMatchObject({ready: false, runtime: null})
+    expect((result as {detail: string}).detail).toMatch(/^agent quota exhausted: paused until /)
+  })
+
+  it('low quota of an engine not in use does not stop the claim', async () => {
+    const file = pauseFile()
+    const claude = vi.fn(async () => ({runtime: 'claude' as const, windows: [{remaining_percent: 2, resets_at: null}]}))
+    const gate = makeQuotaGate({now: () => now, file, readers: {claude, codex: async () => null}})
+
+    expect(await gate(['codex'])).toEqual({ready: true})
+    expect(claude).not.toHaveBeenCalled()
+    expect(readQuotaPause(now, file)).toBeNull()
   })
 
   it('quota below 10% stops the claim and pauses until that window resets', async () => {
@@ -147,7 +217,7 @@ describe('makeQuotaGate', () => {
       ]}),
     }})
 
-    expect(await gate()).toEqual({ready: false, detail: 'codex quota below 10% (9% left): paused until 2026-11-03T11:30:00.000Z'})
+    expect(await gate()).toEqual({ready: false, detail: 'codex quota below 10% (9% left): paused until 2026-11-03T11:30:00.000Z', runtime: 'codex'})
     expect(readQuotaPause(now, file)).toEqual({runtime: 'codex', until: new Date('2026-11-03T11:30:00.000Z')})
   })
 

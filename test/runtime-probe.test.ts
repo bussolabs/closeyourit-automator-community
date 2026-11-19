@@ -50,6 +50,26 @@ describe('probeAgentRuntimes', () => {
     const {run} = runWith({claude: {code: null, stdout: ''}, codex: {code: 2, stdout: ''}})
     expect(await probeAgentRuntimes({run, settingsPath: '/g'})).toEqual({ready: false, detail: 'claude: timeout; codex: exit 2'})
   })
+
+  // CYAU-305 — before a claim only the engines this machine uses are asked to answer.
+  it('only Codex asked → Claude is not probed, and its failure does not count', async () => {
+    const {run, calls} = runWith({claude: {code: 1, stdout: ''}, codex: {code: 0, stdout: CODEX_OK}})
+    expect(await probeAgentRuntimes({run, settingsPath: '/g', runtimes: ['codex']})).toEqual({ready: true})
+    expect(calls.map((call) => call.cmd)).toEqual(['codex'])
+  })
+
+  it('only Claude asked and Claude down → not ready, Codex never started', async () => {
+    const {run, calls} = runWith({claude: {code: 2, stdout: ''}, codex: {code: 0, stdout: CODEX_OK}})
+    expect(await probeAgentRuntimes({run, settingsPath: '/g', runtimes: ['claude']})).toEqual({ready: false, detail: 'claude: exit 2'})
+    expect(calls.map((call) => call.cmd)).toEqual(['claude'])
+  })
+
+  // Scenario 12: the diagnosis and the update pass no list, so both are probed as before.
+  it('without a list both engines are probed', async () => {
+    const {run, calls} = runWith({claude: {code: 0, stdout: CLAUDE_OK}, codex: {code: 0, stdout: CODEX_OK}})
+    await probeAgentRuntimes({run, settingsPath: '/g'})
+    expect(calls.map((call) => call.cmd).sort()).toEqual(['claude', 'codex'])
+  })
 })
 
 describe('probeAgentRuntimes with the organization credential (CYAU-224)', () => {
@@ -109,6 +129,28 @@ describe('cachedRuntimeReadiness', () => {
     check.invalidate()
     await check()
     expect(probe).toHaveBeenCalledTimes(2)
+  })
+
+  // CYAU-305 — a green probe of Codex alone says nothing about Claude.
+  it('an outcome holds only for the same engines it probed', async () => {
+    const probe = vi.fn(async (_runtimes: readonly string[]) => ({ready: true as const}))
+    const check = cachedRuntimeReadiness(probe, {now: () => 0})
+
+    await check(['codex'])
+    await check(['codex'])
+    expect(probe).toHaveBeenCalledTimes(1)
+    expect(probe).toHaveBeenLastCalledWith(['codex'])
+
+    await check()
+    expect(probe).toHaveBeenCalledTimes(2)
+    expect(probe).toHaveBeenLastCalledWith(['claude', 'codex'])
+
+    // The order asked does not matter: the same set is the same outcome.
+    await check(['codex', 'claude'])
+    expect(probe).toHaveBeenCalledTimes(2)
+
+    await check(['codex'])
+    expect(probe).toHaveBeenCalledTimes(3)
   })
 
   it('a probe that throws counts as not ready', async () => {
