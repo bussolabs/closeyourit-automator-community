@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.61.0] - 2026-11-19
+
+### Added
+
+- **Il supporter ricontrolla un lavoro prima della produzione.** A ogni giro, dopo le domande e prima dei piani, la macchina chiede al server un rilascio da ricontrollare, legge ticket, modifiche, prova ed errori di staging in sola lettura e risponde solo «prosegui» o «fermati» con un motivo. Il giudizio può solo fermare il rilascio e nel dubbio ferma. Se la sessione fallisce o non dà un giudizio chiaro, non parte niente e il rilascio resta alla persona. Serve il server con il turno dei rilasci: senza, la macchina funziona come prima. (CYAU-265)
+
 ## [0.60.0] - 2026-11-18
 
 ### Added

@@ -149,10 +149,13 @@ actions:
 ```
 
 Sui progetti dove il server ha acceso il supporter, a ogni giro il demone apre una sessione in sola lettura nel
-checkout del progetto: risponde a un giro di domande di chiarimento, poi giudica un piano in attesa di
-approvazione. Di partenza sui piani è solo una prova: il giudizio viene registrato e confrontato con quello della
-persona, e nessun piano viene approvato finché una persona non accende l'approvazione vera sul progetto. Se la
-sessione fallisce, il piano resta alla persona e il giro continua.
+checkout del progetto: risponde a un giro di domande di chiarimento, poi ricontrolla un rilascio in attesa di
+andare in produzione, poi giudica i piani in attesa di approvazione. Sul rilascio legge il ticket, le modifiche,
+la prova in staging e gli errori di staging che manda il server, e risponde solo «prosegui» o «fermati» con un
+motivo: il suo giudizio può solo fermare il rilascio, e nel dubbio ferma. Di partenza sui piani è solo una prova:
+il giudizio viene registrato e confrontato con quello della persona, e nessun piano viene approvato finché una
+persona non accende l'approvazione vera sul progetto. Se la sessione fallisce o non dà un giudizio chiaro, la
+macchina non manda nulla, il rilascio o il piano resta alla persona e il giro continua.
 
 Per un worker che deve iniziare uno specifico ticket, dichiara il target esplicito su un runtime agente
 (`claude` o `codex`, non `shell`). Prima di avviare il runtime, daemon e tick recuperano il dettaglio completo,
