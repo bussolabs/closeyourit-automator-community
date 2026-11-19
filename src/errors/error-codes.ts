@@ -125,6 +125,10 @@ export const ErrorCodes = {
     // The review is blocked: reviewer unavailable/timed out/cancelled/failed, malformed output or blocker
     // finding. Only a reviewer process completed with a valid report can approve. Dedicated exit 3.
     blocked: 'C409-REVIEW-003',
+    // CYAU-335 — the review did not happen because of the MACHINE (quota exhausted, reviewer process down, diff
+    // not acquirable): the work was never judged, so it is not delivered as a rejection and the attempt is given
+    // back. Mirrors `Gate.unavailable`: not a red, work that can be resumed without declaring it defective.
+    unavailable: 'C503-REVIEW-004',
   },
   Cycle: {
     // Invalid cycle gate input (CYAU-21): unknown verdict, negative/non-integer cycle, limit not a

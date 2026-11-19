@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.62.0] - 2026-11-20
+
+### Changed
+
+- **Se due agenti non sono d'accordo decide un terzo agente.** Quando chi scrive il codice e chi lo rilegge non concordano su un rilievo, un terzo motore legge le due posizioni e decide; la decisione e il suo motivo restano scritti sulla lavorazione. Soldi, segreti e cancellazione di dati restano a una persona, come un arbitrato che non si può fare. (CYAU-336)
+- **Un guasto della rilettura non boccia più il lavoro.** Quota finita, revisore caduto o diff non leggibile: la rilettura riprova da sola dopo una breve attesa e, se non riesce, la consegna si ferma col motivo sul ticket e il tentativo torna indietro. I motivi che dipendono dal lavoro restano al server. (CYAU-335)
+
 ## [0.61.0] - 2026-11-19
 
 ### Added

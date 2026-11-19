@@ -18,6 +18,7 @@ import {
   testSlotFor,
 } from '../src/lib/ticket-cycle'
 import {ReviewExecutionEvidenceSchema} from '../src/lib/ticket-evidence'
+import {OVERSIZED_DIFF_FAILURE, ReviewSnapshotExecutionError} from '../src/lib/review-execution'
 import {type PrepareResult} from '../src/lib/workspace'
 import {AutomatorError, ErrorCodes} from '../src/errors/error-codes'
 import {RetryableDeliveryError} from '../src/lib/delivery-errors'
@@ -102,6 +103,9 @@ function provider(runsBase: string, overrides: Record<string, unknown> = {}) {
       status: 'completed' as const, reviewer: selection.reviewer, findings: [], detail: null,
       attestation: {reviewedBaseCommit: 'a'.repeat(40), reviewedSnapshotTree: 'b'.repeat(40), reviewedDiffSha256: 'c'.repeat(64)},
     })),
+    // CYAU-336 — no test ever starts a real arbiter session: unless a test injects one, the third engine is
+    // unreachable, which is the behaviour from before the arbitration existed (the disagreement waits for a person).
+    runArbitrationSession: vi.fn(async () => ({ok: false as const, detail: 'arbiter not available in tests'})),
     gateRunner: vi.fn(() => vi.fn()),
     loadGateAtRef: vi.fn(() => null),
     provisionTools: vi.fn(async () => ({status: 'none' as const, detail: ''})),
@@ -575,6 +579,26 @@ describe('persistent ticket cycle', () => {
     expect(readRun(runPath(input.runId, runsBase)).run?.checkpoints.at(-1)).toMatchObject({
       phase: 'blocked', automation: {reviewExecution: {status: 'failed'}, reviewVerdict: {verdict: 'blocked'}},
     })
+  })
+
+  // CYAU-335 — the reset time of an exhausted quota is for whoever decides what to do with the outcome NOW. The
+  // checkpoint schema is strict: leaving it in there would make the whole run unadoptable after a restart.
+  it('the reviewer quota reset stays out of the checkpoint, which must remain adoptable', async () => {
+    const runsBase = temporaryDirectory()
+    const lifecycle = await provider(runsBase, {
+      executeReview: vi.fn(async ({selection}: {selection: {reviewer: 'claude' | 'codex' | null}}) => ({
+        status: 'failed' as const, reviewer: selection.reviewer, findings: [], attestation: null,
+        detail: 'reviewer terminato con errore (exit 1)', quotaResetAt: new Date('2026-07-14T11:30:00.000Z'),
+      })),
+    }).prepare(input)
+    await lifecycle.beforeRuntime()
+    const execution = result()
+    await lifecycle.afterRuntime(execution.raw, execution.normalized)
+
+    const persisted = readRun(runPath(input.runId, runsBase)).run?.checkpoints.at(-1)?.automation?.reviewExecution
+    expect(persisted).toMatchObject({status: 'failed'})
+    expect(persisted).not.toHaveProperty('quotaResetAt')
+    expect(ReviewExecutionEvidenceSchema.safeParse(persisted).success).toBe(true)
   })
 
   it('diff with secret is blocked before the reviewer prompt/provider', async () => {
@@ -1562,6 +1586,253 @@ describe('buildCrossReviewRetryPrompt', () => {
 
       expect(review.status).toBe('unavailable')
     })
+  })
+})
+
+// CYAU-336 — when the engine that wrote the code and the engine that reread it do not agree on a finding, a
+// third engine decides. A person is left only money, secrets, deleting data and an arbitration that could not run.
+describe('a disagreement decided by a third engine (CYAU-336)', () => {
+  const skillMode = {...input, outcomeOwnedByServer: true, reviewDepth: 'diff' as const}
+  const attestation = {reviewedBaseCommit: 'a'.repeat(40), reviewedSnapshotTree: 'b'.repeat(40), reviewedDiffSha256: 'c'.repeat(64)}
+  const previousFindings = [{id: 1, severity: 'major', title: 'Manca il test del caso vuoto', detail: 'Nessuna prova copre []'}]
+  const paymentFindings = [{id: 1, severity: 'major', title: 'Il pagamento viene addebitato due volte', detail: 'Il totale raddoppia'}]
+  const upheld = (response: string) => vi.fn(async ({selection}: {selection: {reviewer: 'claude' | 'codex' | null}}) => ({
+    status: 'completed' as const, reviewer: selection.reviewer, detail: null, attestation, findings: [],
+    confirmedPreviousFindings: [{id: 1, implementerResponse: response, reason: 'Il diff non lo impedisce e nessun test lo prova.'}],
+  }))
+  const arbiter = (decisions: unknown) =>
+    vi.fn(async (_engine: string, _request: {prompt: string; cwd: string; timeoutMs: number}) =>
+      ({ok: true as const, text: JSON.stringify({decisions})}))
+
+  it('the delivery goes on when the third engine decides the implementer was right', async () => {
+    const runArbitrationSession = arbiter([{id: 1, side: 'implementer', reason: 'Il caso vuoto non è rappresentabile nel tipo.'}])
+    const lifecycle = await provider(temporaryDirectory(), {
+      executeReview: upheld('Il caso vuoto non può capitare.'), runArbitrationSession,
+    }).prepare({...skillMode, previousFindings})
+
+    const review = await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+
+    expect(review.status).toBe('accepted')
+    expect(review.findings).toEqual([])
+    expect(review.summary).toContain('terzo motore: opencode')
+    expect(review.summary).toContain('Il caso vuoto non è rappresentabile nel tipo.')
+    expect(review.summary).not.toContain('serve una persona per decidere')
+    // Neither of the two engines, confined to the ticket's worktree, and holding the diff the reviewer read:
+    // OpenCode arbitrates with no tools at all, so a prompt without the change would decide without the code.
+    expect(runArbitrationSession.mock.calls[0][0]).toBe('opencode')
+    expect(runArbitrationSession.mock.calls[0][1]).toMatchObject({cwd: workspace.worktreePath})
+    expect(runArbitrationSession.mock.calls[0][1].prompt).toContain('untrusted-change')
+  })
+
+  it('the arbiter reads the masked diff, never the one carrying the secret', async () => {
+    const runArbitrationSession = arbiter([{id: 1, side: 'implementer', reason: 'Il caso vuoto non esiste.'}])
+    const lifecycle = await provider(temporaryDirectory(), {
+      resolveReviewDiff: vi.fn(async () => ({
+        baseCommit: 'a'.repeat(40), snapshotTree: 'b'.repeat(40), diffSha256: 'c'.repeat(64),
+        diff: '+ const token = "cyi_ah_ABCDEF"',
+      })),
+      executeReview: upheld('Il caso vuoto non può capitare.'), runArbitrationSession,
+    }).prepare({...skillMode, previousFindings})
+
+    await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+
+    const {prompt} = runArbitrationSession.mock.calls[0][1]
+    expect(prompt).toContain('const token')
+    expect(prompt).not.toContain('cyi_ah_ABCDEF')
+  })
+
+  it('the finding stands when the third engine decides the reviewer was right, and the next attempt reads why', async () => {
+    const lifecycle = await provider(temporaryDirectory(), {
+      executeReview: upheld('Il caso vuoto non può capitare.'),
+      runArbitrationSession: arbiter([{id: 1, side: 'reviewer', reason: 'Il caso vuoto arriva dalla risposta della API.'}]),
+    }).prepare({...skillMode, previousFindings})
+
+    const review = await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+
+    expect(review.status).toBe('changes_requested')
+    expect(review.summary).toContain('decide il revisore')
+    expect(review.findings).toEqual([expect.objectContaining({
+      severity: 'major',
+      detail: expect.stringContaining('conferma il revisore — Il caso vuoto arriva dalla risposta della API.'),
+    })])
+    expect(review.summary).not.toContain('serve una persona per decidere')
+  })
+
+  it('a disagreement about payments stays with a person, with both positions to read', async () => {
+    const runArbitrationSession = arbiter([{id: 1, side: 'implementer', reason: 'Nessuno se ne accorge.'}])
+    const lifecycle = await provider(temporaryDirectory(), {
+      executeReview: upheld('Il secondo addebito è voluto.'), runArbitrationSession,
+    }).prepare({...skillMode, previousFindings: paymentFindings})
+
+    const review = await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+
+    expect(runArbitrationSession).not.toHaveBeenCalled()
+    expect(review.status).toBe('changes_requested')
+    expect(review.summary).toContain('argomento riservato (soldi)')
+    expect(review.summary).toContain('Disaccordo sui rilievi del giro precedente')
+    expect(review.summary).toContain('Implementatore: Il secondo addebito è voluto.')
+    expect(review.findings).toEqual([expect.objectContaining({title: expect.stringContaining('Il pagamento viene addebitato due volte')})])
+  })
+
+  it('an arbitration that could not run leaves the disagreement exactly where it was: with a person', async () => {
+    const lifecycle = await provider(temporaryDirectory(), {
+      executeReview: upheld('Il caso vuoto non può capitare.'),
+    }).prepare({...skillMode, previousFindings})
+
+    const review = await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+
+    expect(review.status).toBe('changes_requested')
+    expect(review.summary).toContain('Arbitrato del disaccordo non eseguito')
+    expect(review.summary).toContain('serve una persona per decidere')
+    expect(review.findings).toHaveLength(1)
+  })
+})
+
+// CYAU-335 — a review that produced no verdict says WHOSE fault it was, so whoever delivers it can tell a
+// fault of the machine (held, the attempt given back) from a reason that belongs to the work (delivered).
+describe('whose fault an unavailable diff review was (CYAU-335)', () => {
+  const skillMode = {...input, outcomeOwnedByServer: true, reviewDepth: 'diff' as const}
+  const attestation = {reviewedBaseCommit: 'a'.repeat(40), reviewedSnapshotTree: 'b'.repeat(40), reviewedDiffSha256: 'c'.repeat(64)}
+  const reviewed = async (over: Record<string, unknown>) => {
+    const lifecycle = await provider(temporaryDirectory(), over).prepare(skillMode)
+    const review = await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+    return {review, fault: lifecycle.lastReviewFault!()}
+  }
+
+  it('a real verdict is nobody\u2019s fault', async () => {
+    const {review, fault} = await reviewed({})
+    expect(review.status).toBe('accepted')
+    expect(fault).toBeNull()
+  })
+
+  it('the deliberate refusals of the diff belong to the work: only who wrote it can remove them', async () => {
+    const {fault} = await reviewed({
+      resolveReviewDiff: vi.fn(async () => {
+        throw new AutomatorError(ErrorCodes.Review.invalidInput,
+          'La review contiene file .gitignore non tracciati che possono nascondere nuovi sorgenti: a/.gitignore', 2)
+      }),
+    })
+    expect(fault).toBe('work')
+  })
+
+  it('an empty diff belongs to the work too: there is nothing left to compare', async () => {
+    const {fault} = await reviewed({
+      resolveReviewDiff: vi.fn(async () => {
+        throw new AutomatorError(ErrorCodes.Review.invalidInput, 'Il diff della review \u00e8 vuoto', 2)
+      }),
+    })
+    expect(fault).toBe('work')
+  })
+
+  it('a Git acquisition that failed or was cancelled is the machine\u2019s', async () => {
+    expect((await reviewed({
+      resolveReviewDiff: vi.fn(async () => { throw new ReviewSnapshotExecutionError('failed') }),
+    })).fault).toBe('transient')
+    expect((await reviewed({
+      resolveReviewDiff: vi.fn(async () => { throw new ReviewSnapshotExecutionError('cancelled') }),
+    })).fault).toBe('cancelled')
+  })
+
+  it('a reviewer that could not even start is the machine\u2019s, and worth another try', async () => {
+    const {fault} = await reviewed({
+      executeReview: vi.fn(async () => { throw new Error('bubblewrap non disponibile') }),
+    })
+    expect(fault).toBe('transient')
+  })
+
+  it('no reviewer available is the machine\u2019s, but not worth another try', async () => {
+    const {fault} = await reviewed({
+      executeReview: vi.fn(async () => ({
+        status: 'unavailable' as const, reviewer: null, findings: [], detail: 'reviewer non disponibile', attestation: null,
+      })),
+    })
+    expect(fault).toBe('unavailable')
+  })
+
+  it('a sign-in that expired mid-session is the machine\u2019s, but no second session beats it', async () => {
+    const {fault} = await reviewed({
+      executeReview: vi.fn(async ({selection}: {selection: {reviewer: 'claude' | 'codex' | null}}) => ({
+        status: 'failed' as const, reviewer: selection.reviewer, findings: [], attestation: null,
+        detail: 'reviewer terminato con errore (exit 1): ERROR: refresh token was revoked (token_revoked)',
+      })),
+    })
+    expect(fault).toBe('unavailable')
+  })
+
+  // A file too big to review does not shrink on a retry, and the attempt must not be given back for it: it is a
+  // condition of the change, and a person has to read it by hand.
+  it('a change carrying a file too big to review belongs to the work', async () => {
+    const {fault} = await reviewed({
+      executeReview: vi.fn(async ({selection}: {selection: {reviewer: 'claude' | 'codex' | null}}) => ({
+        status: 'failed' as const, reviewer: selection.reviewer, findings: [], attestation: null,
+        detail: `a single file diff exceeds the 524288 ${OVERSIZED_DIFF_FAILURE}`,
+      })),
+    })
+    expect(fault).toBe('work')
+  })
+
+  it('a report naming another diff is a reviewer that did not honour the contract, not a no to the work', async () => {
+    const {review, fault} = await reviewed({
+      executeReview: vi.fn(async ({selection}: {selection: {reviewer: 'claude' | 'codex' | null}}) => ({
+        status: 'completed' as const, reviewer: selection.reviewer, findings: [], detail: null,
+        attestation: {...attestation, reviewedDiffSha256: 'd'.repeat(64)},
+      })),
+    })
+    expect(review.status).toBe('unavailable')
+    expect(fault).toBe('transient')
+  })
+
+  // AC-1 — with the engine paused the next round does not even ask for work before the reset: that is how the
+  // review waits for the quota instead of spinning on it.
+  it('an exhausted reviewer quota pauses that engine until the reset', async () => {
+    const stateDirectory = temporaryDirectory()
+    vi.stubEnv('AUTOMATOR_STATE_DIR', stateDirectory)
+    const resetAt = new Date('2026-07-14T11:30:00.000Z')
+    try {
+      const {fault} = await reviewed({
+        executeReview: vi.fn(async ({selection}: {selection: {reviewer: 'claude' | 'codex' | null}}) => ({
+          status: 'failed' as const, reviewer: selection.reviewer, findings: [], attestation: null,
+          detail: 'reviewer terminato con errore (exit 1)', quotaResetAt: resetAt,
+        })),
+      })
+      expect(fault).toBe('quota')
+      // The implementer is codex, so the cross reviewer — and the paused engine — is claude.
+      expect(JSON.parse(fs.readFileSync(path.join(stateDirectory, 'quota-pause.json'), 'utf8')))
+        .toEqual({claude: resetAt.toISOString()})
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('a reviewer out of quota pauses nothing when it is not an engine of this machine', async () => {
+    const stateDirectory = temporaryDirectory()
+    vi.stubEnv('AUTOMATOR_STATE_DIR', stateDirectory)
+    try {
+      const {fault} = await reviewed({
+        executeReview: vi.fn(async () => ({
+          status: 'failed' as const, reviewer: 'opencode' as const, findings: [], attestation: null,
+          detail: 'reviewer terminato con errore (exit 1)', quotaResetAt: new Date('2026-07-14T11:30:00.000Z'),
+        })),
+      })
+      expect(fault).toBe('quota')
+      expect(fs.existsSync(path.join(stateDirectory, 'quota-pause.json'))).toBe(false)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it('reports the fault of the LAST review only: a second try that works inherits nothing', async () => {
+    const executeReview = vi.fn()
+      .mockResolvedValueOnce({status: 'failed', reviewer: 'claude', findings: [], detail: 'exit 1', attestation: null})
+      .mockResolvedValue({status: 'completed', reviewer: 'claude', findings: [], detail: null, attestation})
+    const lifecycle = await provider(temporaryDirectory(), {executeReview}).prepare(skillMode)
+
+    await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+    expect(lifecycle.lastReviewFault!()).toBe('transient')
+
+    const second = await lifecycle.reviewWorkflowDelivery!({code: 'CYAU-35', state: 'delivered'})
+    expect(second.status).toBe('accepted')
+    expect(lifecycle.lastReviewFault!()).toBeNull()
   })
 })
 

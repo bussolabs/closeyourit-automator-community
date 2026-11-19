@@ -8,11 +8,18 @@ import {parse as parseYaml} from 'yaml'
 import {countCycles, evaluateCycle} from './cycle'
 import {
   executeChunkedCrossReview,
+  isOversizedDiffFailure,
   resolveReviewDiff,
+  ReviewSnapshotExecutionError,
   type ConfirmedPreviousFinding,
   type ReviewExecutionResult,
   type ResolvedReviewDiff,
 } from './review-execution'
+import {isQuotaRuntime, recordQuotaPause} from './agent-quota'
+import {arbitrateDisagreement, type ArbitrationRequest} from './review-arbitration'
+import {reviewFaultOfExecutionStatus, type ReviewFaultKind} from './review-fault'
+import {type SupporterRun} from './supporter'
+import {isRuntimeCredentialFailure} from './runtime-failure'
 import {type PreviousReviewFinding} from './ticket-coordinator'
 import {provisionRepoTools, type ToolsOutcome} from './repo-tools'
 import {
@@ -229,6 +236,13 @@ export interface TicketRunLifecycle {
    * run the server still considers open.
    */
   reviewWorkflowDelivery?(result: Record<string, unknown>, signal?: AbortSignal): Promise<AttemptDelivery['review']>
+  /**
+   * CYAU-335 — why the last `reviewWorkflowDelivery` produced no verdict, `null` when it did. A fault of the
+   * MACHINE (quota, reviewer down, diff not acquirable) must not travel to the server as a rejection of the
+   * work: the runner reads it here to hold the delivery and give the attempt back. Present wherever the diff
+   * review is.
+   */
+  lastReviewFault?(): ReviewFaultKind | null
   /** Resumes only gate/review already started after a crash, without needlessly relaunching the implementer. */
   resumeAfterInterruption?(signal?: AbortSignal): Promise<TicketRunAfterResult | null>
   beforeRuntime(): Promise<void>
@@ -268,6 +282,8 @@ export interface TicketCycleOptions {
   reviewerAvailability?: RuntimeAvailability
   selectReviewer?: (implementer: RuntimeId, mode?: ReviewMode, reviewer?: ReviewerId) => ReviewerSelection
   resolveReviewDiff?: (base: string, cwd: string, signal?: AbortSignal) => Promise<ResolvedReviewDiff>
+  /** CYAU-336 — the third engine's read-only session, which decides a disagreement between the other two. */
+  runArbitrationSession?: SupporterRun
   executeReview?: (input: {
     implementer: RuntimeId
     selection: ReviewerSelection
@@ -385,6 +401,9 @@ export function unknownConfirmedIds(
  * CYAU-237 — when the reviewer upholds a finding the implementer contested, the summary delivered to the server puts
  * the two positions side by side, so a person understands the disagreement without opening the code. Only ids of
  * findings the reviewer was actually shown count: an invented id has no previous position to set against.
+ *
+ * CYAU-336 — it now receives only the disagreements a person really has to decide (the arbitration's `toPerson`):
+ * the ones a third engine decided need nobody, and its decision is written next to this summary instead.
  */
 export function disagreementSummary(
   previous: readonly PreviousReviewFinding[] | undefined,
@@ -482,6 +501,16 @@ export function buildCrossReviewRetryPrompt(summary: string): string {
   ].join('\n\n'))
 }
 
+/**
+ * CYAU-335 — what of a review outcome goes into the CHECKPOINT. `quotaResetAt` is for whoever decides what to
+ * do with the outcome now, not for the archive, and the checkpoint schema is strict: an unknown field would make
+ * the whole run unadoptable after a restart (`ticket-run-adoption.ts`), which is the opposite of what it is for.
+ */
+function reviewEvidenceOf(execution: ReviewExecutionResult): ReviewExecutionResult {
+  const {quotaResetAt: _quotaResetAt, ...evidence} = execution
+  return evidence
+}
+
 function attestationMatches(execution: ReviewExecutionResult, snapshot: ResolvedReviewDiff): boolean {
   const attestation = execution.attestation
   return execution.status === 'completed' && attestation !== null &&
@@ -521,6 +550,10 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
     selectServerReviewer(implementer, {availability: options.reviewerAvailability, mode, reviewer}))
   const resolveDiff = options.resolveReviewDiff ?? ((base, cwd, signal) =>
     resolveReviewDiff(base, cwd, {signal, timeoutMs: Math.min(reviewTimeoutMs, 30_000)}))
+  const arbitrate = (request: ArbitrationRequest) => arbitrateDisagreement(request, {
+    run: options.runArbitrationSession,
+    availability: options.reviewerAvailability,
+  })
   const executeReview = options.executeReview ?? (async ({implementer, selection, mode, reviewerModel, snapshot, base, requirements, testEvidence, previousFindings, cwd, timeoutMs, signal}) =>
     executeChunkedCrossReview({
       implementer,
@@ -701,6 +734,10 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
 
       // Missing = `diff`: the safe default is the deepest read, never the most convenient.
       const reviewDepth: ReviewDepth = input.reviewDepth ?? 'diff'
+      // CYAU-335 — the reason the last diff review produced no verdict, for whoever delivers it. It is kept here
+      // and not in the returned review because that object is the server's payload: a field of ours would travel
+      // with it, and what the server must receive is unchanged.
+      let reviewFault: ReviewFaultKind | null = null
 
       let postRuntime: Promise<TicketRunAfterResult> | null = null
 
@@ -973,7 +1010,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         const evidence: TicketAutomationEvidence = {
           gate,
           gatedSnapshot: gateEvidence.gatedSnapshot,
-          reviewExecution: execution,
+          reviewExecution: reviewEvidenceOf(execution),
           reviewVerdict: verdict,
           cycleDecision: decision,
         }
@@ -1020,11 +1057,19 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         // written, a sound one was rejected because it was terse. Here the reviewer receives the diff, and the three
         // fingerprints say exactly which one: if something touches the work after the read they do not match.
         ...(reviewDepth === 'diff' ? {
+          lastReviewFault: () => reviewFault,
           async reviewWorkflowDelivery(result: Record<string, unknown>, signal?: AbortSignal) {
-            const nonDisponibile = (motivo: string): AttemptDelivery['review'] =>
-              ({status: 'unavailable' as const, summary: `Rilettura sul diff non eseguibile: ${motivo}.`, depth: 'diff' as const})
+            // CYAU-335 — every exit declares WHOSE fault it was: `work` keeps travelling to the server as it
+            // always did, the others hold the delivery and spare the attempt. The fault of this call only: a
+            // retry that succeeds must not inherit the previous one.
+            reviewFault = null
+            const nonDisponibile = (motivo: string, fault: ReviewFaultKind): AttemptDelivery['review'] => {
+              reviewFault = fault
+              return {status: 'unavailable' as const, summary: `Rilettura sul diff non eseguibile: ${motivo}.`, depth: 'diff' as const}
+            }
             const implementer = input.runtime
-            if (!isRuntimeId(implementer)) return nonDisponibile('runtime implementer non revisionabile')
+            // Not the work's fault and not worth a retry either: this run was handed a runtime nobody can review.
+            if (!isRuntimeId(implementer)) return nonDisponibile('runtime implementer non revisionabile', 'unavailable')
             const previousFindings = input.previousFindings?.length ? input.previousFindings : undefined
 
             let snapshot: ResolvedReviewDiff
@@ -1040,7 +1085,20 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
               // Empty diff included (`resolveDiff` rejects it): after a successful release the changes are no
               // longer pending, they are already in. There is nothing to compare, and declaring it
               // "failed" made a perfectly successful run look broken.
-              return nonDisponibile(error instanceof Error ? error.message : 'diff non attestabile')
+              //
+              // CYAU-335 — whose fault the diff is. Git that timed out, was cancelled or failed is the machine's
+              // (and retryable). The deliberate refusals — an empty diff, untracked files, an untracked
+              // .gitignore that could hide new sources, a dirty submodule, special index flags — are the WORK's:
+              // they are conditions of this very working copy, so a retry on it gives the same answer forever and
+              // the one who can remove them is whoever wrote it. Those keep going to the server, as before.
+              return nonDisponibile(
+                error instanceof Error ? error.message : 'diff non attestabile',
+                error instanceof ReviewSnapshotExecutionError
+                  ? reviewFaultOfExecutionStatus(error.status)
+                  : error instanceof AutomatorError && error.code === ErrorCodes.Review.invalidInput
+                    ? 'work'
+                    : 'transient',
+              )
             }
 
             const selection = chooseReviewer(implementer, input.reviewMode, input.reviewer)
@@ -1067,22 +1125,67 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
                 signal: signal ?? input.signal,
               })
             } catch {
-              return nonDisponibile('reviewer non avviabile')
+              return nonDisponibile('reviewer non avviabile', 'transient')
             }
             if (execution.status !== 'completed') {
-              return nonDisponibile(`esito reviewer ${execution.status}${execution.detail ? ` (${execution.detail})` : ''}`)
+              // CYAU-335 — an exhausted quota pauses THAT engine until the reset: the next round does not even ask
+              // for work before then, which is how the review waits instead of spinning. OpenCode reviews on
+              // OpenRouter, not on the machine's accounts, so there is nothing of the machine's to pause.
+              const quotaResetAt = execution.quotaResetAt
+              if (quotaResetAt && isQuotaRuntime(execution.reviewer)) {
+                try {
+                  recordQuotaPause(execution.reviewer, quotaResetAt, now())
+                } catch {
+                  // Not recorded: the quota read before the next claim still sees the exhausted account.
+                }
+              }
+              // Two failures the status alone gets wrong. A change carrying a file too big to review is a
+              // condition of the WORK: it goes to the server like the other deliberate refusals, because no
+              // retry shrinks that file and a person has to read it by hand. A sign-in that expired mid-session
+              // is the machine's, but no second session beats it either: neither is worth a retry.
+              const fault: ReviewFaultKind = quotaResetAt
+                ? 'quota'
+                : isOversizedDiffFailure(execution.detail)
+                  ? 'work'
+                  : isRuntimeCredentialFailure(execution.detail ?? '')
+                    ? 'unavailable'
+                    : reviewFaultOfExecutionStatus(execution.status)
+              return nonDisponibile(
+                `esito reviewer ${execution.status}${execution.detail ? ` (${execution.detail})` : ''}`,
+                fault,
+              )
             }
+            // A report that names a diff other than the one handed over, or that upholds findings never shown, is a
+            // reviewer that did not honour the contract: the work was not judged, and a second read can honour it.
             if (!attestationMatches(execution, snapshot)) {
-              return nonDisponibile('attestazione reviewer non corrispondente al diff letto')
+              return nonDisponibile('attestazione reviewer non corrispondente al diff letto', 'transient')
             }
             const unknownIds = unknownConfirmedIds(previousFindings, execution.confirmedPreviousFindings)
             if (unknownIds.length > 0) {
-              return nonDisponibile(`rapporto reviewer non valido, conferma rilievi precedenti mai ricevuti (id ${unknownIds.join(', ')})`)
+              return nonDisponibile(
+                `rapporto reviewer non valido, conferma rilievi precedenti mai ricevuti (id ${unknownIds.join(', ')})`,
+                'transient',
+              )
             }
             const attestation = execution.attestation!
+            // CYAU-336 — a disagreement between the two engines is decided by a THIRD one, not by a person. The
+            // arbitration runs before the verdict: an upheld finding the arbiter overrules never enters it, so the
+            // delivery goes on, and one it confirms keeps blocking with the decision attached for the next attempt.
+            // Money, secrets and deleting data — and any arbitration that could not happen at all — stay with a
+            // person, with the same summary as before this ticket.
+            const arbitration = await arbitrate({
+              previous: previousFindings,
+              confirmed: execution.confirmedPreviousFindings,
+              implementer,
+              reviewer: execution.reviewer,
+              cwd: prepared.worktreePath,
+              // The same masked diff the reviewer read: the third engine may have no tools to open a file with.
+              diff: snapshot.diff,
+              signal: signal ?? input.signal,
+            })
             const findings = [
               ...execution.findings,
-              ...upheldPreviousFindings(previousFindings, execution.confirmedPreviousFindings, execution.findings),
+              ...upheldPreviousFindings(previousFindings, arbitration.standing, execution.findings),
             ]
 
             const verdict = decideVerdict({
@@ -1102,7 +1205,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
               : 'changes_requested' as const
             return {
               status,
-              summary: [verdict.reasons.join(' '), disagreementSummary(previousFindings, execution.confirmedPreviousFindings)]
+              summary: [verdict.reasons.join(' '), arbitration.record, disagreementSummary(previousFindings, arbitration.toPerson)]
                 .filter(Boolean).join('\n\n'),
               findings,
               depth: 'diff' as const,

@@ -336,6 +336,32 @@ Ogni comando supporta `--json`.
   finestra non chiede lavoro fino al reset. Se la lettura della quota non riesce, si lavora comunque. Il battito
   manda la quota in `agent_quota`; il server la ignora finché non la conosce, e l'attempt resta chiuso come
   interrotto finché il server non accetta uno stato «in pausa fino a».
+- Una **rilettura che non dà un verdetto per colpa della macchina** non è una bocciatura del lavoro (CYAU-335,
+  `src/lib/review-fault.ts`). Quota del revisore esaurita, processo del revisore caduto o in timeout, diff non
+  acquisibile da Git, accesso scaduto, rapporto che nomina un altro diff: la rilettura viene ritentata UNA volta
+  dopo 30 secondi — solo per i guasti che un secondo tentativo può battere, quindi non per la quota, non per un
+  accesso revocato e non per un revisore assente — e poi la consegna si FERMA. Niente arriva al server come
+  `review: unavailable`: il motivo va sul tentativo (che riapre subito la fase in coda) e il tentativo contato
+  alla presa in carico viene restituito, con lo stesso tetto di 3 delle pause di quota. Una quota esaurita mette
+  in pausa quel motore fino al reset, così al giro dopo la rilettura aspetta davvero invece di girare a vuoto.
+  I motivi che dipendono dal LAVORO — diff vuoto, file non tracciati, `.gitignore` non tracciato che può
+  nascondere sorgenti, submodule sporco — continuano ad arrivare al server come prima: nessun ritentativo li
+  cambia e solo chi ha scritto il codice li può togliere. Resta aperto lato server: lo stato `failed` è ancora
+  contato dal tetto dei tentativi della fase, quindi due guasti tecnici di fila fermano comunque la lavorazione.
+- Un **disaccordo fra i due motori** su un rilievo del giro precedente lo decide un **terzo motore**, non una
+  persona (CYAU-336, `src/lib/review-arbitration.ts`). Il terzo motore è quello che non ha né scritto né riletto
+  (prima quello che il server dichiara per il supporto, se è un terzo) e gira nella sessione chiusa in sola
+  lettura del supporter, dentro il worktree del ticket: riceve come dati non fidati le due posizioni **e il diff
+  mascherato che ha letto il revisore** — OpenCode arbitra senza alcuno strumento, quindi senza il diff nel prompt
+  deciderebbe senza vedere il codice — e decide rilievo per rilievo. Oltre 256 KB il diff viene troncato e
+  l'arbitro lo sa: se non vede quello che gli serve deve chiedere una persona. Se dà ragione all'implementatore il rilievo non blocca più e la consegna prosegue; se dà
+  ragione al revisore il rilievo resta bloccante con il motivo dell'arbitrato attaccato, che il tentativo
+  successivo legge. La decisione e il suo motivo viaggiano nel riassunto della rilettura consegnato al server.
+  Restano a una persona, con lo stesso riassunto di prima: i disaccordi che toccano **soldi, segreti o
+  cancellazione di dati** (il vocabolario riservato del server, `Agents::Supporters::ReservedTopics`), quelli
+  che il terzo motore non sa decidere o non decide affatto, e ogni arbitrato impossibile — nessun terzo motore
+  sulla macchina, sessione fallita, risposta fuori formato. L'arbitro può solo togliere un rilievo confermato
+  del giro precedente: i rilievi del giro corrente non li vede e non li tocca.
 - Il battito manda anche il **nome attuale della macchina** in `hostname` (CYAU-304), letto a ogni invio: una
   macchina rinominata lo comunica al battito successivo, senza riavviare il servizio né registrarsi di nuovo. Un
   nome vuoto o illeggibile non viene mandato. Il battito ridotto inviato mentre il servizio è bloccato non lo

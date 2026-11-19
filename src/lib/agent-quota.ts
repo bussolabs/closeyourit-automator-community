@@ -27,6 +27,14 @@ const RUNTIMES: readonly QuotaRuntime[] = ['claude', 'codex']
 // quota" is billing: neither resets by itself, and treating them as pauses would retry a ticket forever (R-1).
 const QUOTA_SIGNAL = /hit your (?:usage )?limit|usage limit reached|usage_limit_reached|(?:\d+-hour|weekly|session) limit reached/i
 
+/**
+ * True for an engine whose quota belongs to THIS machine's accounts. OpenCode reviews through OpenRouter, so it
+ * consumes neither, and pausing the machine for it would stop work no limit was reached on.
+ */
+export function isQuotaRuntime(value: unknown): value is QuotaRuntime {
+  return typeof value === 'string' && (RUNTIMES as readonly string[]).includes(value)
+}
+
 export interface QuotaLimit {
   resetAt: Date
   /** False when the output named no usable time and the fixed prudent wait was used. */

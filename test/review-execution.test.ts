@@ -1808,6 +1808,31 @@ describe('executeCrossReview', () => {
     expect(await executeCrossReview(request, {spawn, fs: fakeReviewFs()})).toMatchObject({status: 'malformed', findings: []})
   })
 
+  // CYAU-335 — an exhausted quota is a pause of the machine. The reset time travels with the outcome, because
+  // only the engine's own output says it and it is lost once the result is reduced to a status.
+  describe('reviewer out of quota (CYAU-335)', () => {
+    it('reads the reset time from the stderr of a failed reviewer', async () => {
+      const {spawn} = makeSpawn([{code: 1, stderr: 'ERROR: usage limit reached, try again in 30 minutes\n'}])
+      const result = await executeCrossReview(request, {spawn, fs: fakeReviewFs()})
+      expect(result.status).toBe('failed')
+      expect(result.quotaResetAt?.getTime()).toBeGreaterThan(Date.now() + 25 * 60_000)
+      expect(result.quotaResetAt?.getTime()).toBeLessThanOrEqual(Date.now() + 30 * 60_000)
+    })
+
+    it('reads it from the stdout of a reviewer that answered the limit instead of a report', async () => {
+      const {spawn} = makeSpawn([{code: 0, stdout: 'Claude AI usage limit reached, try again in 45 minutes'}])
+      const result = await executeCrossReview(request, {spawn, fs: fakeReviewFs()})
+      expect(result.status).toBe('malformed')
+      expect(result.quotaResetAt?.getTime()).toBeGreaterThan(Date.now() + 40 * 60_000)
+    })
+
+    it('an ordinary failure carries no reset time: a pause is never invented', async () => {
+      const {spawn} = makeSpawn([{code: 1, stderr: 'ERROR: stream disconnected before completion\n'}])
+      expect(await executeCrossReview(request, {spawn, fs: fakeReviewFs()})).toMatchObject({status: 'failed'})
+      expect((await executeCrossReview(request, {spawn, fs: fakeReviewFs()})).quotaResetAt).toBeUndefined()
+    })
+  })
+
   it('timeout terminates the review and cannot approve', async () => {
     vi.useFakeTimers()
     const {spawn} = makeSpawn([{hang: true}])

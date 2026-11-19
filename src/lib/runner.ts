@@ -39,7 +39,7 @@ import {type ExecutionPhase} from './phase-profile'
 import {resolveFlowConcurrency, runFlowPool} from './flow-engine'
 import {type PreflightStop} from './heartbeat'
 import {skillsModeEnabled} from './paths'
-import {describeRuntimeFailure} from './runtime-failure'
+import {describeRuntimeFailure, isRuntimeCredentialFailure} from './runtime-failure'
 import {agentRuntimeReadiness} from './runtime-probe'
 import {detectQuotaLimit, noteQuotaFailure} from './agent-quota'
 import {
@@ -53,6 +53,14 @@ import {
 } from './agent-conversation'
 import {redactSecrets} from './secret-redaction'
 import {type ReviewMode} from './review'
+import {
+  isTechnicalReviewFault,
+  REVIEW_MAX_ATTEMPTS,
+  REVIEW_RETRY_WAIT_MS,
+  reviewFaultReason,
+  shouldRetryReviewFault,
+  type ReviewFaultKind,
+} from './review-fault'
 import {liveEventsFromClaude} from './live-events'
 import {openLiveSender, type LiveSender} from './live-sender'
 import {openLiveSpool, type LiveRecord} from './live-spool'
@@ -143,8 +151,12 @@ export interface ActionPreflightDecision {
  */
 export interface TicketAttemptSink {
   recordSessionCost(stdout: string): void
-  /** CYAU-275: once the session is over — `true` when it stopped on a quota limit, which gives the attempt back. */
-  settleQuotaPause?(quotaHit: boolean): void
+  /**
+   * CYAU-275: once the session is over — `true` when it stopped on a quota limit, which gives the attempt back.
+   * CYAU-335: `true` as well when a review the MACHINE could not run held the delivery; same capped counter,
+   * because in both cases the work was never judged and must not pay for it.
+   */
+  settleQuotaPause?(paused: boolean): void
 }
 
 export interface WorkflowDelivery {
@@ -189,6 +201,11 @@ export interface WorkflowDelivery {
    * report: there were two reads and the one that counted was from whoever had seen nothing.
    */
   reviewOnDiff?(result: Record<string, unknown>, signal?: AbortSignal): Promise<AttemptDelivery['review']>
+  /**
+   * CYAU-335 — why the last `reviewOnDiff` produced no verdict, `null` when it did. Missing: the previous
+   * behaviour applies, the unavailable review travels with the delivery and the server judges it.
+   */
+  lastReviewFault?(): ReviewFaultKind | null
 }
 
 /**
@@ -302,6 +319,11 @@ export interface RunOnceOptions {
   heartbeat?: (ok: boolean, stops?: PreflightStop[]) => Promise<void>
   /** Injectable state writer to verify the fail-closed durability boundary. */
   persistState?: typeof saveState
+  /**
+   * CYAU-335 — the wait before trying again a review the machine could not run. Injected by the tests so they do
+   * not really wait; by default an abortable sleep, so a shutdown does not have to wait it out.
+   */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   /** Runtime for non-claude/shell actions (default `SpawnRuntime`): abstracts the provider behind the common contract. */
   runtime?: AgentRuntime
   /** Runtime for claude actions (default `ClaudeRuntime`): guardrail gate + claude output interpretation. */
@@ -659,9 +681,25 @@ async function executeRuntime(
   }
 }
 
+/** Abortable wait: a shutdown resolves it right away instead of making the service sit it out. */
+function waitFor(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer)
+      resolve()
+    }, {once: true})
+  })
+}
+
 export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
   const label = opts.label ?? 'automator'
   const persistState = opts.persistState ?? saveState
+  const sleep = opts.sleep ?? waitFor
   if (!acquire(opts.lockFile, label, opts.isAlive)) {
     return {skipped: true, executed: [], seeded: [], scheduleErrors: [], pruned: 0, stateQuarantined: null, preflightStopped: [], flowFailures: []}
   }
@@ -1007,6 +1045,8 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       let result!: RunResult
       let agentResult!: AgentRunResult
       let deliveryRecord: DeliveryRecord | undefined
+      // CYAU-335 — a review the machine could not run held the delivery: the attempt goes back, like a quota pause.
+      let reviewFaultHeld = false
       let liveSender: LiveSender | undefined
       try {
         let retryPrompt = recoveredRetryPrompt ?? ticketRun?.retryPrompt
@@ -1320,81 +1360,157 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
               // really opens the changes, and that single read remains. Where there are no changes to open
               // the session on the report remains, but with criteria asking for what a release can
               // really show.
-              let payloadReview: AttemptDelivery['review']
+              // Definitely assigned: the loop below always produces an outcome before leaving.
+              let payloadReview!: AttemptDelivery['review']
               // The WHY of an unavailable review: without it, the daemon wrote only `review=unavailable`
               // and to find a revoked login one had to open the review log on the server.
               let reviewDetail: string | undefined
-              // CYAU-187 — the review OF THE CHANGES is asked only of whoever wrote the
-              // changes. Whoever writes the code may conclude there is no code to write (a
-              // container ticket) or that the work was already delivered by a previous session: in
-              // both cases there is nothing to compare in the working copy, the diff review
-              // comes back as not runnable and the delivery is rejected — that is, the agent's correct
-              // judgment never reaches the server, and the ticket stays where it is.
+              // CYAU-335 — whose fault it was when the review produced no verdict. `work` keeps the previous
+              // behaviour (it travels with the delivery and the server judges it); every other kind is a fault of
+              // the MACHINE and holds the delivery. Whichever branch produced the outcome sets it.
+              let reviewFault: ReviewFaultKind = 'work'
+              // A reviewer that died, timed out or answered outside the format gets ONE more try, after a short
+              // wait: most of them pass the second time and the work loses nothing. The wait stays short on
+              // purpose — the session holds the ticket's lease while it waits — and everything longer than this is
+              // waited for BETWEEN rounds, with the phase back in the queue.
+              for (let reviewTry = 1; reviewTry <= REVIEW_MAX_ATTEMPTS; reviewTry += 1) {
+                if (reviewTry > 1) {
+                  appendLogFooter(raw.logPath, {
+                    review_retry: reviewTry,
+                    review_fault: reviewFault,
+                    review_detail: reviewDetail ?? '-',
+                  })
+                  await sleep(REVIEW_RETRY_WAIT_MS, lifecycleSignal)
+                  if (lifecycleSignal?.aborted) break
+                }
+                reviewFault = 'work'
+                reviewDetail = undefined
+                // CYAU-187 — the review OF THE CHANGES is asked only of whoever wrote the
+                // changes. Whoever writes the code may conclude there is no code to write (a
+                // container ticket) or that the work was already delivered by a previous session: in
+                // both cases there is nothing to compare in the working copy, the diff review
+                // comes back as not runnable and the delivery is rejected — that is, the agent's correct
+                // judgment never reaches the server, and the ticket stays where it is.
+                //
+                // It is the same unanswerable question of CYAU-111 and CYAU-139, here decided by the
+                // STATE instead of the phase. Seen in production on 30/08 on CLRA-16: the plan needed
+                // no code because it was a container, rejected because the review diff was empty.
+                //
+                // The review does not disappear: the one on the RESULT stays, because a declaration must
+                // be judged anyway — and its criteria for these two states already exist
+                // (`reviewCriteria`). Whoever really wrote code keeps going through the diff.
+                if (workflowDelivery.reviewOnDiff && hasDiffToReview(structured)) {
+                  payloadReview = await workflowDelivery.reviewOnDiff(structured, lifecycleSignal)
+                  if (payloadReview.status === 'unavailable') {
+                    reviewDetail = redactSecrets(payloadReview.summary).slice(0, 200)
+                    // Whoever ran the review knows whose fault it was. Without the accessor nothing is assumed:
+                    // the outcome travels with the delivery exactly as it did before CYAU-335.
+                    reviewFault = workflowDelivery.lastReviewFault?.() ?? 'work'
+                  }
+                } else if (reviewerRuntimeId === 'opencode') {
+                  // CYAU-228 — OpenCode is not an action runtime: it judges the result in its confined session,
+                  // with no tools, from the same prompt the Claude and Codex sessions receive.
+                  const reviewed = await runOpencodeResultReview({
+                    prompt: buildWorkflowReviewPrompt(workflowDelivery.executionPhase, structured),
+                    model: workflowDelivery.reviewerModel,
+                    cwd: ticketRun?.authorizedCwd ?? effectiveAction.cwd ?? process.cwd(),
+                    timeoutMs: (effectiveAction.timeout ?? 300) * 1000,
+                    signal: lifecycleSignal,
+                  })
+                  // The review too is a session paid on the ticket (CYAU-155).
+                  if (reviewed.ok) chargeSession(reviewed.stdout)
+                  const review = reviewed.ok ? parseWorkflowReview(reviewed.text, workflowDelivery.executionPhase) : null
+                  if (!review) {
+                    reviewDetail = reviewed.ok ? 'invalid reviewer output' : reviewed.detail
+                    // A confined session that did not answer, or answered outside the format: the machine's
+                    // fault, and asking again can get it right. OpenCode reviews on OpenRouter, so no account
+                    // of this machine is paused for it.
+                    reviewFault = (lifecycleSignal?.aborted ?? false) ? 'cancelled' : 'transient'
+                  }
+                  payloadReview = {
+                    ...(review ?? {status: 'unavailable', summary: `Reviewer unavailable: ${reviewDetail}.`}),
+                    depth: 'result',
+                  }
+                } else {
+                  const reviewerRuntime = reviewerRuntimeId === 'codex' ? codexRuntime : claudeRuntime
+                  const reviewPrompt = buildWorkflowReviewPrompt(workflowDelivery.executionPhase, structured)
+                  // `cwd` must be copied like schedule/timeout/containment: under the queue the action receives the ticket's
+                  // authorized cwd (line ~624) and the executor rejects before the spawn a session whose
+                  // cwd does not match the authorized one (C400-EXEC-004). Without it, the reviewer started from the playbook
+                  // root, did not start at all, and EVERY delivery was rejected for an unavailable review.
+                  const reviewerAction: Action = reviewerRuntimeId === 'codex'
+                    ? {type: 'codex', run: reviewPrompt, schedule: effectiveAction.schedule, sandbox: 'read-only',
+                        cwd: effectiveAction.cwd, timeout: effectiveAction.timeout, enabled: true, catch_up: false,
+                        containment: effectiveAction.containment}
+                    : {type: 'claude', run: reviewPrompt, schedule: effectiveAction.schedule, permission_mode: 'plan',
+                        allowed_tools: ['Read', 'Glob', 'Grep'], cwd: effectiveAction.cwd, timeout: effectiveAction.timeout,
+                        enabled: true, catch_up: false, containment: effectiveAction.containment}
+                  const reviewed = await reviewerRuntime.execute(`${name}review`, reviewerAction, {
+                    playbookDir: opts.playbookDir, logDir: opts.logDir, logName: `${logName}review`,
+                    now: opts.now, spawn: opts.spawn,
+                    secrets: opts.secrets, clock: opts.clock, signal: lifecycleSignal,
+                    authorizedCwd: ticketRun?.authorizedCwd ?? opts.authorizedCwds?.[name],
+                  }).result
+                  // The review too is a session paid on the ticket (CYAU-155). A reviewer that does not expose its
+                  // own cost simply adds nothing: never an inferred cost.
+                  chargeSession(reviewed.stdout)
+                  const review = reviewed.status === 'success' ? parseWorkflowReview(reviewed.stdout, workflowDelivery.executionPhase) : null
+                  if (!review) {
+                    const reviewerLog = reviewed.status === 'success' ? '' : readLogTail(reviewed.logPath)
+                    reviewDetail = describeRuntimeFailure(reviewerAction.type, reviewerLog, reviewed.errorCode)
+                    // CYAU-275 — the reviewer's quota is the machine's too: pause it until the reset.
+                    const quotaResetAt = noteQuotaFailure(reviewerAction.type, reviewerLog, opts.now)
+                    // CYAU-335 — with the engine paused the review waits for the reset OUTSIDE the session: the
+                    // claim gate reads the pause and takes no work before then, which is waiting instead of
+                    // spinning. Anything else is a session that died or answered outside the format: one more try.
+                    // A sign-in that expired or was revoked is the one fault no second session can beat: until a
+                    // person signs in again this machine cannot review, so no retry is spent on it.
+                    reviewFault = quotaResetAt
+                      ? 'quota'
+                      : (lifecycleSignal?.aborted ?? false)
+                        ? 'cancelled'
+                        : isRuntimeCredentialFailure(reviewerLog)
+                          ? 'unavailable'
+                          : 'transient'
+                  }
+                  // The host declares `depth` on EVERY delivery: a report that does not say how it was
+                  // reviewed is a report missing the part that matters, and the server no longer accepts it.
+                  payloadReview = {
+                    ...(review ?? {status: 'unavailable', summary: `Reviewer non disponibile: ${reviewDetail}.`}),
+                    depth: 'result',
+                  }
+                }
+                if (payloadReview.status !== 'unavailable' || !shouldRetryReviewFault(reviewFault)) break
+              }
+              // CYAU-208 — a missed review may mean a broken runtime: at the next round the claim
+              // re-probes Claude and Codex instead of trusting the probe from an hour ago.
+              if (reviewDetail) agentRuntimeReadiness.invalidate()
+              // CYAU-335 — a review the MACHINE could not run is not a "no" to the work.
               //
-              // It is the same unanswerable question of CYAU-111 and CYAU-139, here decided by the
-              // STATE instead of the phase. Seen in production on 30/08 on CLRA-16: the plan needed
-              // no code because it was a container, rejected because the review diff was empty.
+              // Before, it travelled with the delivery as `review: unavailable`, which the server reads exactly
+              // like a rejection: it consumed the phase's review budget and after two rounds called a person, for
+              // a fault the work had no part in (10 of the 138 runs stuck on 2026-11-19 were these). Now nothing
+              // is delivered: the attempt is told it was a fault, the attempt counted at the claim is given back
+              // through the same capped counter as the quota pauses, and the phase stays in the queue for the next
+              // round. A quota limit has already paused its engine, so that round comes after the reset.
               //
-              // The review does not disappear: the one on the RESULT stays, because a declaration must
-              // be judged anyway — and its criteria for these two states already exist
-              // (`reviewCriteria`). Whoever really wrote code keeps going through the diff.
-              if (workflowDelivery.reviewOnDiff && hasDiffToReview(structured)) {
-                payloadReview = await workflowDelivery.reviewOnDiff(structured, lifecycleSignal)
-                if (payloadReview.status === 'unavailable') reviewDetail = redactSecrets(payloadReview.summary).slice(0, 200)
-              } else if (reviewerRuntimeId === 'opencode') {
-                // CYAU-228 — OpenCode is not an action runtime: it judges the result in its confined session,
-                // with no tools, from the same prompt the Claude and Codex sessions receive.
-                const reviewed = await runOpencodeResultReview({
-                  prompt: buildWorkflowReviewPrompt(workflowDelivery.executionPhase, structured),
-                  model: workflowDelivery.reviewerModel,
-                  cwd: ticketRun?.authorizedCwd ?? effectiveAction.cwd ?? process.cwd(),
-                  timeoutMs: (effectiveAction.timeout ?? 300) * 1000,
-                  signal: lifecycleSignal,
+              // Only a fault of the machine. A reason that belongs to the WORK — an empty diff, untracked files,
+              // an untracked .gitignore that could hide new sources — keeps going to the server: it is a
+              // condition of this working copy, a retry gives the same answer forever, and only whoever wrote it
+              // can remove it.
+              if (payloadReview.status === 'unavailable' && isTechnicalReviewFault(reviewFault)) {
+                reviewFaultHeld = true
+                const reason = reviewFaultReason(reviewFault, reviewDetail ?? payloadReview.summary)
+                await workflowDelivery.reportFailure?.(redactSecrets(reason).slice(0, 500)).catch(() => undefined)
+                deliveryRecord = recordDelivery(workflowDelivery, {
+                  outcome: 'not-attempted',
+                  errorCode: ErrorCodes.Review.unavailable,
+                  reviewStatus: 'unavailable',
+                  ...(reviewDetail ? {reviewDetail} : {}),
+                  raw,
                 })
-                // The review too is a session paid on the ticket (CYAU-155).
-                if (reviewed.ok) chargeSession(reviewed.stdout)
-                const review = reviewed.ok ? parseWorkflowReview(reviewed.text, workflowDelivery.executionPhase) : null
-                if (!review) reviewDetail = reviewed.ok ? 'invalid reviewer output' : reviewed.detail
-                payloadReview = {
-                  ...(review ?? {status: 'unavailable', summary: `Reviewer unavailable: ${reviewDetail}.`}),
-                  depth: 'result',
-                }
-              } else {
-                const reviewerRuntime = reviewerRuntimeId === 'codex' ? codexRuntime : claudeRuntime
-                const reviewPrompt = buildWorkflowReviewPrompt(workflowDelivery.executionPhase, structured)
-                // `cwd` must be copied like schedule/timeout/containment: under the queue the action receives the ticket's
-                // authorized cwd (line ~624) and the executor rejects before the spawn a session whose
-                // cwd does not match the authorized one (C400-EXEC-004). Without it, the reviewer started from the playbook
-                // root, did not start at all, and EVERY delivery was rejected for an unavailable review.
-                const reviewerAction: Action = reviewerRuntimeId === 'codex'
-                  ? {type: 'codex', run: reviewPrompt, schedule: effectiveAction.schedule, sandbox: 'read-only',
-                      cwd: effectiveAction.cwd, timeout: effectiveAction.timeout, enabled: true, catch_up: false,
-                      containment: effectiveAction.containment}
-                  : {type: 'claude', run: reviewPrompt, schedule: effectiveAction.schedule, permission_mode: 'plan',
-                      allowed_tools: ['Read', 'Glob', 'Grep'], cwd: effectiveAction.cwd, timeout: effectiveAction.timeout,
-                      enabled: true, catch_up: false, containment: effectiveAction.containment}
-                const reviewed = await reviewerRuntime.execute(`${name}review`, reviewerAction, {
-                  playbookDir: opts.playbookDir, logDir: opts.logDir, logName: `${logName}review`,
-                  now: opts.now, spawn: opts.spawn,
-                  secrets: opts.secrets, clock: opts.clock, signal: lifecycleSignal,
-                  authorizedCwd: ticketRun?.authorizedCwd ?? opts.authorizedCwds?.[name],
-                }).result
-                // The review too is a session paid on the ticket (CYAU-155). A reviewer that does not expose its
-                // own cost simply adds nothing: never an inferred cost.
-                chargeSession(reviewed.stdout)
-                const review = reviewed.status === 'success' ? parseWorkflowReview(reviewed.stdout, workflowDelivery.executionPhase) : null
-                if (!review) {
-                  const reviewerLog = reviewed.status === 'success' ? '' : readLogTail(reviewed.logPath)
-                  reviewDetail = describeRuntimeFailure(reviewerAction.type, reviewerLog, reviewed.errorCode)
-                  // CYAU-275 — the reviewer's quota is the machine's too: pause it until the reset.
-                  noteQuotaFailure(reviewerAction.type, reviewerLog, opts.now)
-                }
-                // The host declares `depth` on EVERY delivery: a report that does not say how it was
-                // reviewed is a report missing the part that matters, and the server no longer accepts it.
-                payloadReview = {
-                  ...(review ?? {status: 'unavailable', summary: `Reviewer non disponibile: ${reviewDetail}.`}),
-                  depth: 'result',
-                }
+                lifecycleResult = {outcome: 'complete', runStatus: 'failure', errorCode: ErrorCodes.Review.unavailable}
+                return
               }
               // CYAU-178 — the identifier is measured on the ticket's MANAGED working copy, never on the host's
               // cwd: that is the folder the daemon runs from, and its HEAD has nothing to
@@ -1410,9 +1526,6 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                 ...deliveryUsage(effectiveAction.type, 'model' in effectiveAction ? effectiveAction.model : undefined,
                                  attemptCostUsd, raw.stdout),
               }
-              // CYAU-208 — a missed review may mean a broken runtime: at the next round the claim
-              // re-probes Claude and Codex instead of trusting the probe from an hour ago.
-              if (reviewDetail) agentRuntimeReadiness.invalidate()
               const reviewAccepted = payload.review.status === 'accepted'
               // The PR stays draft during CI and review. Only the cross approval allows
               // promoting it; the finalization re-attests the same SHA before any server write.
@@ -1556,7 +1669,9 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         await workflowDelivery.reportFailure(reason.slice(0, 500)).catch(() => undefined)
       }
       try {
-        ticketAttempt?.settleQuotaPause?.(quotaResetAt !== null)
+        // CYAU-335 — a held review gives the attempt back through the same capped counter: in both cases the work
+        // was never judged, so it must not pay for it.
+        ticketAttempt?.settleQuotaPause?.(quotaResetAt !== null || reviewFaultHeld)
       } catch {
         // The attempt simply stays counted: the stricter outcome.
       }

@@ -1827,6 +1827,9 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               } : {}),
               ...(ticketRun?.reviewWorkflowDelivery ? {
                 reviewOnDiff: ticketRun.reviewWorkflowDelivery.bind(ticketRun),
+                // CYAU-335 — without this the runner cannot tell a review the machine could not run from a "no"
+                // to the work, and would deliver the first as the second.
+                ...(ticketRun.lastReviewFault ? {lastReviewFault: ticketRun.lastReviewFault.bind(ticketRun)} : {}),
               } : {}),
             }
           }

@@ -14,6 +14,7 @@ import {PlaybookSchema} from '../src/lib/schema'
 import {type ExecutionPhase} from '../src/lib/phase-profile'
 import {agentRuntimeReadiness} from '../src/lib/runtime-probe'
 import {evaluateTicketAttempts, readTicketAttempts, recordTicketAttempt} from '../src/lib/ticket-attempts'
+import {REVIEW_RETRY_WAIT_MS, type ReviewFaultKind} from '../src/lib/review-fault'
 
 // CYAU-105/CYAU-106: the result DELIVERY path (runner.ts, `workflowDelivery` block) was not
 // exercised by ANY test — `runner.test.ts` never builds a decision with `workflowDelivery`, and
@@ -103,6 +104,14 @@ async function dispatch(opts: {
   afterAccepted?: () => Promise<{outcome: 'complete'; runStatus: 'success'; errorCode: null}>
   /** CYAU-176: the review that opens the real diff, when the server asked for it for this phase. */
   reviewOnDiff?: (result: Record<string, unknown>) => Promise<AttemptDelivery['review']>
+  /** CYAU-335: whose fault it was when the diff review produced no verdict. */
+  lastReviewFault?: () => ReviewFaultKind | null
+  /** CYAU-335: what the attempt is told when the review never ran. */
+  reportFailure?: (reason: string) => Promise<void>
+  /** CYAU-335: `true` when the attempt counted at the claim is given back. */
+  settleQuotaPause?: (paused: boolean) => void
+  /** CYAU-335: the wait between two tries of the review. A no-op by default, so the tests do not wait. */
+  sleep?: (ms: number) => Promise<void>
   /** CYAU-178: the MANAGED working copy of the ticket, the one the code sha is measured on. */
   authorizedCwd?: string
   /** CYRA-872: the ticket cycle outcome after every session (a `retry` runs one more session). */
@@ -139,9 +148,13 @@ async function dispatch(opts: {
     stateFile: s.stateFile, logDir: s.logDir, lockFile: s.lockFile,
     claudeRuntime: opts.implementer ?? runtimeWith(opts.stdout, s.logPath, opts.stdoutTruncated),
     codexRuntime: opts.reviewer ?? approvingReviewer(opts.seenReviewer),
+    sleep: opts.sleep ?? (async () => undefined),
     preflight: async () => ({
       outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
       executionLease: {renewEveryMs: 60_000, renew: async () => true, release},
+      ...(opts.settleQuotaPause ? {
+        ticketAttempt: {recordSessionCost: () => undefined, settleQuotaPause: opts.settleQuotaPause},
+      } : {}),
       // CYAU-178: the MANAGED working copy of the ticket, the one the code sha is measured on.
       // Without `ticketRun` the runner has no ticket worktree and does not compose the sha.
       ...(opts.authorizedCwd ? {
@@ -164,6 +177,8 @@ async function dispatch(opts: {
         ...(opts.browserTester ? {browserTester: opts.browserTester} : {}),
         ...(opts.afterVerificationFailure ? {afterVerificationFailure: opts.afterVerificationFailure} : {}),
         ...(opts.reviewOnDiff ? {reviewOnDiff: opts.reviewOnDiff} : {}),
+        ...(opts.lastReviewFault ? {lastReviewFault: opts.lastReviewFault} : {}),
+        ...(opts.reportFailure ? {reportFailure: opts.reportFailure} : {}),
       },
     }),
   })
@@ -796,12 +811,18 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     expect(log).toContain('# delivery: ok')
   })
 
-  it('review not approved: the run does not advance even if the transport went fine', async () => {
-    const s = scenario()
-    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
-    const unavailableReviewer: AgentRuntime = {
+  // CYAU-335 — a reviewer that died says nothing about the work: before, this delivered `review: unavailable`,
+  // which the server reads exactly like a rejection. Now the delivery is held and the work keeps its attempt.
+  it('a reviewer that died holds the delivery instead of rejecting the work', async () => {
+    const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+      .mockResolvedValue({outcome: 'ok', status: 200})
+    const reportFailure = vi.fn(async (_reason: string) => undefined)
+    const settled: boolean[] = []
+    const sessions: number[] = []
+    const waits: number[] = []
+    const brokenReviewer: AgentRuntime = {
       id: 'fake-codex', healthCheck: async () => ({available: true}),
-      execute: () => ({
+      execute: () => (sessions.push(1), {
         result: Promise.resolve<RunResult>({
           status: 'failure', exitCode: 1, errorCode: 'C001-EXEC-003', durationMs: 1,
           logPath: '', stdout: '', stdoutTruncated: false,
@@ -810,22 +831,53 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
       }),
     }
 
-    const result = await runOnce({
-      playbook, playbookDir: dir, now,
-      stateFile: s.stateFile, logDir: s.logDir, lockFile: s.lockFile,
-      claudeRuntime: runtimeWith(JSON.stringify(TRIAGE_RESULT), s.logPath),
-      codexRuntime: unavailableReviewer,
-      preflight: async () => ({
-        outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
-        executionLease: {renewEveryMs: 60_000, renew: async () => true, release: async () => undefined},
-        workflowDelivery: {executionPhase: 'triage', attemptId: 'attempt-1', deliver},
-      }),
+    const {action, log} = await dispatch({
+      stdout: JSON.stringify(TRIAGE_RESULT), deliver, reviewer: brokenReviewer, reportFailure,
+      settleQuotaPause: (paused) => settled.push(paused),
+      sleep: async (ms) => { waits.push(ms) },
     })
 
-    const action = result.executed[0]
-    expect(action.errorCode).toBe('C409-WORKFLOW-002')
-    // The transport said ok, the review did not: both go into the record, so it is known which of the two stopped it.
-    expect(action.delivery).toMatchObject({outcome: 'ok', reviewStatus: 'unavailable', errorCode: 'C409-WORKFLOW-002'})
+    // AC-4: tried again by itself, after a wait, and only once — never a loop.
+    expect(sessions).toHaveLength(2)
+    expect(waits).toEqual([REVIEW_RETRY_WAIT_MS])
+    expect(log).toContain('# review_retry: 2')
+    // AC-2/AC-3: nothing delivered, so the server never reads it as a rejection, and the attempt goes back.
+    expect(deliver).not.toHaveBeenCalled()
+    expect(settled).toEqual([true])
+    expect(action.errorCode).toBe('C503-REVIEW-004')
+    expect(action.delivery).toMatchObject({outcome: 'not-attempted', reviewStatus: 'unavailable', errorCode: 'C503-REVIEW-004'})
+    // AC-5: the ticket's history says it was a fault, not a judgement on the work.
+    expect(reportFailure.mock.calls[0]![0]).toContain('technical fault')
+    expect(reportFailure.mock.calls[0]![0]).toContain('not a rejection of the work')
+  })
+
+  it('a reviewer whose sign-in expired is not asked twice: a second session meets the same wall', async () => {
+    const reviewLog = path.join(dir, `revoked-${counter}.log`)
+    fs.writeFileSync(reviewLog, 'ERROR: refresh token was revoked (token_revoked)\n')
+    const sessions: number[] = []
+    const revokedReviewer: AgentRuntime = {
+      id: 'fake-codex', healthCheck: async () => ({available: true}),
+      execute: () => (sessions.push(1), {
+        result: Promise.resolve<RunResult>({
+          status: 'failure', exitCode: 1, errorCode: 'C001-EXEC-003', durationMs: 1,
+          logPath: reviewLog, stdout: '', stdoutTruncated: false,
+        }),
+        cancel: () => undefined,
+      }),
+    }
+    const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+      .mockResolvedValue({outcome: 'ok', status: 200})
+    const waits: number[] = []
+
+    const {action} = await dispatch({
+      stdout: JSON.stringify(TRIAGE_RESULT), deliver, reviewer: revokedReviewer,
+      sleep: async (ms) => { waits.push(ms) },
+    })
+
+    expect(sessions).toHaveLength(1)
+    expect(waits).toEqual([])
+    expect(deliver).not.toHaveBeenCalled()
+    expect(action.errorCode).toBe('C503-REVIEW-004')
   })
 
   // Seen on AAC-13: three machines took the ticket and their session died within a minute. The lease was
@@ -909,7 +961,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
   // spawn a session whose cwd does not match (C400-EXEC-004). The reviewer was born without cwd, so it
   // NEVER started and every delivery was rejected for unavailable review: the triage succeeded, the work did not.
   // The failure of 23/09: Codex disconnected, and the daemon wrote only `review=unavailable`.
-  it('a failed review delivers and records its reason', async () => {
+  it('a failed review records its reason, delivering nothing', async () => {
     const reviewLog = path.join(dir, `review-${counter}.log`)
     fs.writeFileSync(reviewLog, 'ERROR: refresh token was revoked (token_revoked)\n')
     const brokenReviewer: AgentRuntime = {
@@ -929,7 +981,9 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
 
     const {action} = await dispatch({stdout: JSON.stringify(TRIAGE_RESULT), deliver, reviewer: brokenReviewer})
 
-    expect(deliver.mock.calls[0][0].review.summary).toContain('codex: autenticazione scaduta o revocata')
+    // CYAU-335 — the reason stays on the record even though nothing was delivered: it is the only place the
+    // operator reads why the review did not happen.
+    expect(deliver).not.toHaveBeenCalled()
     expect(action.delivery?.reviewDetail).toBe('codex: autenticazione scaduta o revocata')
     // CYAU-208 — at the next round the machine re-probes the runtimes instead of trusting the probe from an hour ago.
     expect(invalidate).toHaveBeenCalled()
@@ -1122,6 +1176,77 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
       review: expect.objectContaining({status: 'unavailable', depth: 'diff'}),
     }))
+  })
+
+  // CYAU-335 — whose fault an unavailable diff review was decides what happens to it. Whoever ran it says so;
+  // without an answer the previous behaviour stays, so the server keeps judging it.
+  describe('a diff review that produced no verdict (CYAU-335)', () => {
+    const unavailable = async (): Promise<AttemptDelivery['review']> => ({
+      status: 'unavailable' as const, depth: 'diff' as const,
+      summary: 'Rilettura sul diff non eseguibile: esito reviewer failed.',
+    })
+
+    it('a fault of the machine holds the delivery and gives the attempt back', async () => {
+      const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+        .mockResolvedValue({outcome: 'ok', status: 200})
+      const reportFailure = vi.fn(async (_reason: string) => undefined)
+      const settled: boolean[] = []
+      const reviewOnDiff = vi.fn(unavailable)
+
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', deliver, reviewOnDiff, reportFailure,
+        lastReviewFault: () => 'transient',
+        settleQuotaPause: (paused) => settled.push(paused),
+      })
+
+      expect(reviewOnDiff).toHaveBeenCalledTimes(2)
+      expect(deliver).not.toHaveBeenCalled()
+      expect(settled).toEqual([true])
+      expect(action.errorCode).toBe('C503-REVIEW-004')
+      expect(reportFailure.mock.calls[0]![0]).toContain('not a rejection of the work')
+    })
+
+    it('an exhausted quota is not tried again here: the wait happens between rounds', async () => {
+      const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+        .mockResolvedValue({outcome: 'ok', status: 200})
+      const reviewOnDiff = vi.fn(unavailable)
+      const waits: number[] = []
+
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', deliver, reviewOnDiff,
+        lastReviewFault: () => 'quota',
+        sleep: async (ms) => { waits.push(ms) },
+      })
+
+      expect(reviewOnDiff).toHaveBeenCalledTimes(1)
+      expect(waits).toEqual([])
+      expect(deliver).not.toHaveBeenCalled()
+      expect(action.errorCode).toBe('C503-REVIEW-004')
+    })
+
+    it('a reason that belongs to the work still travels to the server, as it always did', async () => {
+      const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+        .mockResolvedValue({outcome: 'ok', status: 200})
+      const reviewOnDiff = vi.fn(async (): Promise<AttemptDelivery['review']> => ({
+        status: 'unavailable' as const, depth: 'diff' as const,
+        summary: 'Rilettura sul diff non eseguibile: il diff della review è vuoto.',
+      }))
+      const settled: boolean[] = []
+
+      const {action} = await dispatch({
+        stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', deliver, reviewOnDiff,
+        lastReviewFault: () => 'work',
+        settleQuotaPause: (paused) => settled.push(paused),
+      })
+
+      expect(reviewOnDiff).toHaveBeenCalledTimes(1)
+      expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
+        review: expect.objectContaining({status: 'unavailable', depth: 'diff'}),
+      }))
+      // The work is judged on its own merits: nothing is given back.
+      expect(settled).toEqual([false])
+      expect(action.errorCode).toBe('C409-WORKFLOW-002')
+    })
   })
 
   // Where there is no diff to review (the two releasing phases), the session on the report stays — but

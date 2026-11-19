@@ -2,9 +2,12 @@
 // sentences or the error code: the raw text may contain secrets and never leaves this module.
 import {detectQuotaLimit} from './agent-quota'
 
+/** A sign-in that expired or was revoked: nothing runs again until a person signs in. */
+const CREDENTIAL_SIGNAL =
+  /token_revoked|refresh token was revoked|refresh_token_invalidated|not logged in|please run \/login|\b401\b|unauthorized/i
+
 const SIGNALS: ReadonlyArray<[RegExp, string]> = [
-  [/token_revoked|refresh token was revoked|refresh_token_invalidated|not logged in|please run \/login|\b401\b|unauthorized/i,
-    'autenticazione scaduta o revocata'],
+  [CREDENTIAL_SIGNAL, 'autenticazione scaduta o revocata'],
   [/\b429\b|rate.?limit|usage limit|quota/i, 'quota del modello esaurita'],
   [/model.*(requires a newer version|not supported|not found|does not exist)|does not support this model/i, 'modello non disponibile per questa CLI'],
 ]
@@ -17,4 +20,12 @@ export function describeRuntimeFailure(
   const quota = detectQuotaLimit(output, now)
   const reset = quota?.explicit ? `, reset ${quota.resetAt.toISOString()}` : ''
   return `${runtime}: ${match ? match[1] : errorCode ?? 'output non valido'}${reset}`
+}
+
+/**
+ * CYAU-335 — true when the session failed on its sign-in. Starting it again would meet the same wall, so the
+ * caller must not spend another session on it: the machine simply cannot review until someone signs in.
+ */
+export function isRuntimeCredentialFailure(output: string): boolean {
+  return CREDENTIAL_SIGNAL.test(output)
 }

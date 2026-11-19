@@ -233,7 +233,7 @@ export function recordTicketAttempt(
 export interface SettleQuotaPauseInput {
   project: string
   ticket: string
-  /** The session stopped on a clear quota limit. */
+  /** The session stopped on a clear quota limit, or its review never ran because of the machine (CYAU-335). */
   quotaHit: boolean
   maxPauses?: number
   now?: Date
@@ -244,6 +244,10 @@ export interface SettleQuotaPauseInput {
  * the account ran out, the ticket did not fail. Only up to `maxPauses` consecutive pauses, then the attempt
  * stays counted and the usual threshold reports the ticket to a person. Any other outcome restarts the pause
  * count. Without a readable record nothing is given back (`counted`).
+ *
+ * CYAU-335 — the same counter settles a review the MACHINE could not run (quota, reviewer down, diff not
+ * acquirable): the work was never judged, so it does not pay for it. Same cap, for the same reason — a fault
+ * mistaken for a pause must not retry a ticket forever.
  */
 export function settleQuotaPause(
   input: SettleQuotaPauseInput,

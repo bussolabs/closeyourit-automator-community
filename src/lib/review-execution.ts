@@ -1,4 +1,5 @@
 import {automatorGitIdentityEnv} from './git-identity'
+import {detectQuotaLimit} from './agent-quota'
 import {z} from 'zod'
 import {createHash} from 'node:crypto'
 import {accessSync, constants, realpathSync, statSync, type Stats} from 'node:fs'
@@ -174,6 +175,12 @@ export interface ReviewExecutionResult {
   attestation: {reviewedBaseCommit: string; reviewedSnapshotTree: string; reviewedDiffSha256: string} | null
   /** CYAU-237 — present only when the reviewer upheld at least one previous-round finding. */
   confirmedPreviousFindings?: ConfirmedPreviousFinding[]
+  /**
+   * CYAU-335 — when the reviewer stopped on a quota limit, the time that limit resets. Only the engine's own
+   * output says it, and it is lost once the outcome is reduced to a status: the caller needs it to pause THAT
+   * engine until the reset instead of charging the work with a rejection. Absent = no quota limit seen.
+   */
+  quotaResetAt?: Date
 }
 
 export interface ReviewExecutionRequest {
@@ -1747,6 +1754,13 @@ export async function executeCrossReview(
     env: buildReviewerEnvironment(reviewer, process.env, [input.cwd], claudeCredential),
   }
 
+  // CYAU-335 — a quota limit is a pause of the machine, never a defect of the work: the reset time is read from
+  // what the engine printed, so the caller can pause that engine instead of delivering a rejection.
+  const quotaReset = (...texts: (string | undefined)[]): {quotaResetAt: Date} | undefined => {
+    const limit = detectQuotaLimit(texts.filter((text) => text).join('\n'), new Date())
+    return limit ? {quotaResetAt: limit.resetAt} : undefined
+  }
+
   let command: ReviewCommand
   try {
     command = await commandFor(reviewer, input, deadline, deps.fs ?? DEFAULT_REVIEW_FS, now, deps.runtimeProbe, deps.materializeSnapshot)
@@ -1793,7 +1807,8 @@ export async function executeCrossReview(
     return {status: 'failed', reviewer, findings: [], detail: 'cleanup reviewer fallito', attestation: null}
   }
   if (result.error || result.code !== 0) {
-    return {status: 'failed', reviewer, findings: [], detail: reviewerFailureDetail(result), attestation: null}
+    return {status: 'failed', reviewer, findings: [], detail: reviewerFailureDetail(result), attestation: null,
+      ...quotaReset(result.stdout, result.stderrTail)}
   }
   if (result.truncated) {
     return {status: 'malformed', reviewer, findings: [], detail: 'output reviewer troppo grande', attestation: null}
@@ -1822,7 +1837,9 @@ export async function executeCrossReview(
       ...(confirmedPreviousFindings.length > 0 ? {confirmedPreviousFindings} : {}),
     }
   } catch {
-    return {status: 'malformed', reviewer, findings: [], detail: 'output reviewer non valido', attestation: null}
+    // An engine that answered «you are out of quota» instead of a report lands here: the limit is in its stdout.
+    return {status: 'malformed', reviewer, findings: [], detail: 'output reviewer non valido', attestation: null,
+      ...quotaReset(result.stdout)}
   }
 }
 
@@ -1867,6 +1884,17 @@ export function splitReviewDiff(diff: string, maxBytes = MAX_REVIEW_DIFF_BYTES):
  * attests the whole snapshot only when every part completed and attested its own bytes; any other outcome of
  * any part is the outcome of the review. A diff that fits is reviewed exactly as before.
  */
+/**
+ * CYAU-335 — the one reviewer failure that is a condition of the WORK and not of the machine: a single file's
+ * patch does not fit a review, however many times it is retried. Named next to the branch that writes it, so
+ * whoever classifies the outcome is not matching free text.
+ */
+export const OVERSIZED_DIFF_FAILURE = 'byte review limit: review it by hand'
+
+export function isOversizedDiffFailure(detail: string | null | undefined): boolean {
+  return typeof detail === 'string' && detail.includes(OVERSIZED_DIFF_FAILURE)
+}
+
 export async function executeChunkedCrossReview(
   input: ReviewExecutionRequest,
   deps: ReviewExecutionDeps = {},
@@ -1876,7 +1904,7 @@ export async function executeChunkedCrossReview(
   if (parts === null) {
     return {
       status: 'failed', reviewer: input.selection.reviewer, findings: [], attestation: null,
-      detail: `a single file diff exceeds the ${maxPartBytes} byte review limit: review it by hand`,
+      detail: `a single file diff exceeds the ${maxPartBytes} ${OVERSIZED_DIFF_FAILURE}`,
     }
   }
   if (parts.length === 1) return executeCrossReview(input, deps)
