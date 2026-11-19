@@ -11,6 +11,8 @@ export const ErrorCodes = {
   },
   Action: {
     notFound: 'C404-ACTION-001',
+    noWork: 'C000-ACTION-002',
+    preconditionTimeout: 'C124-ACTION-003',
   },
   Exec: {
     timeout: 'C124-EXEC-001',

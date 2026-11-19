@@ -186,6 +186,15 @@ automator tick --dry-run
 automator run triage --dry-run
 ```
 
+Ogni azione può dichiarare `precondition: {run: "sh bin/has-work.sh", timeout: 30}`.
+Il controllo shell gira una volta per scadenza, prima del preflight e della presa in carico dalla coda,
+nella cartella autorizzata e con la stessa politica, ambiente ripulito e containment delle azioni shell.
+Il timeout predefinito è 30 secondi, il massimo 300. Uscita zero avvia l'azione; uscita non zero la salta
+con motivo `C000-ACTION-002`, timeout con `C124-ACTION-003`. Errori di avvio (incluse uscite 126/127),
+violazioni della politica e isolamento non disponibile restano errori. Il salto aggiorna la scadenza e
+non rende guasto l'host. `automator list` mostra il motivo; `automator logs` include il registro separato
+`<azione>-precondition-<timestamp>.log`. Il controllo shell non riceve credenziali degli agenti.
+
 ### 5. Installa il servizio
 
 ```sh

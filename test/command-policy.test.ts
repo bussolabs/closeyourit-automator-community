@@ -4,6 +4,24 @@ import {type Action, PlaybookSchema} from '../src/lib/schema'
 
 const RETIRED_PROVIDER = ['dop', 'pler'].join('')
 
+describe('action preconditions', () => {
+  it('defaults to a short timeout and rejects unknown keys and invalid timeouts', () => {
+    expect(action({type: 'shell', run: 'true', precondition: {run: 'true'}}).precondition?.timeout).toBe(30)
+    for (const precondition of [{run: 'true', unknown: true}, {run: 'true', timeout: 301},
+      {run: 'true', timeout: 0}, {run: 'true', timeout: 1.5}, {run: ''}]) {
+      expect(() => action({type: 'shell', run: 'true', precondition})).toThrow()
+    }
+    expect(action({type: 'codex', run: 'work', precondition: {run: 'true', timeout: 300}}).precondition?.timeout).toBe(300)
+  })
+
+  it.each(['shell', 'claude', 'codex'])('applies command policy to %s preconditions', (type) => {
+    for (const run of ['kamal deploy -d production', 'rails db:drop', 'git push origin main']) {
+      expect(evaluateAction(action({type, run: 'true', precondition: {run}})).allowed).toBe(false)
+    }
+    expect(evaluateAction(action({type, run: 'true', precondition: {run: 'true'}})).allowed).toBe(true)
+  })
+})
+
 // Runtime-agnostic command policy (CYAU-25): the critical protections (production, destructive DB, protected
 // branches, force-push) evaluated on a shell COMMAND, independent of the runtime. The DoD asks for tests covering
 // deploy, destructive DB, protected branches and force-push; here the unit coverage of the pure predicate.

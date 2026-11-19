@@ -300,6 +300,10 @@ export function evaluateCommand(command: string): PolicyDecision {
  * codex sandbox (additional provider-specific defence).
  */
 export function evaluateAction(action: Action): PolicyDecision {
+  if (action.precondition) {
+    const decision = evaluateCommand(action.precondition.run)
+    if (!decision.allowed) return decision
+  }
   if (action.type === 'shell') {
     const decision = evaluateCommand(action.run)
     if (!decision.allowed) return decision

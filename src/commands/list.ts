@@ -12,6 +12,7 @@ interface Row {
   schedule: string
   enabled: boolean
   last_status: string
+  last_error_code: string
   last_run: string
   next_run: string
 }
@@ -49,6 +50,7 @@ export default class List extends BaseCommand {
         schedule: action.schedule,
         enabled: action.enabled,
         last_status: st?.last_status ?? '-',
+        last_error_code: st?.last_error_code ?? '-',
         last_run: st?.last_run ?? '-',
         next_run: nextRun,
       }
@@ -57,13 +59,14 @@ export default class List extends BaseCommand {
     if (!this.jsonEnabled()) {
       this.log(
         renderTable(
-          ['NOME', 'TIPO', 'SCHEDULE', 'ON', 'ULTIMO', 'LAST RUN', 'NEXT RUN'],
+          ['NOME', 'TIPO', 'SCHEDULE', 'ON', 'ULTIMO', 'REASON', 'LAST RUN', 'NEXT RUN'],
           rows.map((r) => [
             r.name,
             r.type,
             r.schedule,
             r.enabled ? 'sì' : 'no',
             r.last_status,
+            r.last_error_code,
             r.last_run,
             r.next_run,
           ]),

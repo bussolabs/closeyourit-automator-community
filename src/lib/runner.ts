@@ -4,7 +4,7 @@ import * as fs from 'node:fs'
 import {type Action, type Playbook} from './schema'
 import {selectDue} from './scheduler'
 import {quarantineCorruptState, readState, type RunStatus, saveState, updateAction} from './state'
-import {type RunResult, type SpawnFn} from './executor'
+import {type RunResult, type SpawnFn, runPrecondition} from './executor'
 import {addRetryFindings, claudeSessionCostUsd} from './claude'
 import {sessionCostUsd} from './session-cost'
 import {CLAUDE_MODEL, CODEX_MODEL} from './models'
@@ -1592,6 +1592,44 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       return 'continue'
     }
 
+    // Check each due action once, before either preflight or atomic queue admission. A queue may
+    // occupy multiple pool slots, but its precondition belongs to this scheduled occurrence.
+    const admittedDue: typeof selection.due = []
+    for (const entry of selection.due) {
+      if (opts.signal?.aborted) break
+      if (!entry.action.precondition) {
+        admittedDue.push(entry)
+        continue
+      }
+      const check = await runPrecondition(entry.name, entry.action, {
+        playbookDir: opts.playbookDir, logDir: opts.logDir, now: opts.now,
+        authorizedCwd: opts.authorizedCwds?.[entry.name], spawn: opts.spawn,
+        signal: opts.signal, clock: opts.clock,
+      })
+      if (check.status === 'success' && !opts.signal?.aborted) {
+        admittedDue.push(entry)
+        continue
+      }
+      // Only a completed command or a verified timeout means no work. Startup, containment,
+      // policy and cancellation failures must never be hidden as an ordinary skip.
+      const reason = opts.signal?.aborted ? null
+        : check.status === 'timeout' ? ErrorCodes.Action.preconditionTimeout
+          : check.errorCode === ErrorCodes.Exec.failed && check.exitCode !== null && check.exitCode !== 126
+            ? ErrorCodes.Action.noWork : null
+      const status = reason ? 'skipped' : 'failure'
+      const errorCode = reason ?? check.errorCode
+      const result = normalizeAgentResult({runtime: 'precondition', action: entry.name, result: check,
+        cancelled: opts.signal?.aborted})
+      updateAction(state, entry.name, {
+        last_run: nowIso, last_status: status, last_duration_ms: check.durationMs,
+        last_exit_code: check.exitCode, last_error_code: errorCode, last_result: reason ? null : result,
+      })
+      appendLogFooter(check.logPath, {status, error_code: errorCode, phase: 'precondition'})
+      executed.push({name: entry.name, status, errorCode, durationMs: check.durationMs,
+        logPath: check.logPath, result})
+      persistState(opts.stateFile, state)
+    }
+
     // Dispatch of the due actions. SKILL-MODE (CYAU-69): bounded pool for PER-STEP concurrency — every due action
     // is ONE claim/step and `runFlowPool` keeps at most `cap` in flight (cap = resolveFlowConcurrency(max_parallel),
     // fail-closed to 1 if not resolvable: never unlimited). `dispatchDueEntry` composes the existing preflight+lease;
@@ -1624,8 +1662,8 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       // The claim is requested only if there is a gate that can evaluate it: a claimed ticket never submitted
       // to the preflight would stay occupied without anyone deciding whether to work on it (fail-closed).
       const claimQueue = opts.preflight ? opts.claimQueue : undefined
-      const queueEntries = claimQueue ? selection.due.filter((entry) => opts.ticketQueues?.[entry.name]) : []
-      const attempts: DueEntry[] = [...selection.due]
+      const queueEntries = claimQueue ? admittedDue.filter((entry) => opts.ticketQueues?.[entry.name]) : []
+      const attempts: DueEntry[] = [...admittedDue]
       for (let round = 1; round < cap; round++) attempts.push(...queueEntries)
       // Queues that already delivered at least one ticket in this round: for them the following "no work" is
       // normal draining, not the wait to report to the beat.
@@ -1676,7 +1714,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         flowFailures.push({name: pending?.name ?? '(coda)', detail: pool.claimError})
       }
     } else {
-      for (const entry of selection.due) {
+      for (const entry of admittedDue) {
         if ((await dispatchDueEntry(entry)) === 'stop') break
       }
     }
@@ -1688,7 +1726,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       // A preflight stop is an expected operational decision (e.g. ticket waiting/limit), not a host failure.
       // A stop with a `failed` audit instead signals an unavailable technical dependency and must turn the
       // beat red: `every([])` alone would mask a host unable to load tickets/Guidance/policy.
-      const ok = executed.every((entry) => entry.status === 'success') &&
+      const ok = executed.every((entry) => entry.status === 'success' || entry.status === 'skipped') &&
         !preflightStopped.some((entry) => auditHasTechnicalFailure(entry.audit))
       // The reason of the last block travels with the beat (CYAU-116): without it, a host stuck because it cannot
       // take a ticket is indistinguishable on the panel from an idle one. Only action/state/reason, never the internal

@@ -16,6 +16,7 @@ import {acquire} from '../src/lib/lock'
 import {loadState, saveState, updateAction, emptyState} from '../src/lib/state'
 import {PlaybookSchema} from '../src/lib/schema'
 import {AgentRunResultSchema, type AgentRunResult} from '../src/lib/agent-result'
+import {ErrorCodes} from '../src/errors/error-codes'
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-runner-'))
 spawnSync('git', ['init', '-q', dir])
@@ -57,6 +58,45 @@ const playbook = PlaybookSchema.parse({
 const now = new Date('2026-07-07T09:30:00.000Z')
 
 describe('runOnce', () => {
+  it.each([0, 1, 127, 126])('checks for work before preflight (exit %s)', async (code) => {
+    const p = paths()
+    const guarded = PlaybookSchema.parse({version: 1, actions: {
+      fast: {type: 'shell', schedule: 'every 1m', run: 'echo work', precondition: {run: 'true'}},
+    }})
+    saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
+    const spawn = vi.fn(spawnWith(code))
+    const heartbeat = vi.fn(async (_ok: boolean) => undefined)
+    const preflight = vi.fn(() => ({outcome: 'admit' as const, state: 'ready' as const, reason: '', audit: []}))
+    const options = {playbook: guarded, playbookDir: dir, now, ...p, spawn, heartbeat, preflight}
+    const result = await runOnce(options)
+    expect(preflight).toHaveBeenCalledTimes(code === 0 ? 1 : 0)
+    expect(spawn).toHaveBeenCalledTimes(code === 0 ? 2 : 1)
+    expect(result.executed[0].status).toBe(code === 0 ? 'success' : code === 1 ? 'skipped' : 'failure')
+    if (code === 1) {
+      expect(loadState(p.stateFile).actions.fast.last_error_code).toBe(ErrorCodes.Action.noWork)
+      expect(fs.readFileSync(result.executed[0].logPath, 'utf8')).toContain(ErrorCodes.Action.noWork)
+    }
+    expect(heartbeat.mock.calls[0][0]).toBe(code < 2)
+    await runOnce({...options, now: new Date(now.getTime() + 10_000)})
+    expect(spawn).toHaveBeenCalledTimes(code === 0 ? 2 : 1)
+    await runOnce({...options, now: new Date(now.getTime() + 60_000)})
+    expect(spawn).toHaveBeenCalledTimes(code === 0 ? 4 : 2)
+  })
+
+  it('rejects a dangerous precondition before spawn and reports a host failure', async () => {
+    const p = paths()
+    saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
+    const guarded = PlaybookSchema.parse({version: 1, actions: {
+      fast: {type: 'shell', schedule: 'every 1m', run: 'true', precondition: {run: 'kamal deploy -d production'}},
+    }})
+    const spawn = vi.fn(spawnWith(0))
+    const heartbeat = vi.fn(async (_ok: boolean) => undefined)
+    const result = await runOnce({playbook: guarded, playbookDir: dir, now, ...p, spawn, heartbeat})
+    expect(spawn).not.toHaveBeenCalled()
+    expect(result.executed[0]).toMatchObject({status: 'failure', errorCode: ErrorCodes.Policy.violation})
+    expect(heartbeat.mock.calls[0][0]).toBe(false)
+  })
+
   it('lock held by a live process → skipped', async () => {
     const p = paths()
     acquire(p.lockFile, 'other')

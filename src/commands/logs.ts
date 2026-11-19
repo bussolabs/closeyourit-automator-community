@@ -24,7 +24,8 @@ export default class Logs extends BaseCommand {
     const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((name) => name.endsWith('.log')) : []
 
     if (args.action) {
-      const matches = files.filter((name) => name.startsWith(`${args.action}-`)).sort().reverse()
+      const matches = files.filter((name) => name.startsWith(`${args.action}-`)).sort((a, b) =>
+        fs.statSync(path.join(dir, b)).mtimeMs - fs.statSync(path.join(dir, a)).mtimeMs)
       if (matches.length === 0) {
         if (!this.jsonEnabled()) this.log(`(nessun log per ${args.action})`)
         return {action: args.action, file: null, content: ''}

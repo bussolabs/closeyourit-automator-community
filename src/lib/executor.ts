@@ -678,6 +678,17 @@ function spawnCollect(
   })
 }
 
+/** Execute an auxiliary work check through the same shell security boundary as ordinary actions. */
+export async function runPrecondition(name: string, action: Action, ctx: RunContext): Promise<RunResult> {
+  if (!action.precondition) throw new Error('Missing action precondition')
+  // Build a shell action explicitly: no agent credentials, recovery hook or agent-specific settings.
+  return runAction(name, {
+    type: 'shell', run: action.precondition.run, timeout: action.precondition.timeout,
+    schedule: action.schedule, enabled: true, catch_up: false,
+    cwd: action.cwd, containment: action.containment, env: action.env,
+  }, {...ctx, logName: `${ctx.logName ?? name}-precondition`, secrets: undefined, isError: undefined})
+}
+
 /**
  * CYAU-285 — where a Codex phase session leaves its result. In the Git administrative directory of the session
  * folder, like the busy marker: never in the working tree, where a commit could stage it, and on the paths a

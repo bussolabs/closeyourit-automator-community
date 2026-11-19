@@ -62,6 +62,11 @@ afterEach(() => {
 })
 
 describe('validate', () => {
+  it('rejects a dangerous precondition during playbook validation', async () => {
+    const bad = writeYaml('unsafe-check.yml', VALID.replace('run: "echo ok"',
+      'run: "echo ok"\n    precondition:\n      run: "kamal deploy -d production"'))
+    await runExpectingExit(Validate, [bad], 2)
+  })
   it('valid playbook → ok', async () => {
     const result = (await run(Validate, [])) as {ok: boolean; actions: string[]}
     expect(result.ok).toBe(true)
@@ -81,6 +86,18 @@ describe('validate', () => {
 })
 
 describe('list', () => {
+  it('shows a skipped action and its reason in JSON and the table', async () => {
+    const file = path.join(dir, 'state', 'state.json')
+    saveState(file, updateAction(loadState(file), 'hello', {
+      last_run: '2026-07-14T10:00:00.000Z', last_status: 'skipped', last_error_code: 'C000-ACTION-002',
+    }))
+    const result = await run(List, ['--json']) as {actions: Array<{name: string; last_status: string; last_error_code: string}>}
+    expect(result.actions.find((row) => row.name === 'hello')).toMatchObject({
+      last_status: 'skipped', last_error_code: 'C000-ACTION-002',
+    })
+    const {stdout} = await runCaptured(List, [])
+    expect(stdout).toContain('C000-ACTION-002')
+  })
   it('lists the actions', async () => {
     const result = (await run(List, ['--json'])) as {actions: unknown[]}
     expect(result.actions).toHaveLength(2)
@@ -164,6 +181,18 @@ describe('tick', () => {
 })
 
 describe('logs', () => {
+  it('selects the latest log even when an older precondition sorts after the action', async () => {
+    const logs = path.join(dir, 'state', 'logs')
+    fs.mkdirSync(logs, {recursive: true})
+    const check = path.join(logs, 'hello-precondition-20260714T100000.log')
+    const action = path.join(logs, 'hello-20260714T110000.log')
+    fs.writeFileSync(check, 'old check')
+    fs.writeFileSync(action, 'new action')
+    fs.utimesSync(check, 1, 1)
+    fs.utimesSync(action, 2, 2)
+    const result = await run(Logs, ['hello']) as {content: string}
+    expect(result.content).toBe('new action')
+  })
   it('no log for an action → empty content', async () => {
     const result = (await run(Logs, ['hello'])) as {content: string}
     expect(result.content).toBe('')

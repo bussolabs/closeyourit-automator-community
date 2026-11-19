@@ -3,7 +3,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {spawnSync} from 'node:child_process'
 import {afterAll, describe, expect, it, vi} from 'vitest'
-import {actionSecretEnv, buildCommand, type ChildLike, resolveActionCwd, runAction, type SpawnFn} from '../src/lib/executor'
+import {actionSecretEnv, buildCommand, type ChildLike, resolveActionCwd, runAction, runPrecondition, type SpawnFn} from '../src/lib/executor'
 import {isManagedSecretEnv} from '../src/lib/env-capabilities'
 import {type Action, PlaybookSchema} from '../src/lib/schema'
 import {saveManagedServiceConfig} from '../src/lib/managed-service'
@@ -192,6 +192,46 @@ describe('runAction', () => {
   function strongBackend(handle: StrongContainmentHandle): StrongContainmentBackend {
     return {available: () => ({available: true}), prepare: () => handle}
   }
+
+  it('runs the precondition as a sanitized shell in the authorized directory without recovery', async () => {
+    const {spawn, calls} = makeSpawn({code: 1})
+    const result = await runPrecondition('guarded', action({type: 'codex', run: 'work', cwd: '/authorized',
+      env: {vars: {NODE_OPTIONS: '--inspect', SAFE_FLAG: 'yes'}},
+      precondition: {run: 'false'}, on_failure: {run: 'echo recovery'},
+    }), ctx(spawn, {authorizedCwd: '/authorized', secrets: {cyiAuth: 'cyi_u_private'}}))
+    expect(result.exitCode).toBe(1)
+    expect(result.logPath).toContain('guarded-precondition-')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({cmd: '/trusted/sh', args: ['-c', 'false'], opts: {
+      cwd: '/authorized', env: {NODE_OPTIONS: '', SAFE_FLAG: 'yes'},
+    }})
+    expect(Object.values(calls[0].opts.env)).not.toContain('cyi_u_private')
+  })
+
+  it('enforces the precondition timeout instead of the action timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const {spawn} = makeSpawn({hang: true})
+      const pending = runPrecondition('guardedtimeout', action({type: 'shell', run: 'true', timeout: 300,
+        precondition: {run: 'sleep 60', timeout: 1},
+      }), ctx(spawn))
+      // TERM at the 1 s precondition deadline, then the grace before KILL: the 300 s action timeout never applies.
+      await vi.advanceTimersByTimeAsync(1000)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(await pending).toMatchObject({status: 'timeout', errorCode: 'C124-EXEC-001'})
+    } finally { vi.useRealTimers() }
+  })
+
+  it('fails closed when the precondition strong containment is unavailable', async () => {
+    const {spawn, calls} = makeSpawn({code: 0})
+    const prepare = vi.fn()
+    const result = await runPrecondition('guardedstrong', action({type: 'codex', run: 'work',
+      containment: 'strong', precondition: {run: 'true'},
+    }), ctx(spawn, {strongContainment: {available: () => ({available: false}), prepare}}))
+    expect(result.errorCode).toBe('C412-EXEC-005')
+    expect(calls).toHaveLength(0)
+    expect(prepare).not.toHaveBeenCalled()
+  })
 
   it('polymorphic shim: the launcher starts with the original NAME, not the binary one', async () => {
     // Reproduces the real case: in the service PATH `claude` is `shims/claude -> mise`. The pinning

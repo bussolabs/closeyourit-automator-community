@@ -2,6 +2,7 @@ import {Args} from '@oclif/core'
 import {BaseCommand} from '../base'
 import {validatePlaybook} from '../lib/playbook'
 import {parseSchedule} from '../lib/schedule'
+import {evaluateCommand} from '../lib/command-policy'
 import {playbookPath} from '../lib/paths'
 import {AutomatorError, ErrorCodes} from '../errors/error-codes'
 
@@ -37,6 +38,23 @@ export default class Validate extends BaseCommand {
       throw new AutomatorError(
         ErrorCodes.Schedule.invalid,
         scheduleErrors.map((e) => `${e.name}: ${e.message}`).join('; '),
+        2,
+      )
+    }
+
+    // CYAU-274 — a precondition runs unattended before every due action: a dangerous one is rejected here,
+    // with the same command policy the executor applies before the spawn.
+    const policyErrors: Array<{name: string; reason: string}> = []
+    for (const [name, action] of Object.entries(result.playbook.actions)) {
+      if (!action.precondition) continue
+      const decision = evaluateCommand(action.precondition.run)
+      if (!decision.allowed) policyErrors.push({name, reason: decision.reason ?? 'command policy'})
+    }
+
+    if (policyErrors.length > 0) {
+      throw new AutomatorError(
+        ErrorCodes.Policy.violation,
+        policyErrors.map((e) => `${e.name}.precondition: ${e.reason}`).join('; '),
         2,
       )
     }

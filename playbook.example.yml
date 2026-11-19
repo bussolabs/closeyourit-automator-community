@@ -21,6 +21,11 @@ actions:
     permission_mode: acceptEdits
     allowed_tools: [Read, Grep, Glob, "Bash(cyi:*)"]
     timeout: 600
+    # Optional shell check: exit 0 starts the action; another exit or timeout skips this occurrence.
+    # The script must exist in the authorized repository and obey the shell command policy.
+    # precondition:
+    #   run: "sh bin/has-new-tickets.sh"
+    #   timeout: 30  # default 30 seconds, maximum 300
 
   # 2) Report giornaliero: comando shell deterministico (nessun LLM nel loop).
   report:

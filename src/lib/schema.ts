@@ -72,6 +72,10 @@ const baseShape = {
   enabled: z.boolean().default(true),
   env: EnvSpec.optional(),
   on_failure: OnFailure.optional(),
+  precondition: z.object({
+    run: z.string().min(1),
+    timeout: z.number().int().positive().max(300).default(30),
+  }).strict().optional(),
   catch_up: z.boolean().default(false),
   ticket: TicketTarget.optional(),
 }

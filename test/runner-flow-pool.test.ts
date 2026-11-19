@@ -4,7 +4,7 @@ import * as path from 'node:path'
 import {spawnSync} from 'node:child_process'
 import {afterAll, describe, expect, it, vi} from 'vitest'
 import {runOnce} from '../src/lib/runner'
-import {type RunResult} from '../src/lib/executor'
+import {type RunResult, type SpawnFn} from '../src/lib/executor'
 import {type AgentRuntime} from '../src/lib/runtime'
 import {emptyState, loadState, saveState, updateAction} from '../src/lib/state'
 import {PlaybookSchema, type Playbook} from '../src/lib/schema'
@@ -334,6 +334,52 @@ describe('runOnce — atomic queue take-over (CYAU-169)', () => {
       return {outcome: 'admit' as const, state: 'ready' as const, reason: 'ok', audit: []}
     }
   }
+
+  it.each(['empty', 'timeout', 'ready'])('checks the queue once before any claim: %s', async (mode) => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const pb = playbookWith(['q'])
+    pb.actions.q.precondition = {run: 'true', timeout: 1}
+    const {claimQueue} = claimSource([])
+    const preflight = vi.fn(claimAwarePreflight([]))
+    const execute = vi.fn()
+    const heartbeat = vi.fn(async (_ok: boolean) => undefined)
+    const spawn: SpawnFn = vi.fn(() => {
+      let close: ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined
+      return {
+        stdout: {on: () => undefined}, stderr: {on: () => undefined},
+        on: (event, cb) => {
+          if (event === 'close') {
+            close = cb as typeof close
+            if (mode !== 'timeout') queueMicrotask(() => close?.(mode === 'ready' ? 0 : 1, null))
+          }
+        },
+        kill: () => { close?.(null, 'SIGTERM'); return true },
+      }
+    })
+    vi.useFakeTimers()
+    try {
+      const pending = runOnce({playbook: pb, playbookDir: dir, now, ...p, spawn,
+        runtime: {id: 'agent', healthCheck: async () => ({available: true}), execute},
+        skillsMode: true, flowMaxParallel: 3, ticketQueues: {q: target}, claimQueue, preflight, heartbeat,
+      })
+      // A hung check gets TERM at its 1 s deadline and KILL after the 5 s grace: step through both.
+      let settled = false
+      void pending.then(() => { settled = true }, () => { settled = true })
+      for (let step = 0; step < 10 && !settled; step++) await vi.advanceTimersByTimeAsync(1000)
+      const result = await pending
+      expect(spawn).toHaveBeenCalledTimes(1)
+      expect(claimQueue).toHaveBeenCalledTimes(mode === 'ready' ? 1 : 0)
+      expect(preflight).toHaveBeenCalledTimes(mode === 'ready' ? 1 : 0)
+      expect(execute).not.toHaveBeenCalled()
+      expect(heartbeat.mock.calls[0][0]).toBe(true)
+      if (mode !== 'ready') {
+        expect(result.executed[0]).toMatchObject({status: 'skipped',
+          errorCode: mode === 'timeout' ? 'C124-ACTION-003' : 'C000-ACTION-002'})
+        expect(loadState(p.stateFile).actions.q.last_run).toBe(now.toISOString())
+      }
+    } finally { vi.useRealTimers() }
+  })
 
   it('a single queue fills the slots: as many DIFFERENT tickets as there are, in flight together', async () => {
     const p = paths()

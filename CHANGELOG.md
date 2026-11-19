@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-11-18
+
+### Added
+
+- **Un'azione parte solo se c'è lavoro.** Ogni azione può dichiarare un controllo breve (`precondition`, 30 secondi di partenza, al massimo 300) che gira prima di prendere un ticket; se non trova lavoro o scade, l'azione risulta saltata con il motivo nello storico e in `list`, senza rendere rosso l'host. (CYAU-274)
+
 ## [0.59.1] - 2026-11-18
 
 ### Changed
