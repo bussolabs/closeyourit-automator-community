@@ -2,11 +2,13 @@ import {BaseCommand} from '../base'
 import {type HostActivity, readHostActivity} from '../lib/activity'
 import {loadSecrets} from '../lib/config'
 import {renderTable} from '../lib/output'
-import {listTicketAttempts, type TicketAttemptRecord} from '../lib/ticket-attempts'
+import {scanTicketAttempts, type TicketAttemptRecord, type UnreadableTicketAttempts} from '../lib/ticket-attempts'
 
 /** What the command returns: the current activity plus the spend accumulated per ticket (CYAU-155). */
 interface ActivityReport extends HostActivity {
   ticket_spend: TicketAttemptRecord[]
+  /** CYAU-324 — count files that cannot be read: listed, never silently dropped from the view. */
+  ticket_spend_unreadable: UnreadableTicketAttempts[]
 }
 
 export default class Activity extends BaseCommand {
@@ -19,7 +21,12 @@ export default class Activity extends BaseCommand {
     await this.parse(Activity)
     // The per-ticket spend does NOT go into `HostActivity`: that structure is the heartbeat payload sent to the
     // server, while this is local data for the operator. It travels alongside, not inside.
-    const report: ActivityReport = {...readHostActivity(loadSecrets()), ticket_spend: listTicketAttempts()}
+    const spend = scanTicketAttempts()
+    const report: ActivityReport = {
+      ...readHostActivity(loadSecrets()),
+      ticket_spend: spend.records,
+      ticket_spend_unreadable: spend.unreadable,
+    }
     if (!this.jsonEnabled()) this.printActivity(report)
     return report
   }
@@ -39,15 +46,15 @@ export default class Activity extends BaseCommand {
       ])
       this.log(renderTable(['ticket', 'fase', 'runtime', 'inizio', 'lease', 'stato'], rows))
     }
-    this.printTicketSpend(activity.ticket_spend)
+    this.printTicketSpend(activity.ticket_spend, activity.ticket_spend_unreadable)
   }
 
   /**
    * How much each ticket cost and how many times we tried it (CYAU-155). This is the missing view: with only the
    * daily total, a ticket resumed dozens of times disappeared inside the spend of all the others.
    */
-  private printTicketSpend(spend: TicketAttemptRecord[]): void {
-    if (spend.length === 0) return
+  private printTicketSpend(spend: TicketAttemptRecord[], unreadable: UnreadableTicketAttempts[]): void {
+    if (spend.length === 0 && unreadable.length === 0) return
     const rows = spend.map((entry) => [
       entry.ticket,
       entry.project,
@@ -56,6 +63,10 @@ export default class Activity extends BaseCommand {
       String(entry.total_attempts),
       entry.total_cost.toFixed(2),
     ])
+    // CYAU-324: the ticket is stopped on that file until a person presses Retry — it must show up here.
+    for (const entry of unreadable) {
+      rows.push([entry.ticket, entry.project ?? '-', 'conteggio illeggibile', '-', '-', '-'])
+    }
     this.log('')
     this.log('spesa per ticket:')
     this.log(renderTable(['ticket', 'progetto', 'fase', 'tentativi fase', 'tentativi totali', 'costo'], rows))

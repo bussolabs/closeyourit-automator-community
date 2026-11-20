@@ -22,6 +22,7 @@ import {OVERSIZED_DIFF_FAILURE, ReviewSnapshotExecutionError} from '../src/lib/r
 import {type PrepareResult} from '../src/lib/workspace'
 import {AutomatorError, ErrorCodes} from '../src/errors/error-codes'
 import {RetryableDeliveryError} from '../src/lib/delivery-errors'
+import {defaultOperationalDeliveryProbe} from '../src/lib/deliver'
 
 const directories: string[] = []
 
@@ -32,6 +33,7 @@ function temporaryDirectory(): string {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   for (const directory of directories.splice(0)) fs.rmSync(directory, {recursive: true, force: true})
 })
 
@@ -930,6 +932,69 @@ describe('persistent ticket cycle', () => {
     const run = readRun(runPath(input.runId, runsBase)).run
     expect(run?.checkpoints.at(-1)).toMatchObject({phase: 'in_review', automation: {cycleDecision: {cycle: 2}}})
     expect(run?.checkpoints.filter((entry) => entry.phase === 'implementing')).toHaveLength(2)
+  })
+
+  // These are command-outcome fixtures, not a test of Node's timeout implementation.
+  // deliver.test.ts checks the actual spawn options used by the production runner.
+  it.each([
+    {duration: 30_000, timedOut: false},
+    {duration: 119_999, timedOut: false},
+    {duration: 120_001, timedOut: true},
+  ])('handles a simulated $duration ms push without restarting implementation', async ({duration, timedOut}) => {
+    vi.useFakeTimers({toFake: ['Date']})
+    vi.setSystemTime(0)
+    const runsBase = temporaryDirectory()
+    const calls: string[] = []
+    const delivery = {
+      authorized: true,
+      git: {commitApproved: () => 'd'.repeat(40), attestCommit: () => undefined},
+      probe: defaultOperationalDeliveryProbe('CYAU', (cmd, args, _cwd, timeout) => {
+        expect(timeout).toBe(120_000)
+        calls.push(cmd === 'git' ? 'push' : args[1])
+        if (cmd === 'git') vi.setSystemTime(duration)
+        if (cmd === 'git' && timedOut) return {status: null, stdout: '', stderr: 'spawnSync git ETIMEDOUT'}
+        return {status: 0, stderr: '', stdout: args[1] === 'create' ? 'https://github.com/acme/widget/pull/37' : args[1] === 'comments' ? '{"data":[]}' : ''}
+      }),
+      kb: {publish: () => { throw new Error('No artifacts expected') }},
+      knowledgeArtifacts: () => [],
+    }
+    const lifecycle = await provider(runsBase, {delivery}).prepare(input)
+    await lifecycle.beforeRuntime()
+    const execution = result()
+    const outcome = await lifecycle.afterRuntime(execution.raw, execution.normalized)
+    expect(outcome).toMatchObject({outcome: 'complete', runStatus: timedOut ? 'failure' : 'success'})
+    expect(Date.now()).toBe(duration)
+    expect(calls).toEqual(timedOut ? ['push'] : ['push', 'list', 'create', 'comments', 'comment'])
+    const run = readRun(runPath(input.runId, runsBase)).run
+    expect(run?.checkpoints.at(-1)?.phase).toBe(timedOut ? 'in_review' : 'completed')
+    expect(run?.checkpoints.filter((entry) => entry.phase === 'implementing')).toHaveLength(1)
+  })
+
+  it('rediscovers a PR after its creation timed out without creating a duplicate', async () => {
+    const runsBase = temporaryDirectory()
+    let created = false
+    const calls: string[] = []
+    const delivery = {
+      authorized: true,
+      git: {commitApproved: () => 'd'.repeat(40), attestCommit: () => undefined},
+      probe: defaultOperationalDeliveryProbe('CYAU', (cmd, args) => {
+        calls.push(cmd === 'git' ? 'push' : args[1])
+        if (args[1] === 'create') {
+          created = true
+          return {status: null, stdout: '', stderr: 'spawnSync gh ETIMEDOUT'}
+        }
+        return {status: 0, stderr: '', stdout: args[1] === 'list' && created ? 'https://github.com/acme/widget/pull/37' : args[1] === 'comments' ? '{"data":[]}' : ''}
+      }),
+      kb: {publish: () => { throw new Error('No artifacts expected') }},
+      knowledgeArtifacts: () => [],
+    }
+    const first = await provider(runsBase, {delivery}).prepare(input)
+    await first.beforeRuntime()
+    const execution = result()
+    await expect(first.afterRuntime(execution.raw, execution.normalized)).resolves.toMatchObject({runStatus: 'failure'})
+    const restarted = await provider(runsBase, {delivery}).prepare(input)
+    await expect(restarted.resumeAfterInterruption?.()).resolves.toMatchObject({runStatus: 'success'})
+    expect(calls).toEqual(['push', 'list', 'create', 'list', 'comments', 'comment'])
   })
 
   it('after review approved runs delivery, persists artifacts and ends completed staying CYI In Review', async () => {

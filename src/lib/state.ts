@@ -218,7 +218,8 @@ export function withFileWriteLock<T>(file: string, run: () => T, options: Atomic
   }
 }
 
-function syncDirectoryBestEffort(directory: string): void {
+/** fsync of a directory after a rename/rm, best effort: the commit already happened. Shared with `ticket-attempts`. */
+export function syncDirectoryBestEffort(directory: string): void {
   let fd: number | null = null
   try {
     fd = fs.openSync(directory, 'r')

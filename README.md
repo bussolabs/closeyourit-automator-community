@@ -327,7 +327,11 @@ Ogni comando supporta `--json`.
   (default 5) il ticket non viene più reclamato, la sospensione è commentata sul ticket una sola volta e il
   candidato viene differito lato server. Un avanzamento di fase azzera il conteggio; la spesa storica resta e
   si legge con `automator activity`. Il contatore è host-scoped: con più host sullo stesso progetto la soglia
-  vale per macchina, finché la coda non espone un contatore server-side.
+  vale per macchina, finché la coda non espone un contatore server-side. Il file è scritto con fsync prima del
+  rename e della cartella dopo, così un blackout lascia il conteggio vecchio o quello nuovo, mai un file vuoto.
+  Un conteggio illeggibile ferma il ticket con un solo commento sul ticket: lo sblocca «Riprova», che mette il
+  file da parte (`<file>.corrupt-<stamp>`) e fa ripartire il conteggio da uno; la spesa già registrata resta
+  solo nel file messo da parte. `automator activity` lo mostra come «conteggio illeggibile».
 - Un **limite di quota** di Claude o Codex è una pausa, non un fallimento (CYAU-275). L'ora di ripresa si legge
   dall'errore (30 minuti se manca) e la macchina mette in pausa quel motore in `<stateDir>/quota-pause.json`
   fino al reset; il tentativo contato alla presa in carico viene restituito, fino a 3 pause consecutive sulla
@@ -451,6 +455,13 @@ Ogni comando supporta `--json`.
 - Il PATH del servizio è esplicito (shim mise) — vedi `CLAUDE.md` per i gotcha operativi.
 
 ## Sviluppo
+
+La consegna concede **120 secondi per singola operazione di rete**: push, ricerca e apertura della PR,
+lettura e aggiunta del collegamento sul ticket. Il runner mantiene 15 secondi come default per comandi
+locali e invia SIGTERM alla scadenza. Le operazioni sono sincrone: le attese si sommano e possono
+ritardare heartbeat e rinnovi dei lease oltre due minuti complessivi. Un timeout resta un errore
+temporaneo; la ripresa usa i checkpoint e ricerca la PR esistente anche se la creazione remota è
+riuscita prima della scadenza, evitando di aprirne una seconda.
 
 ```sh
 mise exec -- pnpm test     # vitest + coverage (gate ≥90% line/branch)

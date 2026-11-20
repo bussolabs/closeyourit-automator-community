@@ -8,12 +8,18 @@ import {
   evaluateTicketAttempts,
   listTicketAttempts,
   maxTicketAttempts,
+  ownedByThisUser,
   readTicketAttempts,
   recordTicketAttempt,
   resetTicketAttempts,
   restartedByPerson,
+  scanTicketAttempts,
+  setAsideCorruptTicketAttempts,
   settleQuotaPause,
+  syncDirectoryStrict,
   ticketAttemptsPath,
+  type TicketAttemptsWriteIo,
+  writeTicketAttemptsFile,
 } from '../src/lib/ticket-attempts'
 
 // CYAU-155: the per-ticket counter is the only memory surviving between one tick and the next. Without it, a
@@ -231,6 +237,254 @@ describe('resetTicketAttempts e listTicketAttempts', () => {
 
   it('missing directory: no spend to show, no error', () => {
     expect(listTicketAttempts(path.join(tempDir(), 'mai-creata'))).toEqual([])
+    expect(scanTicketAttempts(path.join(tempDir(), 'mai-creata'))).toEqual({records: [], unreadable: []})
+  })
+
+  // CYAU-324: an unreadable file must not hide the others, but must not vanish either — its ticket is stopped on it.
+  it('scan: 2 readable counts and 1 unreadable, each one listed', () => {
+    const dir = tempDir()
+    recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-156', phase: 'triage', now: at('2026-08-15T10:00:00Z')}, dir)
+    recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-155', phase: 'autopilot', now: at('2026-08-15T10:00:00Z')}, dir)
+    fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-324', dir), '')
+    fs.writeFileSync(path.join(dir, 'rotto.json'), '{"project":"CYAU","ticket":"CYAU-9","attempts":"molti"}')
+    fs.writeFileSync(`${ticketAttemptsPath('CYAU', 'CYAU-1', dir)}.corrupt-2026-11-10`, '')
+
+    const scan = scanTicketAttempts(dir)
+
+    expect(scan.records.map((entry) => entry.ticket)).toEqual(['CYAU-155', 'CYAU-156'])
+    expect(scan.unreadable).toEqual([
+      {project: null, ticket: 'rotto', file: path.join(dir, 'rotto.json')},
+      {project: 'CYAU', ticket: 'CYAU-324', file: ticketAttemptsPath('CYAU', 'CYAU-324', dir)},
+    ])
+  })
+})
+
+// CYAU-324: ext4 with default options protects the rename that replaces a file, not the first creation: without an
+// fsync the first attempt of a ticket could come back as an empty file after a power loss.
+describe('writeTicketAttemptsFile', () => {
+  const record = {
+    project: 'CYAU', ticket: 'CYAU-324', phase: 'autopilot', attempts: 1, cost: 0,
+    total_attempts: 1, total_cost: 0, first_at: 'x', updated_at: 'x',
+  }
+
+  function tracingIo(calls: string[], over: Partial<TicketAttemptsWriteIo> = {}): TicketAttemptsWriteIo {
+    return {
+      makeDirectory: (directory) => {
+        const created = fs.mkdirSync(directory, {recursive: true})
+        calls.push(`makeDirectory:${created ?? 'none'}`)
+        return created
+      },
+      open: (file) => { calls.push('open'); return fs.openSync(file, 'wx', 0o600) },
+      write: (fd, data) => { calls.push('write'); fs.writeFileSync(fd, data, 'utf8') },
+      sync: (fd) => { calls.push('sync'); fs.fsyncSync(fd) },
+      close: (fd) => { calls.push('close'); fs.closeSync(fd) },
+      rename: (from, to) => { calls.push('rename'); fs.renameSync(from, to) },
+      syncDirectory: (directory) => { calls.push(`syncDirectory:${directory}`) },
+      ownsDirectory: () => false,
+      ...over,
+    }
+  }
+
+  /** Ownership boundary of a test: everything strictly below `root` counts as created by this machine. */
+  function ownedBelow(root: string): (directory: string) => boolean {
+    return (directory) => directory.startsWith(`${root}${path.sep}`)
+  }
+
+  it('first creation: content flushed before the rename, directory flushed after it', () => {
+    const dir = tempDir()
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    const calls: string[] = []
+
+    writeTicketAttemptsFile(file, record, tracingIo(calls))
+
+    expect(calls).toEqual(['makeDirectory:none', 'open', 'write', 'sync', 'close', 'rename', `syncDirectory:${dir}`])
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir).record).toMatchObject({attempts: 1})
+  })
+
+  it('directories created by the write are flushed in their parents before the file is published', () => {
+    const root = tempDir()
+    const dir = path.join(root, 'state', 'ticket-attempts')
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    const calls: string[] = []
+
+    writeTicketAttemptsFile(file, record, tracingIo(calls, {ownsDirectory: ownedBelow(root)}))
+
+    expect(calls).toEqual([
+      `makeDirectory:${path.join(root, 'state')}`,
+      `syncDirectory:${path.join(root, 'state')}`,
+      `syncDirectory:${root}`,
+      'open', 'write', 'sync', 'close', 'rename',
+      `syncDirectory:${dir}`,
+    ])
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir).record).toMatchObject({attempts: 1})
+  })
+
+  it('only the counters directory is new: its parent is flushed before the temp is opened', () => {
+    const root = tempDir()
+    const dir = path.join(root, 'ticket-attempts')
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    const calls: string[] = []
+
+    writeTicketAttemptsFile(file, record, tracingIo(calls, {ownsDirectory: ownedBelow(root)}))
+
+    expect(calls.slice(0, 3)).toEqual([`makeDirectory:${dir}`, `syncDirectory:${root}`, 'open'])
+  })
+
+  it('a failed flush never publishes the file: the old count stays, no temp left behind', () => {
+    const dir = tempDir()
+    recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-324', phase: 'autopilot'}, dir)
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    const calls: string[] = []
+    const io = tracingIo(calls, {sync: () => { throw new Error('EIO') }})
+
+    expect(() => writeTicketAttemptsFile(file, {...record, attempts: 2}, io)).toThrow('EIO')
+
+    expect(calls).not.toContain('rename')
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir).record).toMatchObject({attempts: 1})
+    expect(fs.readdirSync(dir)).toEqual(['CYAU__CYAU-324.json'])
+  })
+
+  it('directory already there: its parent is still flushed before the file is published', () => {
+    const root = tempDir()
+    const dir = path.join(root, 'ticket-attempts')
+    recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-324', phase: 'autopilot'}, dir)
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    const calls: string[] = []
+
+    writeTicketAttemptsFile(file, {...record, attempts: 2}, tracingIo(calls, {ownsDirectory: ownedBelow(root)}))
+
+    expect(calls).toEqual([
+      'makeDirectory:none', `syncDirectory:${root}`,
+      'open', 'write', 'sync', 'close', 'rename',
+      `syncDirectory:${dir}`,
+    ])
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir).record).toMatchObject({attempts: 2})
+  })
+
+  it('retry after a failed parent flush: the directory left behind is flushed in its parent again', () => {
+    const root = tempDir()
+    const dir = path.join(root, 'state', 'ticket-attempts')
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    const failing: string[] = []
+    const failingIo = tracingIo(failing, {
+      ownsDirectory: ownedBelow(root),
+      syncDirectory: (directory) => {
+        failing.push(`syncDirectory:${directory}`)
+        if (directory === root) throw new Error('EIO')
+      },
+    })
+
+    expect(() => writeTicketAttemptsFile(file, record, failingIo)).toThrow('EIO')
+    expect(fs.readdirSync(dir)).toEqual([])
+
+    const calls: string[] = []
+    writeTicketAttemptsFile(file, record, tracingIo(calls, {ownsDirectory: ownedBelow(root)}))
+
+    expect(calls).toEqual([
+      'makeDirectory:none',
+      `syncDirectory:${path.join(root, 'state')}`,
+      `syncDirectory:${root}`,
+      'open', 'write', 'sync', 'close', 'rename',
+      `syncDirectory:${dir}`,
+    ])
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir).record).toMatchObject({attempts: 1})
+  })
+
+  it('a failed flush of a just created directory stops the write before the file exists', () => {
+    const root = tempDir()
+    const dir = path.join(root, 'ticket-attempts')
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    const calls: string[] = []
+    const io = tracingIo(calls, {ownsDirectory: ownedBelow(root), syncDirectory: (directory) => {
+      calls.push(`syncDirectory:${directory}`)
+      throw new Error('EIO')
+    }})
+
+    expect(() => writeTicketAttemptsFile(file, record, io)).toThrow('EIO')
+
+    expect(calls).toEqual([`makeDirectory:${dir}`, `syncDirectory:${root}`])
+    expect(fs.readdirSync(dir)).toEqual([])
+  })
+
+  it('a failed flush after the rename is reported, never taken as a durable write', () => {
+    const dir = tempDir()
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    const calls: string[] = []
+    const io = tracingIo(calls, {syncDirectory: (directory) => {
+      calls.push(`syncDirectory:${directory}`)
+      throw new Error('EIO')
+    }})
+
+    expect(() => writeTicketAttemptsFile(file, record, io)).toThrow('EIO')
+
+    expect(calls).toEqual(['makeDirectory:none', 'open', 'write', 'sync', 'close', 'rename', `syncDirectory:${dir}`])
+  })
+
+  it('the default directory flush propagates its error instead of swallowing it', () => {
+    const missing = path.join(tempDir(), 'missing')
+
+    expect(() => syncDirectoryStrict(missing)).toThrow(/ENOENT/)
+    expect(() => syncDirectoryStrict(tempDir())).not.toThrow()
+  })
+
+  it('the default ownership stops at the home directory and the filesystem root', () => {
+    expect(ownedByThisUser(tempDir())).toBe(true)
+    expect(ownedByThisUser(os.homedir())).toBe(false)
+    expect(ownedByThisUser(path.parse(os.tmpdir()).root)).toBe(false)
+  })
+
+  it('the default io flushes the parents of an existing directory too', () => {
+    const root = tempDir()
+    const dir = path.join(root, 'ticket-attempts')
+    fs.mkdirSync(dir)
+
+    writeTicketAttemptsFile(ticketAttemptsPath('CYAU', 'CYAU-324', dir), record)
+
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir).record).toMatchObject({attempts: 1})
+  })
+})
+
+// CYAU-324: only a person's Retry gets a ticket out of an unreadable count; the machine never resets it by itself.
+describe('setAsideCorruptTicketAttempts', () => {
+  function corrupt(dir: string, writtenAt: string): string {
+    const file = ticketAttemptsPath('CYAU', 'CYAU-324', dir)
+    fs.writeFileSync(file, '')
+    const when = new Date(writtenAt)
+    fs.utimesSync(file, when, when)
+    return file
+  }
+
+  it('Retry after the damage: the file is set aside, not deleted, and the series restarts from one', () => {
+    const dir = tempDir()
+    const file = corrupt(dir, '2026-11-10T10:00:00Z')
+
+    const quarantined = setAsideCorruptTicketAttempts('CYAU', 'CYAU-324', '2026-11-10T11:00:00Z', dir, at('2026-11-10T11:05:00Z'))
+
+    expect(quarantined).not.toBeNull()
+    expect(quarantined!.startsWith(`${file}.corrupt-2026-11-10T11-05-00-000Z-`)).toBe(true)
+    expect(fs.existsSync(quarantined!)).toBe(true)
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir)).toEqual({record: null, corrupt: false})
+    expect(recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-324', phase: 'autopilot'}, dir)).toMatchObject({attempts: 1, total_attempts: 1})
+    // The set-aside file is not a count: it does not come back as unreadable in the activity view.
+    expect(scanTicketAttempts(dir).unreadable).toEqual([])
+  })
+
+  it('no Retry, an unreadable one or one older than the damage: the file stays and the ticket stays stopped', () => {
+    const dir = tempDir()
+    corrupt(dir, '2026-11-10T10:00:00Z')
+
+    for (const budgetFrom of [undefined, null, 'non una data', '2026-11-10T09:00:00Z', '2026-11-10T10:00:00Z']) {
+      expect(setAsideCorruptTicketAttempts('CYAU', 'CYAU-324', budgetFrom, dir)).toBeNull()
+    }
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir).corrupt).toBe(true)
+  })
+
+  it('readable or missing count: nothing to set aside', () => {
+    const dir = tempDir()
+    expect(setAsideCorruptTicketAttempts('CYAU', 'CYAU-324', '2099-01-01T00:00:00Z', dir)).toBeNull()
+    recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-324', phase: 'autopilot'}, dir)
+    expect(setAsideCorruptTicketAttempts('CYAU', 'CYAU-324', '2099-01-01T00:00:00Z', dir)).toBeNull()
+    expect(readTicketAttempts('CYAU', 'CYAU-324', dir).record).toMatchObject({attempts: 1})
   })
 })
 

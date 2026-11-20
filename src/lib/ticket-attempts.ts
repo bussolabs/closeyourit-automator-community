@@ -1,7 +1,9 @@
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import {randomUUID} from 'node:crypto'
 import {ticketAttemptsDir} from './paths'
+import {quarantineCorruptState, syncDirectoryBestEffort} from './state'
 
 // Attempt and spend counter PER TICKET (CYAU-155). The claim, the lease and the daily usage know everything about
 // ONE attempt and nothing about the SERIES: a ticket that always fails the same way was put back in the queue
@@ -19,6 +21,8 @@ import {ticketAttemptsDir} from './paths'
 //
 // FAIL-CLOSED like the rest of the durable state: an unreadable record does NOT become "zero attempts" — the reader
 // gets `corrupt` and the upstream gate blocks, because restarting from zero is exactly the fault to avoid.
+// CYAU-324 — the only way out of `corrupt` is a person: a Retry pressed after the file went bad sets it aside
+// (`…​.corrupt-<stamp>`, never deleted) and the series restarts from one. Without it the ticket stays stopped.
 
 /** Consecutive attempts allowed on the SAME phase before stopping and reporting. */
 export const DEFAULT_MAX_TICKET_ATTEMPTS = 5
@@ -90,23 +94,113 @@ export function ticketAttemptsPath(project: string, ticket: string, dir: string 
   return path.join(dir, `${safeProject}__${safeTicket}.json`)
 }
 
+/** File operations of the durable write: injectable so a test can prove their order. */
+export interface TicketAttemptsWriteIo {
+  /** Recursive mkdir. */
+  makeDirectory: (directory: string) => void
+  /** Whether this machine may have created `directory`: the parent of every such directory is flushed on each write. */
+  ownsDirectory: (directory: string) => boolean
+  open: (file: string) => number
+  write: (fd: number, data: string) => void
+  sync: (fd: number) => void
+  close: (fd: number) => void
+  rename: (from: string, to: string) => void
+  syncDirectory: (directory: string) => void
+}
+
+const defaultWriteIo: TicketAttemptsWriteIo = {
+  makeDirectory: (directory) => { fs.mkdirSync(directory, {recursive: true}) },
+  ownsDirectory: ownedByThisUser,
+  open: (file) => fs.openSync(file, 'wx', 0o600),
+  write: (fd, data) => fs.writeFileSync(fd, data, 'utf8'),
+  sync: (fd) => fs.fsyncSync(fd),
+  close: (fd) => fs.closeSync(fd),
+  rename: (from, to) => fs.renameSync(from, to),
+  syncDirectory: syncDirectoryStrict,
+}
+
 /**
- * Atomic record write: temp + rename, without an inter-process lock. The general state lock is for
- * whoever can have TWO writers on the same file; here it cannot happen — a ticket's counter is touched
+ * Directory fsync that PROPAGATES its error. `syncDirectoryBestEffort` swallows it because, for the general state, the
+ * commit already happened; here a swallowed EIO would let a counter whose directory entry may vanish at the next power
+ * loss count as written — and a vanished counter reads as "no attempt yet", the restart from zero this module exists to
+ * prevent.
+ */
+export function syncDirectoryStrict(directory: string): void {
+  const fd = fs.openSync(directory, 'r')
+  try {
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+/**
+ * A directory this process could have created: owned by its user, and not the home directory or the filesystem root
+ * (they exist before any automator, and their parents may not even be readable). Without a uid (not POSIX) nothing is
+ * claimed: no parent flush.
+ */
+export function ownedByThisUser(directory: string): boolean {
+  const uid = process.getuid?.()
+  if (uid === undefined) return false
+  const resolved = path.resolve(directory)
+  if (resolved === path.resolve(os.homedir()) || path.dirname(resolved) === resolved) return false
+  return fs.statSync(resolved).uid === uid
+}
+
+/**
+ * Durable record write: temp + fsync + rename + directory fsync, without an inter-process lock. The general state lock
+ * is for whoever can have TWO writers on the same file; here it cannot happen — a ticket's counter is touched
  * only by whoever holds its lease (only one, guaranteed by the server) and the local tick is already serialized by the
  * daemon lock. A rename is atomic on the same filesystem: a reader sees the old record or the new one, never
- * half a file, which is the only guarantee the gate needs.
+ * half a file.
+ *
+ * CYAU-324 — the rename alone is not enough after a power loss: ext4 with default options protects the rename that
+ * REPLACES a file, not the first creation, so the first attempt of every ticket could come back empty. The content is
+ * therefore flushed BEFORE the rename and the directory entry after it — the same method as `state.ts`. A directory
+ * this machine created is a new entry of its parent: every such parent is flushed too, before the file is published,
+ * otherwise a power loss could take away the whole counters directory and the count would read as absent. The flush
+ * runs on EVERY write, not only when `mkdir` reports a creation: after a failed parent flush the directory is already
+ * there, and a retry that trusted `mkdir` would publish a count whose directory entry was never made durable.
+ * Every flush error propagates: one before the rename leaves the old count in place (nothing is published); the one
+ * after the rename throws even though the new count is already visible, because it is not yet durable. The caller
+ * denies the dispatch either way (fail-closed): at worst an attempt is counted that never ran, never one forgotten.
  */
-function writeRecord(file: string, record: TicketAttemptRecord): void {
-  fs.mkdirSync(path.dirname(file), {recursive: true})
+export function writeTicketAttemptsFile(file: string, record: TicketAttemptRecord, io: TicketAttemptsWriteIo = defaultWriteIo): void {
+  const directory = path.dirname(file)
+  io.makeDirectory(directory)
+  syncOwnedDirectoryParents(directory, io)
   const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`
+  let fd: number | null = null
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {mode: 0o600})
-    fs.renameSync(temporary, file)
+    fd = io.open(temporary)
+    io.write(fd, `${JSON.stringify(record, null, 2)}\n`)
+    io.sync(fd)
+    io.close(fd)
+    fd = null
+    io.rename(temporary, file)
   } catch (error) {
+    if (fd !== null) {
+      try { io.close(fd) } catch { /* the temp cleanup continues */ }
+    }
     try { fs.rmSync(temporary, {force: true}) } catch { /* the orphan temp is not the count: it stays ignorable */ }
     throw error
   }
+  io.syncDirectory(directory)
+}
+
+/** Flushes the parent of every directory this machine may have created, from the deepest up to the first it does not own. */
+function syncOwnedDirectoryParents(directory: string, io: TicketAttemptsWriteIo): void {
+  let current = path.resolve(directory)
+  while (io.ownsDirectory(current)) {
+    const parent = path.dirname(current)
+    if (parent === current) return
+    io.syncDirectory(parent)
+    current = parent
+  }
+}
+
+function writeRecord(file: string, record: TicketAttemptRecord): void {
+  writeTicketAttemptsFile(file, record)
 }
 
 function finiteNonNegative(value: unknown): value is number {
@@ -312,6 +406,40 @@ export function restartedByPerson(record: TicketAttemptRecord | null | undefined
 }
 
 /**
+ * CYAU-324 — twin of `restartedByPerson` for an UNREADABLE count, which has no `updated_at` to compare: the file's
+ * last write stands in for it. A Retry (`budget_from`) later than that write sets the file aside — renamed, never
+ * deleted, so the lost spend can still be read by hand — and the next read finds no record: the series restarts from
+ * one. Anything else (readable count, no Retry, Retry older than the damage, failed rename) returns `null` and leaves
+ * the ticket stopped: the machine never resets the count by itself.
+ */
+export function setAsideCorruptTicketAttempts(
+  project: string,
+  ticket: string,
+  budgetFrom: unknown,
+  dir: string = ticketAttemptsDir(),
+  now: Date = new Date(),
+): string | null {
+  if (typeof budgetFrom !== 'string') return null
+  const from = Date.parse(budgetFrom)
+  if (!Number.isFinite(from)) return null
+  if (!readTicketAttempts(project, ticket, dir).corrupt) return null
+  const file = ticketAttemptsPath(project, ticket, dir)
+  let damagedAt: number
+  try {
+    damagedAt = fs.statSync(file).mtimeMs
+  } catch {
+    return null
+  }
+  if (!(from > damagedAt)) return null
+  const quarantined = quarantineCorruptState(file, `${now.toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`)
+  // Best effort on purpose: if this flush fails and the rename is lost, the damaged file comes back and the ticket is
+  // stopped again (fail-closed). The first attempt after the Retry writes in this same directory with a flush that
+  // must succeed before the dispatch goes ahead, and that flush makes this rename durable too.
+  if (quarantined) syncDirectoryBestEffort(dir)
+  return quarantined
+}
+
+/**
  * Resets a ticket's attempts KEEPING the totals: used when the ticket turns out concluded, so a reopened
  * code restarts clean on the threshold. The file is deliberately NOT deleted — it would be exactly the spend of the
  * just finished ticket that disappears from `automator activity`, i.e. the data we wanted to make visible.
@@ -342,28 +470,65 @@ export function resetTicketAttempts(
   return record
 }
 
-/** All known counts, sorted by ticket: the "how much each ticket cost" view of the read-only commands. */
-export function listTicketAttempts(dir: string = ticketAttemptsDir()): TicketAttemptRecord[] {
+/** A count file that cannot be read: identity taken from the file name, the only thing still trustworthy. */
+export interface UnreadableTicketAttempts {
+  /** `null` when the name does not follow `<project>__<code>.json`. */
+  project: string | null
+  ticket: string
+  file: string
+}
+
+/** Every count file of the store: the readable records and, apart, the unreadable ones (CYAU-324). */
+export interface TicketAttemptsScan {
+  records: TicketAttemptRecord[]
+  unreadable: UnreadableTicketAttempts[]
+}
+
+function unreadableEntry(dir: string, entry: string): UnreadableTicketAttempts {
+  const base = entry.slice(0, -'.json'.length)
+  const separator = base.indexOf('__')
+  return separator > 0
+    ? {project: base.slice(0, separator), ticket: base.slice(separator + 2), file: path.join(dir, entry)}
+    : {project: null, ticket: base, file: path.join(dir, entry)}
+}
+
+/**
+ * All the count files, sorted by ticket. An unreadable file does not hide the spend of the others, and does not
+ * disappear either (CYAU-324): it is listed apart, so the operator sees which ticket is stopped on it.
+ */
+export function scanTicketAttempts(dir: string = ticketAttemptsDir()): TicketAttemptsScan {
   let entries: string[]
   try {
     entries = fs.readdirSync(dir)
   } catch {
-    return []
+    return {records: [], unreadable: []}
   }
   const records: TicketAttemptRecord[] = []
+  const unreadable: UnreadableTicketAttempts[] = []
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue
     let parsed: unknown
     try {
       parsed = JSON.parse(fs.readFileSync(path.join(dir, entry), 'utf8'))
     } catch {
-      continue // an unreadable file must not hide the spend of all the others
+      unreadable.push(unreadableEntry(dir, entry))
+      continue
     }
     const raw = parsed as {project?: unknown; ticket?: unknown}
-    if (typeof raw?.project !== 'string' || typeof raw?.ticket !== 'string') continue
-    const record = coerceRecord(parsed, raw.project, raw.ticket)
+    const record = typeof raw?.project === 'string' && typeof raw?.ticket === 'string'
+      ? coerceRecord(parsed, raw.project, raw.ticket)
+      : null
     if (record) records.push(record)
+    else unreadable.push(unreadableEntry(dir, entry))
   }
-  return records.sort((left, right) =>
-    left.project === right.project ? left.ticket.localeCompare(right.ticket) : left.project.localeCompare(right.project))
+  const byTicket = (left: {project: string | null; ticket: string}, right: {project: string | null; ticket: string}) =>
+    left.project === right.project
+      ? left.ticket.localeCompare(right.ticket)
+      : (left.project ?? '').localeCompare(right.project ?? '')
+  return {records: records.sort(byTicket), unreadable: unreadable.sort(byTicket)}
+}
+
+/** All readable counts, sorted by ticket: the "how much each ticket cost" view of the read-only commands. */
+export function listTicketAttempts(dir: string = ticketAttemptsDir()): TicketAttemptRecord[] {
+  return scanTicketAttempts(dir).records
 }

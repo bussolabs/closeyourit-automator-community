@@ -58,6 +58,7 @@ import {
   recordTicketAttempt,
   resetTicketAttempts,
   restartedByPerson,
+  setAsideCorruptTicketAttempts,
   settleQuotaPause,
 } from './ticket-attempts'
 import {agentQuotaGate, type QuotaReadiness} from './agent-quota'
@@ -1001,7 +1002,22 @@ export function composeAttemptsExhaustedComment(attempts: number, cost: number):
 
 /** true if the ticket already carries the notice: the same notice is not republished at every tick. */
 function hasAttemptsExhaustedComment(comments: ReadonlyArray<{body?: string | null}>): boolean {
-  return comments.some((comment) => typeof comment.body === 'string' && comment.body.includes(ATTEMPTS_EXHAUSTED_MARKER))
+  return hasMarkedComment(comments, ATTEMPTS_EXHAUSTED_MARKER)
+}
+
+function hasMarkedComment(comments: ReadonlyArray<{body?: string | null}>, marker: string): boolean {
+  return comments.some((comment) => typeof comment.body === 'string' && comment.body.includes(marker))
+}
+
+/** CYAU-324 — hidden marker of the "unreadable count" notice: published once, like the exhausted one. */
+export const ATTEMPTS_UNREADABLE_MARKER = '<!-- closeyourit-automator:attempts-unreadable:v1 -->'
+
+/**
+ * The comment that tells the customer the ticket is stopped because this machine no longer knows how many times it
+ * tried, and how to unblock it: Retry, the same button used for any stopped ticket. Under the server cap.
+ */
+export function composeAttemptsUnreadableComment(): string {
+  return `Lavorazione automatica sospesa: su questa macchina il conteggio dei tentativi del ticket è illeggibile e non lo azzero da solo. Per ripartire premi «Riprova».\n${ATTEMPTS_UNREADABLE_MARKER}`
 }
 
 /**
@@ -1521,18 +1537,27 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
       // always fails the same way goes back to the queue forever (31 attempts and ~5 dollars on CYRA-298).
       // CYAU-249 — a person restarted the server's budget after our last attempt: our series restarts too,
       // otherwise Retry is undone by the next round. The spend stays in the totals.
+      // CYAU-324 — the same Retry on an UNREADABLE count sets the file aside (never deleted) and the series restarts
+      // from one; without it the count below stays corrupt and the ticket stays stopped.
+      setAsideCorruptTicketAttempts(ticket.project, ticket.code, budgetFrom, attemptsStore, now())
       if (restartedByPerson(readTicketAttempts(ticket.project, ticket.code, attemptsStore).record, budgetFrom)) {
         resetTicketAttempts(ticket.project, ticket.code, attemptsStore, now())
       }
       const counted = readTicketAttempts(ticket.project, ticket.code, attemptsStore)
       if (counted.corrupt) {
         // Not knowing how many attempts there were is worse than knowing there were too many: restarting from zero is exactly
-        // the failure to avoid. Short wait (local failure, resolves by itself) and technical audit for the beat.
-        const reason = `contatore dei tentativi del ticket ${ticket.code} non leggibile (fail-closed)`
+        // the failure to avoid. CYAU-324 — it does not resolve by itself either: the ticket says so ONCE (marker) and
+        // waits for a person's Retry. Only while the notice is not on the ticket does the stop stay technical, with a
+        // short wait: the beat shows it and the next round tries to publish again.
+        const noticed = hasMarkedComment(ticket.comments, ATTEMPTS_UNREADABLE_MARKER) || await options.probe
+          .publishComment(ticket.project, ticket.code, composeAttemptsUnreadableComment())
+          .catch(() => false)
+        const reason = `contatore dei tentativi del ticket ${ticket.code} non leggibile (fail-closed): ` +
+          (noticed ? 'serve «Riprova» da una persona' : 'segnalazione sul ticket non pubblicata')
         return {
           outcome: 'stop', state: 'blocked', reason,
-          audit: [{phase: 'classification', state: 'failed', reason}],
-          ...deferIntent('temporary_failure'),
+          audit: [{phase: 'classification', state: noticed ? 'stopped' : 'failed', reason}],
+          ...deferIntent(noticed ? 'preflight_blocked' : 'temporary_failure'),
         }
       }
       // The threshold looks at the attempts of the PHASE about to be claimed: a ticket that advanced a phase has made

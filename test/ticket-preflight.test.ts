@@ -35,6 +35,7 @@ import {
   ticketAttemptsPath,
 } from '../src/lib/ticket-attempts'
 import {
+  ATTEMPTS_UNREADABLE_MARKER,
   buildTicketPreflight as buildTicketPreflightReale,
   defaultTicketCliProbe,
   makeQueueClaimer,
@@ -3030,19 +3031,81 @@ describe('ticket state and attempt counter — CYAU-155', () => {
     expect(p.publishComment).not.toHaveBeenCalled()
   })
 
-  it('unreadable counter: fail-closed with a short wait, never a count deduced as zero', async () => {
+  // CYAU-324 — an unreadable count does not resolve by itself: the ticket says so once and waits for a person.
+  it('unreadable counter: stopped, one notice on the ticket, never a count deduced as zero', async () => {
     const dir = attemptsDir()
-    fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-34', dir), '{ rotto')
+    fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-34', dir), '')
     const lease = {acquire: vi.fn()}
+    const p = probe()
 
-    const result = await queuePreflight(triageCandidate, {lease, attempts: {dir}})('worker', claudeAction, queueTarget)
+    const result = await queuePreflight(triageCandidate, {lease, attempts: {dir}}, p)('worker', claudeAction, queueTarget)
 
     expect(result).toMatchObject({outcome: 'stop', state: 'blocked'})
-    expect(result.reason).toContain('tentativi')
+    expect(result.reason).toContain('Riprova')
     expect(lease.acquire).not.toHaveBeenCalled()
-    // A local failure resolves by itself: short wait, and the beat reports it as technical.
+    expect(result.queueDeferral).toEqual({selectionToken: 'opaque-never-log', reason: 'preflight_blocked'})
+    expect(JSON.stringify(result.audit)).not.toContain('"state":"failed"')
+    expect(p.publishComment).toHaveBeenCalledTimes(1)
+    const body = (p.publishComment as unknown as {mock: {calls: string[][]}}).mock.calls[0][2]
+    expect(body.length).toBeLessThanOrEqual(240)
+    expect(body).toContain('Riprova')
+    expect(body).toContain(ATTEMPTS_UNREADABLE_MARKER)
+    expect(readTicketAttempts('CYAU', 'CYAU-34', dir).corrupt).toBe(true)
+  })
+
+  it('unreadable counter, notice already on the ticket: many rounds, no second notice and no reset', async () => {
+    const dir = attemptsDir()
+    fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-34', dir), '')
+    const p = probe()
+    const lease = {acquire: vi.fn()}
+    const commented = {...triageCandidate, comments: [{id: 'c9', body: `Fermo.\n${ATTEMPTS_UNREADABLE_MARKER}`}]}
+
+    for (let round = 0; round < 10; round++) {
+      await expect(queuePreflight(commented, {lease, attempts: {dir}}, p)('worker', claudeAction, queueTarget))
+        .resolves.toMatchObject({outcome: 'stop', state: 'blocked', queueDeferral: {reason: 'preflight_blocked'}})
+    }
+
+    expect(p.publishComment).not.toHaveBeenCalled()
+    expect(lease.acquire).not.toHaveBeenCalled()
+    expect(readTicketAttempts('CYAU', 'CYAU-34', dir).corrupt).toBe(true)
+  })
+
+  it('unreadable counter, notice not published: technical stop with a short wait, retried at the next round', async () => {
+    const dir = attemptsDir()
+    fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-34', dir), '')
+    const p = probe({publishComment: vi.fn(async () => false)})
+
+    const result = await queuePreflight(triageCandidate, {attempts: {dir}}, p)('worker', claudeAction, queueTarget)
+
+    expect(result).toMatchObject({outcome: 'stop', state: 'blocked'})
+    expect(result.reason).toContain('non pubblicata')
     expect(result.queueDeferral).toEqual({selectionToken: 'opaque-never-log', reason: 'temporary_failure'})
     expect(JSON.stringify(result.audit)).toContain('"state":"failed"')
+  })
+
+  it('unreadable counter and a Retry after the damage: file set aside, the ticket restarts with the count at one', async () => {
+    const dir = attemptsDir()
+    const file = ticketAttemptsPath('CYAU', 'CYAU-34', dir)
+    fs.writeFileSync(file, '')
+    const damaged = new Date(Date.now() - 120_000)
+    fs.utimesSync(file, damaged, damaged)
+    const retried = {...triageCandidate, workflow: {...triageCandidate.workflow, budget_from: new Date(Date.now() - 60_000).toISOString()}}
+
+    const result = await queuePreflight(retried, {attempts: {dir}})('worker', claudeAction, queueTarget)
+
+    expect(result).toMatchObject({outcome: 'admit', state: 'ready'})
+    expect(readTicketAttempts('CYAU', 'CYAU-34', dir).record).toMatchObject({phase: 'triage', attempts: 1, total_attempts: 1})
+    expect(fs.readdirSync(dir).filter((entry) => entry.startsWith('CYAU__CYAU-34.json.corrupt-'))).toHaveLength(1)
+  })
+
+  it('unreadable counter and a Retry older than the damage: still stopped', async () => {
+    const dir = attemptsDir()
+    fs.writeFileSync(ticketAttemptsPath('CYAU', 'CYAU-34', dir), '')
+    const retried = {...triageCandidate, workflow: {...triageCandidate.workflow, budget_from: new Date(Date.now() - 3_600_000).toISOString()}}
+
+    await expect(queuePreflight(retried, {attempts: {dir}})('worker', claudeAction, queueTarget))
+      .resolves.toMatchObject({outcome: 'stop', state: 'blocked'})
+    expect(readTicketAttempts('CYAU', 'CYAU-34', dir).corrupt).toBe(true)
   })
 
   it('the real session spend ends up on the ticket, not only in the daily budget', async () => {

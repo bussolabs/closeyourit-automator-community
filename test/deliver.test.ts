@@ -1,7 +1,8 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import {describe, expect, it} from 'vitest'
+import {spawnSync} from 'node:child_process'
+import {describe, expect, it, vi} from 'vitest'
 import {type AgentRunResult} from '../src/lib/agent-result'
 import {
   assertDeliverableBranch,
@@ -12,6 +13,7 @@ import {
   DEFAULT_BASE_BRANCH,
   DEFAULT_REMOTE,
   defaultDeliveryProbe,
+  defaultRunner,
   defaultOperationalDeliveryProbe,
   type DeliveryProbe,
   isDeliverableBranch,
@@ -26,6 +28,12 @@ import {
 } from '../src/lib/deliver'
 import {AutomatorError, ErrorCodes} from '../src/errors/error-codes'
 import {RetryableDeliveryError} from '../src/lib/delivery-errors'
+
+// Replace the module before deliver.ts imports it; do not spy on an ESM namespace export.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return {...actual, spawnSync: vi.fn(actual.spawnSync)}
+})
 
 // Uniform delivery of the run for human review (CYAU-24): when the automatic gates are green the
 // workflow pushes the allowed branch (only ticket/*), opens the PR (non-interactive gh), links ticket ↔ PR and
@@ -721,6 +729,42 @@ describe('defaultDeliveryProbe — real argv (non-interactive git/gh/cyi, never 
 })
 
 describe('defaultDeliveryProbe — real runner (spawnSync)', () => {
+  it('passes the network deadline and SIGTERM to every remote spawn, keeping the local default', () => {
+    const spawn = vi.mocked(spawnSync).mockImplementation((_cmd, args) => ({
+      status: 0, signal: null, pid: 1, output: [], stderr: '',
+      stdout: args?.includes('create') ? 'https://github.com/acme/widget/pull/7' : args?.includes('comments') ? '{"data":[]}' : '',
+    }))
+    try {
+      expect(runDelivery(runInput(), defaultDeliveryProbe({project: 'CYAU'})).linked).toBe(true)
+      expect(spawn).toHaveBeenCalledTimes(5)
+      for (const call of spawn.mock.calls) {
+        expect(call[2]).toMatchObject({timeout: 120_000, killSignal: 'SIGTERM'})
+      }
+      defaultRunner('git', ['status'])
+      expect(spawn.mock.calls.at(-1)?.[2]).toMatchObject({timeout: 15_000, killSignal: 'SIGTERM'})
+    } finally {
+      spawn.mockRestore()
+    }
+  })
+
+  it('propagates a spawn timeout as a transient delivery failure without reporting success', () => {
+    const spawn = vi.mocked(spawnSync).mockReturnValue({
+      status: null, signal: 'SIGTERM', pid: 1, output: [], stdout: '', stderr: '',
+      error: Object.assign(new Error('spawnSync git ETIMEDOUT'), {code: 'ETIMEDOUT'}),
+    })
+    try {
+      expect(() => runDelivery(runInput(), defaultDeliveryProbe({project: 'CYAU'}))).toThrow(RetryableDeliveryError)
+      expect(spawn).toHaveBeenCalledTimes(1)
+      expect(spawn.mock.calls[0][2]).toMatchObject({timeout: 120_000, killSignal: 'SIGTERM'})
+      expect(defaultRunner('git', ['status'], undefined, 500)).toEqual({
+        status: null, stdout: '', stderr: 'spawnSync git ETIMEDOUT',
+      })
+      expect(spawn.mock.calls[1][2]).toMatchObject({timeout: 500, killSignal: 'SIGTERM'})
+    } finally {
+      spawn.mockRestore()
+    }
+  })
+
   it('a failed git command (non-git dir) → C502-DELIVER-003, with diagnostic detail', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-deliver-probe-'))
     try {

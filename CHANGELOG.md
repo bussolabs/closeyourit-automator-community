@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.64.0] - 2026-11-20
+
+### Fixed
+
+- **Un blackout non lascia più vuoto il conteggio dei tentativi di un ticket.** Il file viene salvato su disco prima di diventare visibile, anche alla prima creazione, che prima non era protetta. Un conteggio illeggibile ferma il ticket con un solo messaggio sul ticket: lo sblocca «Riprova», che mette il file da parte senza cancellarlo e fa ripartire il conteggio da uno. `automator activity` mostra i conteggi illeggibili invece di saltarli. (CYAU-324)
+
+## [0.63.1] - 2026-11-20
+
+### Fixed
+
+- **Le consegne lente hanno fino a due minuti per ogni operazione di rete.** Un invio che supera 15 secondi può completarsi senza consumare altri tentativi; le operazioni bloccate vengono interrotte e le consegne parziali riprendono senza duplicare la richiesta di revisione. I comandi locali conservano il limite di 15 secondi. (CYAU-316)
+
 ## [0.63.0] - 2026-11-20
 
 ### Changed

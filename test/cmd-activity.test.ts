@@ -102,6 +102,22 @@ describe('activity command', () => {
     expect(stdout).toContain('5.02')
   })
 
+  // CYAU-324: an unreadable count is listed by ticket code, not silently dropped from the view.
+  it('2 readable counts and 1 unreadable: all three show up', async () => {
+    recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-155', phase: 'autopilot'})
+    recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-156', phase: 'triage'})
+    fs.writeFileSync(path.join(stateDir, 'ticket-attempts', 'CYAU__CYAU-324.json'), '')
+
+    const {result, stdout} = await runCaptured(Activity, [])
+
+    const report = result as {ticket_spend: unknown[]; ticket_spend_unreadable: unknown[]}
+    expect(report.ticket_spend).toHaveLength(2)
+    expect(report.ticket_spend_unreadable).toEqual([expect.objectContaining({project: 'CYAU', ticket: 'CYAU-324'})])
+    expect(stdout).toContain('CYAU-155')
+    expect(stdout).toContain('CYAU-156')
+    expect(stdout).toMatch(/CYAU-324.*conteggio illeggibile/)
+  })
+
   it('no ticket worked on: no spend table to show', async () => {
     const {result, stdout} = await runCaptured(Activity, [])
     expect((result as {ticket_spend: unknown[]}).ticket_spend).toEqual([])

@@ -558,10 +558,12 @@ export interface CommandOutcome {
 }
 
 /** Runs an external command and returns its outcome (injectable: default `spawnSync`, argv array = no shell). */
-export type CommandRunner = (cmd: string, args: string[], cwd?: string) => CommandOutcome
+export type CommandRunner = (cmd: string, args: string[], cwd?: string, timeout?: number) => CommandOutcome
 
-function defaultRunner(cmd: string, args: string[], cwd?: string): CommandOutcome {
-  const res = spawnSync(cmd, args, {cwd, encoding: 'utf8', timeout: 15_000, killSignal: 'SIGTERM'})
+const DELIVERY_NETWORK_TIMEOUT_MS = 120_000
+
+export function defaultRunner(cmd: string, args: string[], cwd?: string, timeout = 15_000): CommandOutcome {
+  const res = spawnSync(cmd, args, {cwd, encoding: 'utf8', timeout, killSignal: 'SIGTERM'})
   // spawnSync does NOT throw on a missing binary: the error (e.g. `spawn git ENOENT`) is in `res.error` with `status`
   // null. It is propagated in the detail so the message stays diagnostic instead of an opaque "exit null".
   const stderr = res.error ? `${res.error.message}\n${res.stderr ?? ''}`.trim() : res.stderr ?? ''
@@ -610,13 +612,13 @@ export function defaultDeliveryProbe(opts: DefaultProbeOptions): DeliveryProbe {
   return {
     push({cwd, branch, remote}) {
       // Normal push (never --force): the guard-branch-push guardrail blocks force-push and protected branches anyway.
-      const outcome = run('git', ['-C', cwd, 'push', '--set-upstream', remote, branch])
+      const outcome = run('git', ['-C', cwd, 'push', '--set-upstream', remote, branch], undefined, DELIVERY_NETWORK_TIMEOUT_MS)
       if (outcome.status !== 0) fail('git push', outcome)
     },
     findPr({cwd, branch, base}) {
       // Filters on branch (--head) AND base (--base): never reuse a PR opened from the same branch towards a different
       // base from the one we would open. gh pr list does not fail when it finds nothing → empty stdout.
-      const outcome = run('gh', ['pr', 'list', '--head', branch, '--base', base, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""'], cwd)
+      const outcome = run('gh', ['pr', 'list', '--head', branch, '--base', base, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""'], cwd, DELIVERY_NETWORK_TIMEOUT_MS)
       // A discovery error is not the same as "PR missing": creating blindly could duplicate it.
       if (outcome.status !== 0) return fail('gh pr list', outcome)
       const url = outcome.stdout.trim()
@@ -627,7 +629,7 @@ export function defaultDeliveryProbe(opts: DefaultProbeOptions): DeliveryProbe {
     },
     createPr({cwd, branch, base, title, body}) {
       // Non-interactive: all fields provided → gh asks nothing and prints the PR URL on stdout.
-      const outcome = run('gh', ['pr', 'create', '--base', base, '--head', branch, '--title', title, '--body', body], cwd)
+      const outcome = run('gh', ['pr', 'create', '--base', base, '--head', branch, '--title', title, '--body', body], cwd, DELIVERY_NETWORK_TIMEOUT_MS)
       if (outcome.status !== 0) fail('gh pr create', outcome)
       const url = outcome.stdout.trim()
       if (!url) return fail('gh pr create', {status: outcome.status, stdout: '(nessun URL restituito)', stderr: outcome.stderr})
@@ -637,7 +639,7 @@ export function defaultDeliveryProbe(opts: DefaultProbeOptions): DeliveryProbe {
       return url
     },
     ticketLinkExists({ticket, prUrl}) {
-      const outcome = run('cyi', ['tickets', 'comments', ticket, '-p', opts.project, '--json'])
+      const outcome = run('cyi', ['tickets', 'comments', ticket, '-p', opts.project, '--json'], undefined, DELIVERY_NETWORK_TIMEOUT_MS)
       if (outcome.status !== 0) return fail('cyi tickets comments', outcome)
       try {
         const parsed = JSON.parse(outcome.stdout) as {data?: unknown}
@@ -654,7 +656,7 @@ export function defaultDeliveryProbe(opts: DefaultProbeOptions): DeliveryProbe {
       }
     },
     linkTicket({ticket, prUrl}) {
-      const outcome = run('cyi', ['tickets', 'comment', ticket, '-p', opts.project, '--body', `PR aperta per la review: ${prUrl}`])
+      const outcome = run('cyi', ['tickets', 'comment', ticket, '-p', opts.project, '--body', `PR aperta per la review: ${prUrl}`], undefined, DELIVERY_NETWORK_TIMEOUT_MS)
       if (outcome.status !== 0) fail('cyi tickets comment', outcome)
     },
   }
