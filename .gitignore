@@ -23,6 +23,10 @@ secrets.json
 # OS / editor
 .DS_Store
 
+# Python (bytecode generato da deploy/ax41/run-with-env e dai suoi test)
+__pycache__/
+*.pyc
+
 # Disposable Coworkers experiment (local data never enters releases)
 /prototypes/coworkers/.data/
 /.impeccable/review/

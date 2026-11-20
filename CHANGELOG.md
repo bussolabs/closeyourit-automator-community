@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.63.0] - 2026-11-20
+
+### Changed
+
+- **I file temporanei di Python non compaiono più tra le modifiche.** Il repository ignora in ogni cartella le cartelle `__pycache__` e i file compilati `.pyc`, come quelli che lascia lo script di avvio del deploy dopo i test. Nessun file già salvato cambia stato. (CYAU-330)
+
 ## [0.62.0] - 2026-11-20
 
 ### Changed
