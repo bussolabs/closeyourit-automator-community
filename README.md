@@ -333,7 +333,15 @@ Ogni comando supporta `--json`.
   file da parte (`<file>.corrupt-<stamp>`) e fa ripartire il conteggio da uno; la spesa già registrata resta
   solo nel file messo da parte. `automator activity` lo mostra come «conteggio illeggibile».
 - Un **limite di quota** di Claude o Codex è una pausa, non un fallimento (CYAU-275). L'ora di ripresa si legge
-  dall'errore (30 minuti se manca) e la macchina mette in pausa quel motore in `<stateDir>/quota-pause.json`
+  esclusivamente dallo stesso errore strutturato del motore (30 minuti se manca o non è utilizzabile), mai
+  dal testo del ticket, dai risultati degli strumenti o dai log mescolati (CYAU-317). Sono riconosciuti
+  `result` con `is_error: true` di Claude e `error.message`/`turn.failed.error.message` di Codex; eventi
+  annidati, testo libero e JSON malformato non attivano pause. Il segnale viene conservato separatamente
+  prima del troncamento dei log e della sostituzione del risultato finale, anche senza conversazione salvata,
+  nelle riprese e nelle revisioni del risultato o del codice. Formati sconosciuti restano guasti ordinari.
+  Anche `resets_in_seconds` e `resets_at` nel corpo API incluso nel messaggio d'errore sono utilizzabili.
+  Un errore transitorio Codex seguito da uscita zero e risultato valido non attiva una pausa.
+  La macchina mette in pausa quel motore in `<stateDir>/quota-pause.json`
   fino al reset; il tentativo contato alla presa in carico viene restituito, fino a 3 pause consecutive sulla
   stessa fase, poi conta come ogni fallimento. Prima di chiedere lavoro la macchina controlla la pausa e la
   quota rimasta (Claude dal servizio d'uso del suo login, Codex da `codex app-server`): sotto il 10% in una

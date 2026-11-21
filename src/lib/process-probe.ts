@@ -4,6 +4,9 @@ import {dirname} from 'node:path'
 import {performance} from 'node:perf_hooks'
 import {type ChildLike, type SpawnFn} from './executor'
 import {redactSecrets} from './secret-redaction'
+import {createClaudeStreamReader} from './claude-stream'
+import {detectQuotaLimit, type QuotaLimit, type QuotaRuntime} from './agent-quota'
+import {readCodexEvent} from './codex'
 
 export const DEFAULT_PROBE_TIMEOUT_MS = 5000
 export const DEFAULT_PROBE_KILL_GRACE_MS = 250
@@ -110,6 +113,7 @@ function defaultGroupHasExecutableMembers(pgid: number, remainingMs = 1000): boo
 }
 
 export interface ProcessProbeOptions {
+  structuredRuntime?: QuotaRuntime
   spawn?: SpawnFn
   kill?: ProbeKillFn
   /** Testable override of the check for group members still runnable. Receives a positive PGID. */
@@ -140,11 +144,14 @@ export interface ProcessProbeOptions {
   outputEncoding?: BufferEncoding
   /** Monotonic clock that tests can simulate; also used to reject close/error arriving past the deadline. */
   now?: () => number
+  /** Civil time for quota resets; independent of the monotonic deadline clock. */
+  wallNow?: () => Date
   /** Absolute monotonic deadline shared by the caller; avoids extending it by rebuilding it from the remaining time. */
   deadlineMs?: number
 }
 
 export interface ProcessProbeResult {
+  quotaLimit?: QuotaLimit
   code: number | null
   stdout: string
   timedOut: boolean
@@ -193,6 +200,28 @@ export function runProcessProbe(
     const stderrTailBytes = options.stderrTailBytes ?? 0
     let stderrTail = Buffer.alloc(0)
     let truncated = false
+    let quotaLimit: QuotaLimit | undefined
+    let lastMessage: string | undefined
+    const capture = (chunk: Buffer | string): void => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      const remaining = Math.max(0, maxCaptureBytes - stdoutBytes)
+      if (buffer.length > remaining) truncated = true
+      if (remaining > 0) {
+        const accepted = buffer.subarray(0, remaining)
+        stdoutChunks.push(accepted)
+        stdoutBytes += accepted.length
+      }
+    }
+    const reader = options.structuredRuntime ? createClaudeStreamReader({
+      onRecord: (line) => { quotaLimit ??= detectQuotaLimit(line, options.wallNow?.() ?? new Date(), undefined, options.structuredRuntime) ?? undefined },
+      onOutput: capture,
+      onEvent: (event) => {
+        if (options.structuredRuntime === 'codex') {
+          const text = readCodexEvent(event).lastMessage
+          if (text !== undefined) lastMessage = text
+        }
+      },
+    }) : undefined
     let settled = false
     let timeout: ReturnType<typeof setTimeout> | undefined
     let forceKill: ReturnType<typeof setTimeout> | undefined
@@ -210,6 +239,14 @@ export function runProcessProbe(
     let terminationResult: Omit<ProcessProbeResult, 'truncated' | 'capturedBytes'> | undefined
 
     const capturedStdout = (): string => {
+      reader?.end()
+      if (lastMessage !== undefined) {
+        stdoutChunks.length = 0
+        stdoutBytes = 0
+        truncated = false
+        capture(lastMessage)
+        lastMessage = undefined
+      }
       const output = Buffer.concat(stdoutChunks, stdoutBytes).toString(options.outputEncoding ?? 'utf8')
       return options.redactOutput === false ? output : redactSecrets(output)
     }
@@ -217,6 +254,7 @@ export function runProcessProbe(
       // After a timeout the result is already settled, but the process group can contain descendants still alive:
       // the close of the leader alone must NOT cancel the SIGKILL escalation scheduled for the group.
       if (settled) return
+      reader?.end()
       settled = true
       if (timeout) clearTimeout(timeout)
       if (forceKill) clearTimeout(forceKill)
@@ -224,6 +262,7 @@ export function runProcessProbe(
       if (onAbort) options.signal?.removeEventListener('abort', onAbort)
       resolve({
         ...result,
+        ...(quotaLimit ? {quotaLimit} : {}),
         truncated,
         capturedBytes: stdoutBytes,
         ...(stderrTailBytes > 0 ? {stderrTail: redactSecrets(stderrTail.toString('utf8'))} : {}),
@@ -435,14 +474,8 @@ export function runProcessProbe(
       if (settled) return
 
       child.stdout?.on('data', (chunk) => {
-        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-        const remaining = Math.max(0, maxCaptureBytes - stdoutBytes)
-        if (buffer.length > remaining) truncated = true
-        if (remaining > 0) {
-          const accepted = buffer.subarray(0, remaining)
-          stdoutChunks.push(accepted)
-          stdoutBytes += accepted.length
-        }
+        if (reader) reader.push(chunk)
+        else capture(chunk)
       })
       // stderr is drained but not kept: it must not enter the diagnostic output.
       // Exception: an explicit opt-in keeps a bounded tail, redacted before it leaves the probe.

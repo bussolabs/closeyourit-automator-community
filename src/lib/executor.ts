@@ -9,6 +9,7 @@ import {StringDecoder} from 'node:string_decoder'
 import {type Action} from './schema'
 import {buildClaudeArgv, type ClaudeArgvOptions, CLAUDE_BIN} from './claude'
 import {createClaudeStreamReader} from './claude-stream'
+import {detectQuotaLimit, type QuotaLimit, type QuotaRuntime} from './agent-quota'
 import {buildCodexArgv, type CodexArgvOptions, CODEX_BIN, readCodexEvent} from './codex'
 import {type AgentConversation} from './agent-conversation'
 import {gitAdminDirectory} from './busy-marker'
@@ -95,6 +96,7 @@ export interface BuiltCommand {
 }
 
 export interface RunResult {
+  quotaLimit?: QuotaLimit
   status: 'success' | 'failure' | 'timeout'
   exitCode: number | null
   errorCode: string | null
@@ -392,6 +394,7 @@ function resolveLaunchers(built: BuiltCommand, resolver: (command: string, trust
 }
 
 interface SpawnOutcome {
+  quotaLimit?: QuotaLimit
   code: number | null
   timedOut: boolean
   stdout: string
@@ -431,11 +434,14 @@ function spawnCollect(
     streamEvents?: (event: Record<string, unknown>) => void
     /** The stream events are written to the log too (Codex `--json`, CYAU-285). */
     logStreamEvents?: boolean
+    quotaRuntime?: QuotaRuntime
+    now?: Date
   } = {},
 ): Promise<SpawnOutcome> {
   return new Promise((resolve) => {
     const stdoutChunks: Buffer[] = []
     let stdoutBytes = 0
+    let quotaLimit: QuotaLimit | undefined
     let stdoutTruncated = false
     let logBytes = 0
     let logTruncated = false
@@ -587,19 +593,21 @@ function spawnCollect(
         const stderrLogTail = stderrLogDecoder.end()
         if (stderrLogTail !== '') onChunk(stderrLogTail, 'stderr')
       }
-      resolve({code, timedOut, stdout, stdoutTruncated, containmentFailed})
+      resolve({code, timedOut, stdout, stdoutTruncated, containmentFailed, ...(quotaLimit ? {quotaLimit} : {})})
     }
 
     const streamEvents = options.streamEvents
-    const streamReader = streamEvents
+    const streamReader = streamEvents || options.quotaRuntime
       ? createClaudeStreamReader({
-        onOutput: (text) => capture(text, 'stdout'),
+        onRecord: (line) => {
+          if (options.quotaRuntime) quotaLimit ??= detectQuotaLimit(line, options.now ?? new Date(), undefined, options.quotaRuntime) ?? undefined
+        },
+        onOutput: (text) => { if (streamEvents) capture(text, 'stdout') },
         onEvent: (event) => {
-          // CYAU-285 — Codex events stay in the log: they are its narration, and its errors (a quota limit among
-          // them) are read back from there. Never in stdout, which carries only the result.
+          // Events remain diagnostic logs; quota evidence was collected before the log cap.
           if (options.logStreamEvents) capture(`${JSON.stringify(event)}\n`, 'stderr')
           try {
-            streamEvents(event)
+            streamEvents?.(event)
           } catch {
             // The live narration informs; it never fails the session it accompanies.
           }
@@ -634,8 +642,8 @@ function spawnCollect(
       }
     }
     child.stdout?.on('data', (chunk) => {
-      if (streamReader) streamReader.push(chunk)
-      else capture(chunk, 'stdout')
+      streamReader?.push(chunk)
+      if (!streamEvents) capture(chunk, 'stdout')
     })
     child.stderr?.on('data', (chunk) => capture(chunk, 'stderr'))
     // After termination has started, close/error of the leader alone does not prove the process group is finished:
@@ -736,8 +744,8 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
   let built: BuiltCommand
   let managedGuardrails: ReturnType<typeof activeManagedGuardrailPaths>
   const stream = action.type === 'claude' && ctx.onStreamEvent !== undefined
-  // CYAU-285 — a Codex phase session with a conversation reports in events and leaves its result in a file.
-  const codexConversation = action.type === 'codex' && action.skill !== undefined && ctx.conversation !== undefined
+  // Every Codex session uses events, even without a saved conversation. Preserve the final result separately.
+  const codexConversation = action.type === 'codex'
   let lastMessageFile: string | undefined
   try {
     managedGuardrails = activeManagedGuardrailPaths()
@@ -873,7 +881,8 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
   const outcome = await spawnCollect(spawnFn, executed, containment?.command.env ?? env, timeoutMs, (chunk, source, truncated) => {
     if (truncated) log.truncate()
     log.write(chunk, source)
-  }, ctx.signal, {...ctx, containment, streamEvents, logStreamEvents: lastMessageFile !== undefined})
+  }, ctx.signal, {...ctx, containment, streamEvents, logStreamEvents: lastMessageFile !== undefined,
+    quotaRuntime: action.type === 'shell' ? undefined : action.type})
   const durationMs = clock() - startedAt
   if (lastMessageFile) {
     const result = codexResult(lastMessageFile, codexLastMessage, outcome.stdout)
@@ -893,7 +902,7 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
   } else if (outcome.timedOut) {
     status = 'timeout'
     errorCode = ErrorCodes.Exec.timeout
-  } else if (outcome.code === 0 && !ctx.isError?.(safeStdout)) {
+  } else if (outcome.code === 0 && !(outcome.quotaLimit && (action.type === 'claude' || safeStdout.trim() === '')) && !ctx.isError?.(safeStdout)) {
     status = 'success'
   } else {
     status = 'failure'
@@ -933,5 +942,6 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
     logPath: log.path,
     stdout: safeStdout,
     stdoutTruncated: outcome.stdoutTruncated,
+    ...(status !== 'success' && outcome.quotaLimit ? {quotaLimit: outcome.quotaLimit} : {}),
   }
 }

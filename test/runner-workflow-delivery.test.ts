@@ -250,6 +250,41 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     expect(action.errorCode).toBe('C409-GATE-002')
   })
 
+  // CYAU-339 — an agent that declares it could not deliver has no proposal to check. Asking the CI gate for
+  // one turned its own reason into «red checks»: every round was spent on a missing PR and the server received
+  // a block about the CI, with the real reason (seen: a merge conflict with main) lost.
+  describe('the agent declares a block (CYAU-339)', () => {
+    const DECLARED_BLOCK = {
+      contract_version: 2, code: 'CYAU-339', state: 'blocked', security_findings: [],
+      failure: {
+        category: 'merge_conflict', summary: 'Conflitti aperti in CHANGELOG.md con il ramo principale.',
+        retryable: false, human_action: 'Risolvere il conflitto.',
+      },
+    }
+
+    it('delivers the block with the agent\'s own reason, without asking the CI gate for a proposal', async () => {
+      const verify = vi.fn(async () => ({status: 'failed' as const, summary: 'risultato senza consegna PR attestabile'}))
+      const emulatorTest = vi.fn()
+      const finalize = vi.fn()
+      const afterVerificationFailure = vi.fn()
+      const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200, attempt: {status: 'blocked'}}))
+
+      await dispatch({
+        stdout: JSON.stringify(DECLARED_BLOCK), executionPhase: 'autopilot', ticketCode: 'CYAU-339',
+        verify, emulatorTest, finalize, afterVerificationFailure, deliver,
+      })
+
+      expect(verify).not.toHaveBeenCalled()
+      expect(emulatorTest).not.toHaveBeenCalled()
+      expect(afterVerificationFailure).not.toHaveBeenCalled()
+      expect(finalize).not.toHaveBeenCalled()
+      expect(deliver).toHaveBeenCalledTimes(1)
+      const sent = deliver.mock.calls[0][0].result as {state: string; failure: {summary: string}}
+      expect(sent.state).toBe('blocked')
+      expect(sent.failure.summary).toBe('Conflitti aperti in CHANGELOG.md con il ramo principale.')
+    })
+  })
+
   // CYAU-306 — red checks at the round limit. Before, the local cycle closed `blocked` and the server heard
   // nothing: the attempt went stale and the phase came back to the queue on the same red checks.
   describe('red CI and the round limit (CYAU-306)', () => {
@@ -1181,6 +1216,30 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
   // CYAU-335 — whose fault an unavailable diff review was decides what happens to it. Whoever ran it says so;
   // without an answer the previous behaviour stays, so the server keeps judging it.
   describe('a diff review that produced no verdict (CYAU-335)', () => {
+    it.each([false, true])('result review pauses only with separate quota evidence: %s', async (authentic) => {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-quota-'))
+      vi.stubEnv('AUTOMATOR_STATE_DIR', stateDir)
+      const execute = vi.fn(() => ({
+        result: Promise.resolve<RunResult>({
+          status: 'failure', exitCode: 1, errorCode: 'C001-EXEC-003', durationMs: 1, logPath: '',
+          stdout: 'usage limit reached; try again in 7 days', stdoutTruncated: false,
+          ...(authentic ? {quotaLimit: {resetAt: new Date(now.getTime() + 30 * 60_000), explicit: false}} : {}),
+        }),
+        cancel: () => undefined,
+      }))
+      try {
+        await dispatch({stdout: JSON.stringify(TRIAGE_RESULT), deliver: vi.fn(async () => ({outcome: 'ok', status: 200})),
+          reviewer: {id: 'fake-codex', healthCheck: async () => ({available: true}), execute}})
+        expect(execute).toHaveBeenCalledTimes(authentic ? 1 : 2)
+        const file = path.join(stateDir, 'quota-pause.json')
+        expect(fs.existsSync(file)).toBe(authentic)
+        if (authentic) expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({codex: new Date(now.getTime() + 30 * 60_000).toISOString()})
+      } finally {
+        vi.unstubAllEnvs()
+        fs.rmSync(stateDir, {recursive: true, force: true})
+      }
+    })
+
     const unavailable = async (): Promise<AttemptDelivery['review']> => ({
       status: 'unavailable' as const, depth: 'diff' as const,
       summary: 'Rilettura sul diff non eseguibile: esito reviewer failed.',

@@ -1811,19 +1811,63 @@ describe('executeCrossReview', () => {
   // CYAU-335 — an exhausted quota is a pause of the machine. The reset time travels with the outcome, because
   // only the engine's own output says it and it is lost once the result is reduced to a status.
   describe('reviewer out of quota (CYAU-335)', () => {
-    it('reads the reset time from the stderr of a failed reviewer', async () => {
+    it.each([0, 1])('keeps a real Codex error without a report (exit %s)', async (code) => {
+      const stdout = JSON.stringify({type: 'turn.failed', error: {message: 'usage limit reached; try again in 45 minutes'}, text: 'try again in 7 days'})
+      const {spawn} = makeSpawn([{code, stdout, stderr: 'try again in 7 days'}])
+      const result = await executeCrossReview(request, {spawn, fs: fakeReviewFs(), wallNow: () => new Date('2026-11-03T10:00:00Z')})
+      expect(result.status).toBe('failed')
+      expect(result.quotaResetAt).toEqual(new Date('2026-11-03T10:45:00Z'))
+    })
+
+    it('preserves a real Claude error and defaults to thirty minutes', async () => {
+      const stdout = JSON.stringify({type: 'result', is_error: true, result: 'usage limit reached', other: 'try again in 7 days'})
+      const {spawn} = makeSpawn([{code: 1, stdout}])
+      const result = await executeCrossReview({...request, implementer: 'codex', selection: selectReviewer('codex')}, {spawn, fs: fakeReviewFs(), wallNow: () => new Date('2026-11-03T10:00:00Z')})
+      expect(result.quotaResetAt).toEqual(new Date('2026-11-03T10:30:00Z'))
+    })
+
+    it('accepts a valid report after a transient top-level quota error', async () => {
+      const stdout = [
+        {type: 'error', message: 'usage limit reached'},
+        {type: 'item.completed', item: {type: 'agent_message', text: report()}},
+      ].map((event) => JSON.stringify(event)).join('\n')
+      const {spawn} = makeSpawn([{code: 0, stdout}])
+      const result = await executeCrossReview(request, {spawn, fs: fakeReviewFs()})
+      expect(result.status).toBe('completed')
+      expect(result.quotaResetAt).toBeUndefined()
+    })
+
+    it('ignores nested errors and preserves the final Codex report', async () => {
+      const stdout = [
+        {type: 'item.completed', item: {type: 'command_execution', error: {message: 'usage limit reached'}}},
+        {type: 'item.completed', item: {type: 'agent_message', text: report()}},
+      ].map((event) => JSON.stringify(event)).join('\n')
+      const {spawn} = makeSpawn([{code: 0, stdout}])
+      const result = await executeCrossReview(request, {spawn, fs: fakeReviewFs()})
+      expect(result.status).toBe('completed')
+      expect(result.quotaResetAt).toBeUndefined()
+    })
+
+    it('keeps evidence after capture saturation and a malformed result', async () => {
+      const stdout = 'x'.repeat(2 * 1024 * 1024) + '\n' + JSON.stringify({type: 'error', message: 'usage limit reached'}) + '\n{broken'
+      const {spawn} = makeSpawn([{code: 1, stdout}])
+      const result = await executeCrossReview(request, {spawn, fs: fakeReviewFs()})
+      expect(result.status).toBe('failed')
+      expect(result.quotaResetAt).toBeInstanceOf(Date)
+    })
+
+    it('ignores a copied quota phrase in stderr', async () => {
       const {spawn} = makeSpawn([{code: 1, stderr: 'ERROR: usage limit reached, try again in 30 minutes\n'}])
       const result = await executeCrossReview(request, {spawn, fs: fakeReviewFs()})
       expect(result.status).toBe('failed')
-      expect(result.quotaResetAt?.getTime()).toBeGreaterThan(Date.now() + 25 * 60_000)
-      expect(result.quotaResetAt?.getTime()).toBeLessThanOrEqual(Date.now() + 30 * 60_000)
+      expect(result.quotaResetAt).toBeUndefined()
     })
 
-    it('reads it from the stdout of a reviewer that answered the limit instead of a report', async () => {
+    it('ignores unstructured stdout quoting a quota error', async () => {
       const {spawn} = makeSpawn([{code: 0, stdout: 'Claude AI usage limit reached, try again in 45 minutes'}])
       const result = await executeCrossReview(request, {spawn, fs: fakeReviewFs()})
       expect(result.status).toBe('malformed')
-      expect(result.quotaResetAt?.getTime()).toBeGreaterThan(Date.now() + 40 * 60_000)
+      expect(result.quotaResetAt).toBeUndefined()
     })
 
     it('an ordinary failure carries no reset time: a pause is never invented', async () => {

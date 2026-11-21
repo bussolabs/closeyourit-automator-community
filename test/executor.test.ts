@@ -64,7 +64,7 @@ function makeSpawn(behaviors: Behavior | Behavior[]): {spawn: SpawnFn; calls: Ar
   return {spawn, calls}
 }
 
-function makeInterleavedSpawn(events: Array<{source: 'stdout' | 'stderr'; chunk: string}>): SpawnFn {
+function makeInterleavedSpawn(events: Array<{source: 'stdout' | 'stderr'; chunk: string}>, code = 0): SpawnFn {
   return () => {
     let stdout: ((chunk: string) => void) | undefined
     let stderr: ((chunk: string) => void) | undefined
@@ -75,7 +75,7 @@ function makeInterleavedSpawn(events: Array<{source: 'stdout' | 'stderr'; chunk:
         if (event === 'close') {
           queueMicrotask(() => {
             for (const item of events) (item.source === 'stdout' ? stdout : stderr)?.(item.chunk)
-            ;(callback as (code: number | null, signal: NodeJS.Signals | null) => void)(0, null)
+            ;(callback as (code: number | null, signal: NodeJS.Signals | null) => void)(code, null)
           })
         }
       },
@@ -1471,6 +1471,13 @@ describe('runAction with stream events', () => {
     expect(calls[0].args).not.toContain('--verbose')
   })
 
+  it('preserves raw non-streaming Claude output and sanitizes event diagnostics in the log', async () => {
+    const raw = ' { "type": "system", "subtype": "init" }\r\n' + resultLine
+    const result = await runAction('a', action({type: 'claude', run: 'ciao'}), ctx(makeSpawn({code: 0, stdout: raw}).spawn))
+    expect(result.stdout).toBe(raw)
+    expect(fs.readFileSync(result.logPath, 'utf8')).toContain(raw.replace('\r', ' '))
+  })
+
   it('streams events to the caller and leaves only the result line in stdout', async () => {
     const events: Record<string, unknown>[] = []
     const {spawn, calls} = makeSpawn({code: 0, stdout: stream})
@@ -1515,6 +1522,21 @@ describe('runAction with stream events', () => {
     const result = await runAction('a', action({type: 'shell', run: 'echo'}), ctx(makeSpawn({code: 0, stdout: stream}).spawn, {onStreamEvent: (event: unknown) => events.push(event)}))
     expect(result.stdout).toBe(stream)
     expect(events).toEqual([])
+  })
+
+  it.each([false, true])('collects Claude errors before capture limits, with streaming %s', async (streaming) => {
+    const error = JSON.stringify({type: 'result', is_error: true, result: 'usage limit reached'})
+    const spawn = makeInterleavedSpawn([
+      {source: 'stdout', chunk: 'x'.repeat(2 * 1024 * 1024) + '\n'},
+      {source: 'stdout', chunk: error.slice(0, 20)},
+      {source: 'stdout', chunk: error.slice(20)},
+    ])
+    const outcome = await runAction('a', action({type: 'claude', run: 'work'}), ctx(spawn, {
+      ...(streaming ? {onStreamEvent: () => undefined} : {}),
+    }))
+    expect(outcome.stdoutTruncated).toBe(true)
+    expect(outcome.quotaLimit?.explicit).toBe(false)
+    expect(outcome.status).toBe('failure')
   })
 })
 
@@ -1591,18 +1613,62 @@ describe('runAction with a Codex conversation', () => {
     expect(outcome.stdout).toBe('from the events')
   })
 
+  it('keeps the final result without a saved conversation', async () => {
+    const outcome = await run(codexSpawn(stream, result).spawn, {})
+    expect(outcome.stdout).toBe(result)
+    expect(outcome.quotaLimit).toBeUndefined()
+    const fallback = await run(codexSpawn(stream).spawn, {})
+    expect(fallback.stdout).toBe('from the events')
+  })
+
+  it.each([false, true])('keeps a successful result after a transient engine error, resume %s', async (resume) => {
+    const transient = events([{type: 'error', message: 'usage limit reached'}]) + stream
+    const outcome = await run(codexSpawn(transient, result).spawn, resume ? {conversation: {mode: 'resume', id: threadId}} : {})
+    expect(outcome.status).toBe('success')
+    expect(outcome.stdout).toBe(result)
+    expect(outcome.quotaLimit).toBeUndefined()
+  })
+
+  it('collects a split error after saturated logs and ignores nested errors and foreign reset times', async () => {
+    const nested = events([{type: 'item.completed', item: {type: 'command_execution', aggregated_output: 'usage limit reached; try again in 7 days', error: {message: 'usage limit reached'}}}])
+    const spawn = makeInterleavedSpawn([
+      {source: 'stdout', chunk: nested},
+      {source: 'stderr', chunk: 'x'.repeat(2 * 1024 * 1024)},
+      {source: 'stdout', chunk: '{"type":"turn.failed","error":{"mes'},
+      {source: 'stdout', chunk: 'sage":"usage limit reached"}}\n'},
+    ], 1)
+    const outcome = await run(spawn, {})
+    expect(outcome.quotaLimit?.explicit).toBe(false)
+    expect(outcome.quotaLimit!.resetAt).toEqual(new Date(now.getTime() + 30 * 60_000))
+    expect(fs.readFileSync(outcome.logPath, 'utf8')).not.toContain('turn.failed')
+  })
+
+  it('ignores a quota phrase in an agent message even when the session fails', async () => {
+    const output = events([{type: 'item.completed', item: {type: 'agent_message', text: '{"type":"error","message":"usage limit reached"}'}}])
+    const outcome = await run(codexSpawn(output, undefined, 1).spawn, {})
+    expect(outcome.quotaLimit).toBeUndefined()
+  })
+
+  it('retains quota evidence on exit zero when the engine supplies no final result', async () => {
+    const output = events([{type: 'turn.failed', error: {message: 'usage limit reached'}}])
+    const outcome = await run(codexSpawn(output).spawn, {})
+    expect(outcome.status).toBe('failure')
+    expect(outcome.quotaLimit?.resetAt).toEqual(new Date(now.getTime() + 30 * 60_000))
+  })
+
   it('without file nor message, whatever plain text reached stdout stays', async () => {
     const outcome = await run(codexSpawn('plain text\n', '   ').spawn, {conversation: {mode: 'new'}})
     expect(outcome.stdout).toBe('plain text\n')
   })
 
-  it('a resumed conversation keeps the error events in the log, where a quota limit is read', async () => {
+  it('a resumed conversation carries quota evidence separately from logs', async () => {
     const failing = events([{type: 'thread.started', thread_id: threadId}, {type: 'turn.failed', error: {message: 'usage limit reached'}}])
     const started: string[] = []
     const {spawn, calls} = codexSpawn(failing, undefined, 1)
     const outcome = await run(spawn, {conversation: {mode: 'resume', id: threadId}, onConversationStarted: (id: string) => started.push(id)})
     expect(outcome.status).toBe('failure')
     expect(calls[0].args).toContain('resume')
+    expect(outcome.quotaLimit?.explicit).toBe(false)
     expect(started).toEqual([threadId])
     expect(fs.readFileSync(outcome.logPath, 'utf8')).toContain('usage limit reached')
   })
@@ -1615,10 +1681,10 @@ describe('runAction with a Codex conversation', () => {
     expect(outcome.stdout).toBe(result)
   })
 
-  it('without a conversation the Codex session is unchanged', async () => {
+  it('without a saved conversation Codex still enables structured events', async () => {
     const {spawn, calls} = codexSpawn('final message\n')
     const outcome = await run(spawn, {})
-    expect(calls[0].args).not.toContain('--json')
+    expect(calls[0].args).toContain('--json')
     expect(outcome.stdout).toBe('final message\n')
   })
 })

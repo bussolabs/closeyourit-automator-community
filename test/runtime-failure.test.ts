@@ -13,14 +13,15 @@ describe('describeRuntimeFailure', () => {
       .toBe('claude: autenticazione scaduta o revocata')
   })
 
-  it('recognises the exhausted quota', () => {
+  it('keeps the coarse diagnostic without inferring a reset from generic text', () => {
     expect(describeRuntimeFailure('claude', '"api_error_status":429', 'C001-EXEC-003')).toBe('claude: quota del modello esaurita')
+    expect(describeRuntimeFailure('codex', 'usage limit reached; try again in 7 days', null)).not.toContain('reset')
   })
 
   // CYAU-275 — the reset time is no longer lost: it says when the engine works again.
   it('keeps the reset time of a usage limit', () => {
     const out = '{"is_error":true,"result":"Claude AI usage limit reached|1793790000"}'
-    expect(describeRuntimeFailure('claude', out, null, new Date('2026-11-03T10:00:00Z')))
+    expect(describeRuntimeFailure('claude', out, null, new Date('2026-11-03T10:00:00Z'), {resetAt: new Date(1_793_790_000_000), explicit: true}))
       .toBe(`claude: quota del modello esaurita, reset ${new Date(1_793_790_000_000).toISOString()}`)
   })
 

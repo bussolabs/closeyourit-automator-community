@@ -42,10 +42,23 @@ export interface QuotaLimit {
 }
 
 /**
- * Recognises a quota limit in the output of a Claude or Codex session and reads when it resets. `timeZone` is
+ * Accepts one top-level engine error record, never work text or nested events. `timeZone` is
  * the zone of clock times without one (Codex prints the machine's local time); tests pass it explicitly.
  */
-export function detectQuotaLimit(output: string, now: Date, timeZone?: string): QuotaLimit | null {
+export function detectQuotaLimit(raw: string, now: Date, timeZone?: string, runtime?: QuotaRuntime): QuotaLimit | null {
+  let event: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    event = parsed as Record<string, unknown>
+  } catch { return null }
+  let output: unknown
+  if (runtime !== 'codex' && event.type === 'result' && event.is_error === true) output = event.result
+  if (runtime !== 'claude' && event.type === 'error') output = event.message
+  if (runtime !== 'claude' && event.type === 'turn.failed' && event.error && typeof event.error === 'object' && !Array.isArray(event.error)) {
+    output = (event.error as Record<string, unknown>).message
+  }
+  if (typeof output !== 'string') return null
   if (!QUOTA_SIGNAL.test(output)) return null
   let reset: number | null = null
   try {
@@ -53,7 +66,7 @@ export function detectQuotaLimit(output: string, now: Date, timeZone?: string): 
   } catch {
     reset = null // an unknown zone name or a malformed date: the prudent wait applies
   }
-  if (reset !== null && reset > now.getTime()) {
+  if (reset !== null && Number.isFinite(reset) && reset > now.getTime()) {
     return {resetAt: new Date(Math.min(reset, now.getTime() + MAX_PAUSE_MS)), explicit: true}
   }
   return {resetAt: new Date(now.getTime() + QUOTA_FALLBACK_PAUSE_MS), explicit: false}
@@ -62,14 +75,14 @@ export function detectQuotaLimit(output: string, now: Date, timeZone?: string): 
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 
 function readResetTime(output: string, now: Date, timeZone?: string): number | null {
+  // API bodies embedded in the authenticated error.message are still part of that error.
+  const seconds = /"resets_in_seconds"\s*:\s*(\d+(?:\.\d+)?)(?=\s*[,}])/i.exec(output)
+  if (seconds) return now.getTime() + Number(seconds[1]) * 1000
+  const resetsAt = /"resets_at"\s*:\s*(\d+(?:\.\d+)?|"[^"]+")(?=\s*[,}])/i.exec(output)
+  if (resetsAt) return resetsAt[1].startsWith('"') ? Date.parse(JSON.parse(resetsAt[1]) as string) : Number(resetsAt[1]) * 1000
   // Claude, legacy result: "Claude AI usage limit reached|<epoch seconds>".
   const epoch = /usage limit reached\|(\d{9,11})/i.exec(output)
   if (epoch) return Number(epoch[1]) * 1000
-  // Codex error body.
-  const inSeconds = /"resets_in_seconds"\s*:\s*(\d+)/.exec(output)
-  if (inSeconds) return now.getTime() + Number(inSeconds[1]) * 1000
-  const atSeconds = /"resets_at"\s*:\s*(\d{9,11})\b/.exec(output)
-  if (atSeconds) return Number(atSeconds[1]) * 1000
   // Codex: "try again in 2 days 3 hours 5 minutes".
   const duration = /try again in ((?:\d+\s*(?:days?|hours?|minutes?|seconds?)[\s,]*(?:and\s+)?)+)/i.exec(output)
   if (duration) {
@@ -82,6 +95,7 @@ function readResetTime(output: string, now: Date, timeZone?: string): number | n
   const at = /try again at (?:([A-Za-z]{3})[a-z]* (\d{1,2})(?:st|nd|rd|th)?,? (\d{4}),? )?(\d{1,2}):(\d{2}) ?([AP]M)/i.exec(output)
   if (at) {
     const month = at[1] ? MONTHS.indexOf(at[1].toLowerCase()) : -1
+    if (at[1] && month < 0) return null
     const date = at[1] && month >= 0 ? {year: Number(at[3]), month, day: Number(at[2])} : undefined
     return clockTime(now, to24h(Number(at[4]), at[6]), Number(at[5]), timeZone, date)
   }
@@ -92,6 +106,7 @@ function readResetTime(output: string, now: Date, timeZone?: string): number | n
 }
 
 function to24h(hour: number, meridiem: string): number {
+  if (hour < 1 || hour > 12) return Number.NaN
   const base = hour % 12
   return meridiem.toLowerCase() === 'pm' ? base + 12 : base
 }
@@ -108,9 +123,12 @@ function zoneOffsetMs(date: Date, timeZone?: string): number {
 
 /** The instant a wall-clock time falls on in `timeZone`: on `date` when given, otherwise its next occurrence. */
 function clockTime(now: Date, hour: number, minute: number, timeZone?: string, date?: {year: number; month: number; day: number}): number {
+  if (!Number.isFinite(hour) || minute < 0 || minute > 59) return Number.NaN
   const offset = zoneOffsetMs(now, timeZone)
   const local = new Date(now.getTime() + offset)
   const day = date ?? {year: local.getUTCFullYear(), month: local.getUTCMonth(), day: local.getUTCDate()}
+  const calendar = new Date(Date.UTC(day.year, day.month, day.day))
+  if (calendar.getUTCMonth() !== day.month || calendar.getUTCDate() !== day.day) return Number.NaN
   let instant = Date.UTC(day.year, day.month, day.day, hour, minute) - offset
   if (!date && instant <= now.getTime()) instant += 86_400_000
   return instant
@@ -199,12 +217,11 @@ export function recordQuotaPause(runtime: QuotaRuntime, until: Date, now: Date, 
 }
 
 /**
- * After a failed session: when its output is a clear quota limit, pause that engine until the reset and return
+ * After a failed session: when its separate evidence is a quota limit, pause that engine until the reset and return
  * the resume time; otherwise `null`. Best-effort: a pause that cannot be written still returns the time, so the
  * attempt is not charged for the quota.
  */
-export function noteQuotaFailure(runtime: QuotaRuntime, output: string, now: Date, file: string = quotaPausePath()): Date | null {
-  const limit = detectQuotaLimit(output, now)
+export function noteQuotaFailure(runtime: QuotaRuntime, limit: QuotaLimit | null | undefined, now: Date, file: string = quotaPausePath()): Date | null {
   if (!limit) return null
   try {
     recordQuotaPause(runtime, limit.resetAt, now, file)

@@ -60,8 +60,8 @@ describe('createClaudeStreamReader', () => {
   })
 
   it('drops a line longer than the limit without holding it in memory', () => {
-    const {reader, events, text} = collect(64)
-    reader.push(`{"type":"user","tool_use_result":{"originalFile":"${'x'.repeat(40)}`)
+    const {reader, events, text} = collect(128)
+    reader.push(`{"type":"user","tool_use_result":{"originalFile":"${'x'.repeat(140)}`)
     reader.push(`${'y'.repeat(40)}"}}\n${RESULT}\n`)
     reader.end()
     expect(events).toEqual([])
@@ -74,5 +74,13 @@ describe('createClaudeStreamReader', () => {
     reader.push('{"type":"assistant"}\n')
     expect(events).toEqual([])
     expect(text()).toBe('')
+  })
+
+  it('drops an oversized complete line and recovers at the next record', () => {
+    const {reader, events, text} = collect(128)
+    reader.push(`${JSON.stringify({type: 'user', text: 'x'.repeat(200)})}\n${RESULT}\n`)
+    reader.end()
+    expect(events).toEqual([])
+    expect(text()).toBe(`${RESULT}\n`)
   })
 })

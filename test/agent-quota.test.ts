@@ -30,8 +30,53 @@ afterAll(() => {
 
 const now = new Date('2026-11-03T10:00:00.000Z')
 const minutes = (value: number) => value * 60_000
+const claudeError = (result: string) => JSON.stringify({type: 'result', is_error: true, result})
+const codexError = (message: string) => JSON.stringify({type: 'error', message})
 
 describe('detectQuotaLimit', () => {
+  it.each([
+    ['"resets_in_seconds":7200', '2026-11-03T12:00:00.000Z'],
+    ['"resets_at":1793707200', '2026-11-03T12:00:00.000Z'],
+    ['"resets_at":"2026-11-03T12:00:00.000Z"', '2026-11-03T12:00:00.000Z'],
+  ])('reads embedded API reset %s only inside the engine error', (reset, expected) => {
+    const message = `429: {"error":{"type":"usage_limit_reached",${reset}}}`
+    expect(detectQuotaLimit(codexError(message), now)).toEqual({resetAt: new Date(expected), explicit: true})
+    expect(detectQuotaLimit(JSON.stringify({type: 'error', message: 'usage limit reached', text: message}), now))
+      .toEqual({resetAt: new Date(now.getTime() + QUOTA_FALLBACK_PAUSE_MS), explicit: false})
+  })
+  it.each([
+    'usage limit reached; try again in 5 hours',
+    '{"type":"error","message":"usage limit reached"',
+    JSON.stringify({type: 'result', is_error: false, result: 'usage limit reached'}),
+    JSON.stringify({type: 'result', is_error: 'true', result: 'usage limit reached'}),
+    JSON.stringify({type: 'assistant', message: {type: 'error', message: 'usage limit reached'}}),
+    JSON.stringify({type: 'item.completed', item: {type: 'command_execution', aggregated_output: '{"type":"error","message":"usage limit reached"}'}}),
+    JSON.stringify({type: 'turn.failed', error: {message: {text: 'usage limit reached'}}}),
+    'null', '[]',
+  ])('rejects work content or malformed envelopes: %s', (text) => {
+    expect(detectQuotaLimit(text, now)).toBeNull()
+  })
+
+  it.each(['"resets_in_seconds":0', '"resets_in_seconds":-1', '"resets_at":1000000000', '"resets_at":"invalid"'])('defaults for an unusable embedded reset: %s', (reset) => {
+    expect(detectQuotaLimit(codexError(`{"error":{"type":"usage_limit_reached",${reset}}}`), now))
+      .toEqual({resetAt: new Date(now.getTime() + QUOTA_FALLBACK_PAUSE_MS), explicit: false})
+  })
+
+  it('uses only the reset in the same recognized error field', () => {
+    const event = {type: 'turn.failed', error: {message: 'usage limit reached'}, text: 'try again in 7 days', resets_in_seconds: 90000}
+    expect(detectQuotaLimit(JSON.stringify(event), now, 'UTC', 'codex'))
+      .toEqual({resetAt: new Date(now.getTime() + QUOTA_FALLBACK_PAUSE_MS), explicit: false})
+    event.error.message = 'usage limit reached; try again in 2 hours'
+    expect(detectQuotaLimit(JSON.stringify(event), now, 'UTC', 'codex')?.resetAt)
+      .toEqual(new Date(now.getTime() + minutes(120)))
+  })
+
+  it('keeps the runtime boundary and the maximum pause', () => {
+    expect(detectQuotaLimit(claudeError('usage limit reached'), now, undefined, 'codex')).toBeNull()
+    expect(detectQuotaLimit(codexError('usage limit reached'), now, undefined, 'claude')).toBeNull()
+    expect(detectQuotaLimit(codexError('usage limit reached; try again in 90 days'), now)?.resetAt)
+      .toEqual(new Date(now.getTime() + 8 * 24 * 60 * 60_000))
+  })
   it('reads the reset epoch of the Claude usage-limit result', () => {
     const out = JSON.stringify({type: 'result', is_error: true, result: 'Claude AI usage limit reached|1793790000'})
     expect(detectQuotaLimit(out, now)).toEqual({resetAt: new Date(1_793_790_000_000), explicit: true})
@@ -44,7 +89,7 @@ describe('detectQuotaLimit', () => {
   })
 
   it('a reset hour already past today means tomorrow', () => {
-    const out = '5-hour limit reached ∙ resets 9am (UTC)'
+    const out = claudeError('5-hour limit reached ∙ resets 9am (UTC)')
     expect(detectQuotaLimit(out, now)?.resetAt).toEqual(new Date('2026-11-04T09:00:00.000Z'))
   })
 
@@ -54,27 +99,32 @@ describe('detectQuotaLimit', () => {
   })
 
   it('reads the Codex "try again at" clock time in the machine zone', () => {
-    const out = "You've hit your usage limit. Try again at 3:45 PM."
+    const out = codexError("You've hit your usage limit. Try again at 3:45 PM.")
     expect(detectQuotaLimit(out, now, 'UTC')?.resetAt).toEqual(new Date('2026-11-03T15:45:00.000Z'))
   })
 
   it('reads the Codex "try again at" full date', () => {
-    const out = "You've hit your usage limit. Try again at Nov 5th, 2026 1:05 AM."
+    const out = codexError("You've hit your usage limit. Try again at Nov 5th, 2026 1:05 AM.")
     expect(detectQuotaLimit(out, now, 'UTC')?.resetAt).toEqual(new Date('2026-11-05T01:05:00.000Z'))
   })
 
-  it('reads resets_in_seconds from a Codex usage_limit_reached error body', () => {
+  it('rejects an unverified bare API error envelope', () => {
     const out = '{"error":{"type":"usage_limit_reached","resets_in_seconds":3600}}'
-    expect(detectQuotaLimit(out, now)).toEqual({resetAt: new Date(now.getTime() + minutes(60)), explicit: true})
+    expect(detectQuotaLimit(out, now)).toBeNull()
   })
 
   it('a quota signal without a reset time waits the fixed prudent delay', () => {
-    expect(detectQuotaLimit("You've hit your usage limit. Try again later.", now))
+    expect(detectQuotaLimit(codexError("You've hit your usage limit. Try again later."), now))
       .toEqual({resetAt: new Date(now.getTime() + QUOTA_FALLBACK_PAUSE_MS), explicit: false})
   })
 
   it('a reset time in the past falls back to the prudent delay', () => {
-    expect(detectQuotaLimit('Claude AI usage limit reached|1000000000', now))
+    expect(detectQuotaLimit(claudeError('Claude AI usage limit reached|1000000000'), now))
+      .toEqual({resetAt: new Date(now.getTime() + QUOTA_FALLBACK_PAUSE_MS), explicit: false})
+  })
+
+  it.each(['resets 99pm', 'resets 3:99pm', 'try again at Feb 31st, 2027 1:05 AM', 'try again at Foo 5th, 2027 1:05 AM'])('defaults to thirty minutes for an unusable reset: %s', (time) => {
+    expect(detectQuotaLimit(codexError(`usage limit reached; ${time}`), now))
       .toEqual({resetAt: new Date(now.getTime() + QUOTA_FALLBACK_PAUSE_MS), explicit: false})
   })
 
@@ -134,9 +184,9 @@ describe('quota pause store', () => {
 
   it('noteQuotaFailure pauses the engine only on a clear quota signal', () => {
     const file = pauseFile()
-    expect(noteQuotaFailure('claude', 'exit 1: something broke', now, file)).toBeNull()
+    expect(noteQuotaFailure('claude', undefined, now, file)).toBeNull()
     expect(readQuotaPause(now, file)).toBeNull()
-    const until = noteQuotaFailure('claude', 'Claude AI usage limit reached|1793790000', now, file)
+    const until = noteQuotaFailure('claude', detectQuotaLimit(claudeError('Claude AI usage limit reached|1793790000'), now), now, file)
     expect(until).toEqual(new Date(1_793_790_000_000))
     expect(readQuotaPause(now, file)).toEqual({runtime: 'claude', until})
   })

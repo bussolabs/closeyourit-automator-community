@@ -9,6 +9,26 @@ afterEach(() => {
 })
 
 describe('runProcessProbe — process group escalation after timeout', () => {
+  it('collects split quota events after capture saturation without trusting stderr', async () => {
+    const spawn: SpawnFn = () => ({
+      stdout: {on: (_event, cb) => {
+        cb('x'.repeat(100) + '\n')
+        cb('{"type":"error","mes')
+        cb('sage":"usage limit reached"}')
+      }},
+      stderr: {on: (_event, cb) => cb('{"type":"error","message":"usage limit reached; try again in 7 days"}')},
+      on: (event, cb) => {
+        if (event === 'close') queueMicrotask(() => (cb as (code: number) => void)(1))
+      },
+      kill: () => true,
+    })
+    const start = new Date('2026-11-03T10:00:00Z')
+    const result = await runProcessProbe('codex', [], {spawn, maxCaptureBytes: 10, structuredRuntime: 'codex', wallNow: () => start})
+    expect(result.truncated).toBe(true)
+    expect(result.quotaLimit?.explicit).toBe(false)
+    expect(result.quotaLimit!.resetAt).toEqual(new Date('2026-11-03T10:30:00Z'))
+  })
+
   it('does not consult the wall clock for the default deadlines', async () => {
     const wallClock = vi.spyOn(Date, 'now').mockReturnValueOnce(10_000).mockReturnValue(-10_000)
     const spawn: SpawnFn = () => ({

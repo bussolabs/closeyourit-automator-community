@@ -1,6 +1,6 @@
 // Translates the exit of a failed Claude/Codex session into a readable reason. Returns only fixed
 // sentences or the error code: the raw text may contain secrets and never leaves this module.
-import {detectQuotaLimit} from './agent-quota'
+import {type QuotaLimit} from './agent-quota'
 
 /** A sign-in that expired or was revoked: nothing runs again until a person signs in. */
 const CREDENTIAL_SIGNAL =
@@ -13,13 +13,12 @@ const SIGNALS: ReadonlyArray<[RegExp, string]> = [
 ]
 
 export function describeRuntimeFailure(
-  runtime: 'claude' | 'codex', output: string, errorCode: string | null, now: Date = new Date(),
+  runtime: 'claude' | 'codex', output: string, errorCode: string | null, _now: Date = new Date(), quota?: QuotaLimit,
 ): string {
   const match = SIGNALS.find(([pattern]) => pattern.test(output))
   // CYAU-275: a usage limit that names its reset keeps it, so the reason says when the engine works again.
-  const quota = detectQuotaLimit(output, now)
   const reset = quota?.explicit ? `, reset ${quota.resetAt.toISOString()}` : ''
-  return `${runtime}: ${match ? match[1] : errorCode ?? 'output non valido'}${reset}`
+  return `${runtime}: ${quota ? 'quota del modello esaurita' : match ? match[1] : errorCode ?? 'output non valido'}${reset}`
 }
 
 /**

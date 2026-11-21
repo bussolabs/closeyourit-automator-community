@@ -1,5 +1,5 @@
 import {automatorGitIdentityEnv} from './git-identity'
-import {detectQuotaLimit} from './agent-quota'
+import {isQuotaRuntime} from './agent-quota'
 import {z} from 'zod'
 import {createHash} from 'node:crypto'
 import {accessSync, constants, realpathSync, statSync, type Stats} from 'node:fs'
@@ -227,6 +227,7 @@ export interface ReviewExecutionDeps {
   kill?: ProbeKillFn
   fs?: ReviewCommandFs
   now?: () => number
+  wallNow?: () => Date
   runtimeProbe?: typeof runProcessProbe
   /** CYAU-328 — replaceable in tests: the real one runs Git on the work folder. */
   materializeSnapshot?: typeof materializeReviewSnapshot
@@ -1425,6 +1426,7 @@ async function commandFor(
       args: [
         ...codex.prefix,
         'exec',
+        '--json',
         '--model',
         CODEX_MODEL,
         '--ephemeral',
@@ -1754,13 +1756,6 @@ export async function executeCrossReview(
     env: buildReviewerEnvironment(reviewer, process.env, [input.cwd], claudeCredential),
   }
 
-  // CYAU-335 — a quota limit is a pause of the machine, never a defect of the work: the reset time is read from
-  // what the engine printed, so the caller can pause that engine instead of delivering a rejection.
-  const quotaReset = (...texts: (string | undefined)[]): {quotaResetAt: Date} | undefined => {
-    const limit = detectQuotaLimit(texts.filter((text) => text).join('\n'), new Date())
-    return limit ? {quotaResetAt: limit.resetAt} : undefined
-  }
-
   let command: ReviewCommand
   try {
     command = await commandFor(reviewer, input, deadline, deps.fs ?? DEFAULT_REVIEW_FS, now, deps.runtimeProbe, deps.materializeSnapshot)
@@ -1790,6 +1785,8 @@ export async function executeCrossReview(
       timeoutMs: remaining,
       deadlineMs: deadline,
       maxCaptureBytes: MAX_REVIEW_OUTPUT_BYTES,
+      structuredRuntime: isQuotaRuntime(reviewer) ? reviewer : undefined,
+      wallNow: deps.wallNow,
       stderrTailBytes: REVIEWER_STDERR_TAIL_BYTES,
       input: command.input,
       now,
@@ -1806,11 +1803,16 @@ export async function executeCrossReview(
   if (cleanupStatus === 'failed') {
     return {status: 'failed', reviewer, findings: [], detail: 'cleanup reviewer fallito', attestation: null}
   }
+  const quotaFailure = (): ReviewExecutionResult => ({status: 'failed', reviewer, findings: [],
+    detail: 'Reviewer usage quota exhausted', attestation: null, quotaResetAt: result.quotaLimit!.resetAt})
+  if (result.quotaLimit && (result.error || result.code !== 0)) {
+    return quotaFailure()
+  }
   if (result.error || result.code !== 0) {
-    return {status: 'failed', reviewer, findings: [], detail: reviewerFailureDetail(result), attestation: null,
-      ...quotaReset(result.stdout, result.stderrTail)}
+    return {status: 'failed', reviewer, findings: [], detail: reviewerFailureDetail(result), attestation: null}
   }
   if (result.truncated) {
+    if (result.quotaLimit) return quotaFailure()
     return {status: 'malformed', reviewer, findings: [], detail: 'output reviewer troppo grande', attestation: null}
   }
 
@@ -1837,9 +1839,8 @@ export async function executeCrossReview(
       ...(confirmedPreviousFindings.length > 0 ? {confirmedPreviousFindings} : {}),
     }
   } catch {
-    // An engine that answered «you are out of quota» instead of a report lands here: the limit is in its stdout.
-    return {status: 'malformed', reviewer, findings: [], detail: 'output reviewer non valido', attestation: null,
-      ...quotaReset(result.stdout)}
+    if (result.quotaLimit) return quotaFailure()
+    return {status: 'malformed', reviewer, findings: [], detail: 'output reviewer non valido', attestation: null}
   }
 }
 

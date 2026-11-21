@@ -18,6 +18,7 @@ describe('buildCodexArgv', () => {
       'never',
       '--dangerously-bypass-hook-trust',
       'exec',
+      '--json',
       '--ignore-user-config',
       '--sandbox',
       'read-only',
@@ -39,6 +40,7 @@ describe('buildCodexArgv', () => {
       'never',
       '--dangerously-bypass-hook-trust',
       'exec',
+      '--json',
       '--ignore-user-config',
       '--sandbox',
       'workspace-write',
@@ -75,6 +77,7 @@ describe('buildCodexArgv', () => {
       'never',
       '--dangerously-bypass-hook-trust',
       'exec',
+      '--json',
       '--ignore-user-config',
       '--sandbox',
       'workspace-write',
@@ -151,7 +154,7 @@ describe('buildCodexArgv in skill-mode', () => {
   it('invokes the skill by path with the ticket, under the hooks, the domain allowlist and a read-only workspace by default', () => {
     const argv = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined, {resolvePath: (p) => p})
 
-    expect(argv.slice(0, 6)).toEqual(['--ask-for-approval', 'never', '--dangerously-bypass-hook-trust', 'exec', '--ignore-user-config', '--ignore-rules'])
+    expect(argv.slice(0, 7)).toEqual(['--ask-for-approval', 'never', '--dangerously-bypass-hook-trust', 'exec', '--json', '--ignore-user-config', '--ignore-rules'])
     expect(argv).toContain('features.hooks=true')
     expect(argv).toContain('features.network_proxy=true')
     expect(argv).toContain('default_permissions="automator"')
@@ -280,7 +283,7 @@ describe('buildCodexArgv in skill-mode', () => {
   it('a playbook action ignores the conversation: only phase skills have one', () => {
     const action = codexAction({run: 'analizza'})
     expect(buildCodexArgv(action, undefined, undefined, {conversation: {mode: 'new'}, lastMessageFile: '/r.txt'}))
-      .toEqual(buildCodexArgv(action))
+      .toEqual(buildCodexArgv(action, undefined, undefined, {lastMessageFile: '/r.txt'}))
   })
 
   it('refuses a skill command that is not a step of the CloseYourIt plugin', () => {

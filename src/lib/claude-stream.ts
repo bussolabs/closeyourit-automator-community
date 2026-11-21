@@ -14,6 +14,8 @@ import {StringDecoder} from 'node:string_decoder'
 export const STREAM_MAX_LINE_BYTES = 16 * 1024 * 1024
 
 export interface ClaudeStreamHandlers {
+  /** Complete top-level records, before any output capture limit. */
+  onRecord?: (line: string) => void
   onOutput: (text: string) => void
   onEvent: (event: Record<string, unknown>) => void
 }
@@ -46,6 +48,7 @@ export function createClaudeStreamReader(
   let ended = false
 
   const emit = (line: string, newline: string): void => {
+    handlers.onRecord?.(line)
     const event = streamEvent(line)
     if (event) handlers.onEvent(event)
     else handlers.onOutput(`${line}${newline}`)
@@ -56,7 +59,7 @@ export function createClaudeStreamReader(
     let index = text.indexOf('\n', start)
     while (index !== -1) {
       const piece = text.slice(start, index)
-      if (!dropping) emit(`${pending}${piece}`, '\n')
+      if (!dropping && pendingBytes + Buffer.byteLength(piece) <= maxLineBytes) emit(`${pending}${piece}`, '\n')
       pending = ''
       pendingBytes = 0
       dropping = false

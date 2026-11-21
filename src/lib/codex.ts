@@ -62,6 +62,8 @@ export function buildCodexArgv(
     'never',
     '--dangerously-bypass-hook-trust',
     'exec',
+    '--json',
+    ...(options.lastMessageFile ? ['--output-last-message', options.lastMessageFile] : []),
     '--ignore-user-config',
     '--sandbox',
     action.sandbox,
@@ -122,7 +124,8 @@ function buildCodexSkillArgv(
     'exec',
     ...(resumeId ? ['resume'] : []),
     // CYAU-285 — the events on stdout carry the conversation name (`thread.started`), so the result moves to a file.
-    ...(conversation && options.lastMessageFile ? ['--json', '--output-last-message', options.lastMessageFile] : []),
+    '--json',
+    ...(options.lastMessageFile ? ['--output-last-message', options.lastMessageFile] : []),
     '--ignore-user-config',
     '--ignore-rules',
     '-c', 'features.hooks=true',
@@ -147,7 +150,7 @@ export interface CodexArgvOptions {
   /**
    * CYAU-285 — the conversation of a phase skill session. Codex does not take a name from outside: a new
    * conversation announces its own in the first event, so the session runs with `--json` and its result is read
-   * from `lastMessageFile`. Both are needed; without the file the session runs as before.
+   * from `lastMessageFile`. Events are always enabled; without the file only conversation resume is disabled.
    */
   conversation?: AgentConversation
   lastMessageFile?: string

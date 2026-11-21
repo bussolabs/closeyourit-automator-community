@@ -32,7 +32,7 @@ export async function probeAgentRuntimes(deps: {run?: ProbeRun; settingsPath: st
   const claudeArgs = buildClaudeArgv({type: 'claude', run: PROMPT, permission_mode: 'plan'} as ClaudeActionT, deps.settingsPath)
   // `--json` also brings the errors to stdout, the only channel the probe captures.
   const codexArgs = buildCodexArgv({type: 'codex', run: PROMPT, sandbox: 'read-only'} as CodexActionT)
-  codexArgs.splice(codexArgs.indexOf('--'), 0, '--json', '--ephemeral', '--skip-git-repo-check')
+  codexArgs.splice(codexArgs.indexOf('--'), 0, '--ephemeral', '--skip-git-repo-check')
 
   // CYAU-224: Claude is probed with the same auth its sessions get.
   const claudeOptions = {...options, env: {...withoutClaudeAuth(process.env), ...claudeAuthEnv(process.env)}}

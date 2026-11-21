@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.64.1] - 2026-11-21
+
+### Fixed
+
+- **Un agente bloccato dice il suo motivo vero.** Se l'agente si ferma senza consegnare, per esempio per un conflitto, il ticket riceve quel motivo. Prima risultava «controlli rossi» e i giri di correzione si spendevano a vuoto. (CYAU-339)
+- **Una frase copiata dal ticket non mette più in pausa la macchina.** Sessioni, riprese e revisioni riconoscono la quota esaurita soltanto dagli errori del motore, anche quando i registri sono pieni. L'ora di ripresa viene dallo stesso errore; se manca resta la pausa di 30 minuti, con il limite di tre restituzioni consecutive del tentativo. (CYAU-317)
+
 ## [0.64.0] - 2026-11-20
 
 ### Fixed

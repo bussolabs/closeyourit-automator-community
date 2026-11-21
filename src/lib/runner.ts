@@ -41,7 +41,7 @@ import {type PreflightStop} from './heartbeat'
 import {skillsModeEnabled} from './paths'
 import {describeRuntimeFailure, isRuntimeCredentialFailure} from './runtime-failure'
 import {agentRuntimeReadiness} from './runtime-probe'
-import {detectQuotaLimit, noteQuotaFailure} from './agent-quota'
+import {noteQuotaFailure} from './agent-quota'
 import {
   type AgentConversation,
   chooseConversation,
@@ -1076,7 +1076,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         // or a timeout is not the conversation's fault: a new one would meet the same wall.
         const resumeBroke = (raw: RunResult): boolean => {
           if (raw.status === 'timeout') return false
-          if (raw.status === 'failure') return detectQuotaLimit(`${raw.stdout}\n${readLogTail(raw.logPath)}`, opts.now) === null
+          if (raw.status === 'failure') return !raw.quotaLimit
           return workflowDelivery !== undefined && !parseWorkflowResultDetailed(raw.stdout, workflowDelivery.executionPhase).value
         }
         while (true) {
@@ -1250,7 +1250,11 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
               // green on the delivered commit. The deterministic check precedes the cross-review: a red CI
               // goes back to the implementer without paying a reviewer, while an outage stays distinct from a defect.
               let verifiedSha: string | undefined
-              if (workflowDelivery.verify) {
+              // CYAU-339 — an agent that declares `blocked` delivered nothing: there is no proposal for the CI
+              // gate or the phone test to check. Asking them anyway read the missing PR as a red check, spent
+              // the correction rounds on it and told the server «red checks» instead of the agent's reason.
+              const declaresBlock = !hasDiffToReview(structured)
+              if (workflowDelivery.verify && !declaresBlock) {
                 const verification = await workflowDelivery.verify(structured, lifecycleSignal)
                 if (verification.status === 'passed') {
                   verifiedSha = verification.headSha
@@ -1299,7 +1303,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
               }
               // CYAU-295 — the phone test runs on the machine, after the CI and before paying a reviewer. A crash goes
               // back to the agent like a red CI; a machine that cannot run a required test stops the delivery.
-              if (workflowDelivery.emulatorTest) {
+              if (workflowDelivery.emulatorTest && !declaresBlock) {
                 const emulator = await workflowDelivery.emulatorTest(structured, lifecycleSignal)
                 if (emulator.status !== 'passed') {
                   if (emulator.status === 'failed' && workflowDelivery.afterVerificationFailure) {
@@ -1457,9 +1461,9 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                   const review = reviewed.status === 'success' ? parseWorkflowReview(reviewed.stdout, workflowDelivery.executionPhase) : null
                   if (!review) {
                     const reviewerLog = reviewed.status === 'success' ? '' : readLogTail(reviewed.logPath)
-                    reviewDetail = describeRuntimeFailure(reviewerAction.type, reviewerLog, reviewed.errorCode)
+                    reviewDetail = describeRuntimeFailure(reviewerAction.type, reviewerLog, reviewed.errorCode, opts.now, reviewed.quotaLimit)
                     // CYAU-275 — the reviewer's quota is the machine's too: pause it until the reset.
-                    const quotaResetAt = noteQuotaFailure(reviewerAction.type, reviewerLog, opts.now)
+                    const quotaResetAt = noteQuotaFailure(reviewerAction.type, reviewed.quotaLimit, opts.now)
                     // CYAU-335 — with the engine paused the review waits for the reset OUTSIDE the session: the
                     // claim gate reads the pause and takes no work before then, which is waiting instead of
                     // spinning. Anything else is a session that died or answered outside the format: one more try.
@@ -1654,7 +1658,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       // reset (the claim gate reads it) and the attempt counted at the claim is given back, up to its cap.
       // The server is not told yet: the attempt closes as interrupted, like every undelivered failure.
       const quotaResetAt = execution.result.status !== 'success' && effectiveAction.type !== 'shell'
-        ? noteQuotaFailure(effectiveAction.type, `${execution.result.stdout}\n${readLogTail(execution.result.logPath)}`, opts.now)
+        ? noteQuotaFailure(effectiveAction.type, execution.result.quotaLimit, opts.now)
         : null
       if (quotaResetAt) agentRuntimeReadiness.invalidate()
       // A session that ended without delivering anything used to close as «lease released», with the cause only in

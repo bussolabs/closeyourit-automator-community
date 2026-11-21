@@ -313,7 +313,7 @@ describe('runOnce', () => {
 
   // CYAU-275 — a session stopped on the quota pauses the engine until the reset and gives the attempt back.
   describe('quota limit', () => {
-    const quotaRun = async (stdout: string) => {
+    const quotaRun = async (stdout: string, quotaLimit?: {resetAt: Date; explicit: boolean}) => {
       const p = paths()
       saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
       const settled: boolean[] = []
@@ -322,7 +322,7 @@ describe('runOnce', () => {
         healthCheck: async () => ({available: true}),
         execute: () => ({
           result: Promise.resolve({
-            status: 'failure' as const, exitCode: 1, errorCode: 'C001-EXEC-003', durationMs: 1, logPath: '/nonexistent', stdout,
+            status: 'failure' as const, exitCode: 1, errorCode: 'C001-EXEC-003', durationMs: 1, logPath: '/nonexistent', stdout, quotaLimit,
           }),
           cancel: () => undefined,
         }),
@@ -347,13 +347,19 @@ describe('runOnce', () => {
     }
 
     it('pauses the engine until the reset and settles the attempt as a quota pause', async () => {
-      const outcome = await quotaRun(JSON.stringify({type: 'result', is_error: true, result: 'Claude AI usage limit reached|1783417800'}))
+      const outcome = await quotaRun('', {resetAt: new Date(1_783_417_800_000), explicit: true})
       expect(outcome.settled).toEqual([true])
       expect(outcome.pause).toEqual({claude: new Date(1_783_417_800_000).toISOString()})
     })
 
     it('another failure keeps the attempt counted and pauses nothing', async () => {
       const outcome = await quotaRun('{"type":"result","is_error":true,"result":"API Error: 500"}')
+      expect(outcome.settled).toEqual([false])
+      expect(outcome.pause).toBeNull()
+    })
+
+    it('a copied quota error in work output keeps the attempt counted', async () => {
+      const outcome = await quotaRun('{"type":"result","is_error":true,"result":"usage limit reached"}')
       expect(outcome.settled).toEqual([false])
       expect(outcome.pause).toBeNull()
     })
@@ -1926,6 +1932,23 @@ describe('runOnce — agent conversations of the ticket phases (CYAU-285)', () =
     expect(run.seen).toHaveLength(2)
     expect(run.deliver).toHaveBeenCalledTimes(1)
     expect(run.log).toContain('# conversation_reason: resumed conversation failed (unreadable result)')
+  })
+
+  it.each([false, true])('only separate quota evidence prevents a fresh session after failed resume: %s', async (authentic) => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'resume-quota-'))
+    vi.stubEnv('AUTOMATOR_STATE_DIR', stateDir)
+    try {
+      const run = await phase({
+        seed: (store, target) => recordConversation(store.dir, target, ID, now),
+        steps: [() => ({status: 'failure', stdout: 'usage limit reached; try again in 7 days',
+          ...(authentic ? {quotaLimit: {resetAt: new Date(now.getTime() + 30 * 60_000), explicit: false}} : {})})],
+      })
+      expect(run.seen).toHaveLength(authentic ? 1 : 2)
+      expect(fs.existsSync(path.join(stateDir, 'quota-pause.json'))).toBe(authentic)
+    } finally {
+      vi.unstubAllEnvs()
+      fs.rmSync(stateDir, {recursive: true, force: true})
+    }
   })
 
   it('a resumed conversation that times out is the phase outcome, not a reason to start over', async () => {

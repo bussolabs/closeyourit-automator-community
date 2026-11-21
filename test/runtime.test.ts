@@ -535,7 +535,8 @@ describe('CodexRuntime · execute · authorized directory and traceability (Scen
     expect(res.status).toBe('success')
     const log = fs.readFileSync(res.logPath, 'utf8')
     expect(log).toContain('# cwd:     /pb/repo/target') // directory autorizzata
-    expect(log).toContain('codex --ask-for-approval never --dangerously-bypass-hook-trust exec --ignore-user-config --sandbox read-only') // comando tracciato
+    expect(log).toContain('codex --ask-for-approval never --dangerously-bypass-hook-trust exec --json --output-last-message ')
+    expect(log).toContain(' --ignore-user-config --sandbox read-only')
     expect(log).toContain('risultato dell’agente') // output tracciato
   })
 })
