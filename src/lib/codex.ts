@@ -197,7 +197,7 @@ export function readCodexEvent(event: Record<string, unknown>): CodexEventSummar
 
 /**
  * The Git data a commit and a push of the ticket worktree write to, outside the worktree itself: the worktree's own
- * git dir, the shared objects, the `ticket/` branches with their reflogs, and origin's remote-tracking refs. Not `main`,
+ * git dir, the shared objects, the `ticket/` branches with their reflogs, origin's remote-tracking refs and the tags. Not `main`,
  * not the config, not the hooks. Measured on Ubuntu 24.04: without them `commit.sh` fails on a read-only index.
  * Created beforehand, so a first commit or push finds them. Not a linked worktree → no session.
  */
@@ -215,6 +215,9 @@ function ticketGitWritableRoots(cwd: string | undefined): string[] {
     // refs/remotes/origin/main (CYRA-1193). They mirror the remote; the local main stays read-only.
     path.join(commonDir, 'refs', 'remotes', 'origin'),
     path.join(commonDir, 'logs', 'refs', 'remotes', 'origin'),
+    // CYAU-343 — release.sh creates the version tag locally, then pushes it: with the tags read-only every
+    // staging or production release that ran on Codex stopped after the merge, with nothing published.
+    path.join(commonDir, 'refs', 'tags'),
   ]
   for (const root of roots) fs.mkdirSync(root, {recursive: true})
   return roots

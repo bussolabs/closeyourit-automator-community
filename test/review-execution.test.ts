@@ -234,11 +234,10 @@ describe('buildReviewPrompt', () => {
     expect(instructions).toContain('NON FIDATO')
   })
 
-  // CYAU-256 — the automator cannot touch `.github/workflows`, and the reviewer kept asking for a CI step on
-  // REFL-3: every round was rejected for something the agent is forbidden to do.
-  it('tells the reviewer not to ask for CI workflow changes', () => {
+  // CYAU-346 — the automator may now deliver CI workflow changes; evidence only CI can give stays a note.
+  it('does not forbid CI workflow changes and keeps CI-only evidence non-blocking', () => {
     const instructions = buildReviewerInstructions({...request, code: 'REFL-3'})
-    expect(instructions).toContain('.github/workflows')
+    expect(instructions).not.toContain('.github/workflows')
     expect(instructions).toContain('non è un rilievo bloccante')
   })
 

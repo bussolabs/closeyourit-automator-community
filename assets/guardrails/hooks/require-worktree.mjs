@@ -45,12 +45,15 @@ export function evaluate(toolName, input, worktreesRoot, authorizedCwd, sessionC
       if (authorizedGit.status !== 0 || fs.realpathSync(authorizedGit.stdout.trim()) !== rootReal) throw new Error('cwd non autorizzata')
     }
     const absolute = path.resolve(target)
-    const targetReal = fs.existsSync(absolute)
-      ? fs.realpathSync(absolute)
-      : path.join(fs.realpathSync(path.dirname(absolute)), path.basename(absolute))
+    // CYAU-344 — a new file may sit in a directory that does not exist yet: resolve from the nearest ancestor
+    // that does. What is missing cannot be a symlink, so the resolved ancestor still tells where the write lands.
+    let existing = absolute
+    while (!fs.existsSync(existing) && path.dirname(existing) !== existing) existing = path.dirname(existing)
+    const existingReal = fs.realpathSync(existing)
+    const targetReal = path.join(existingReal, path.relative(existing, absolute))
     if (!isWithin(rootReal, targetReal)) throw new Error('fuori dalla root gestita')
 
-    const probeDir = fs.existsSync(targetReal) && fs.statSync(targetReal).isDirectory() ? targetReal : path.dirname(targetReal)
+    const probeDir = fs.statSync(existingReal).isDirectory() ? existingReal : path.dirname(existingReal)
     const git = spawnSync('git', ['-C', probeDir, 'rev-parse', '--show-toplevel'], {encoding: 'utf8'})
     if (git.status !== 0 || git.stdout.trim() === '') throw new Error('non è un worktree Git')
     const topLevel = fs.realpathSync(git.stdout.trim())

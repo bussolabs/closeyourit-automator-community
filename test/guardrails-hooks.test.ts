@@ -151,6 +151,21 @@ describe('require-worktree', () => {
     expect(requireWorktree('Write', {file_path: path.join(worktree, 'new.txt')}, root).blocked).toBe(false)
   })
 
+  // CYAU-344 — a session file such as .closeyourit/session/commit-message.txt lives in a directory that may not
+  // exist yet: the path could not be resolved, and a write inside the worktree was refused as outside it.
+  it('allows a new file in a directory that does not exist yet inside the worktree, never outside it', () => {
+    const {root, worktree} = realSiblingWorktree()
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-worktree-outside-'))
+    tempDirs.push(outside)
+    fs.symlinkSync(outside, path.join(worktree, 'escape'))
+
+    expect(requireWorktree('Write', {file_path: path.join(worktree, '.closeyourit', 'session', 'commit-message.txt')}, root).blocked).toBe(false)
+    expect(requireWorktree('Write', {file_path: path.join(worktree, 'a', 'b', 'c', 'new.ts')}, root, worktree).blocked).toBe(false)
+    expect(requireWorktree('Write', {file_path: path.join(outside, 'missing', 'x.ts')}, root).blocked).toBe(true)
+    expect(requireWorktree('Write', {file_path: path.join(worktree, 'escape', 'missing', 'x.ts')}, root).blocked).toBe(true)
+    expect(requireWorktree('Write', {file_path: path.join(root, 'CYAU', 'not-a-worktree', 'deep', 'x.ts')}, root).blocked).toBe(true)
+  })
+
   it('blocks main checkout, fake directory, traversal and outgoing symlink', () => {
     const {root, worktree} = realSiblingWorktree()
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-worktree-outside-'))

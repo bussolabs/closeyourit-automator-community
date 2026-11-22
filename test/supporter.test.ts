@@ -187,10 +187,11 @@ describe('buildSupporterPlanPrompt', () => {
     expect(prompt).toContain('implementation_notes')
   })
 
-  it('sends back a plan the automation cannot deliver instead of handing it to a person (CYRA-1197)', () => {
+  // CYAU-346 — the GitHub App holds the workflows permission: a plan that changes CI is judged like any other.
+  it('does not send back a plan for changing CI workflows', () => {
     const prompt = buildSupporterPlanPrompt(planRound)
-    expect(prompt).toContain('.github/workflows')
-    expect(prompt).toContain('set "revise" so the planner drops those files')
+    expect(prompt).not.toContain('.github/workflows')
+    expect(prompt).toContain('an open point has a safe default')
   })
 })
 

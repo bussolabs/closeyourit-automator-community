@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.64.2] - 2026-11-22
+
+### Changed
+
+- **Un piano che cambia i file dei controlli automatici non viene più rimandato indietro.** L'app delle macchine ha ora il permesso per consegnarli: il giudice dei piani e chi rilegge il codice non li trattano più come vietati. (CYAU-346)
+
+### Fixed
+
+- **Un file nuovo in una cartella nuova non viene più rifiutato.** La protezione fermava l'agente quando scriveva un file in una cartella non ancora creata, anche dentro la sua cartella di lavoro. Fuori da lì resta vietato. (CYAU-344)
+- **Un rilascio fatto da Codex non si ferma più sull'etichetta.** La cartella delle etichette di versione era in sola lettura: il codice veniva unito, ma il rilascio non partiva. Ora l'etichetta si crea. (CYAU-343)
+
 ## [0.64.1] - 2026-11-21
 
 ### Fixed

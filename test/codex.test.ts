@@ -195,6 +195,7 @@ describe('buildCodexArgv in skill-mode', () => {
       `${JSON.stringify(path.join(common, 'worktrees', 'CYRA-7'))}="write", ${JSON.stringify(path.join(common, 'objects'))}="write", ` +
       `${JSON.stringify(path.join(common, 'refs', 'heads', 'ticket'))}="write", ${JSON.stringify(path.join(common, 'logs', 'refs', 'heads', 'ticket'))}="write", ` +
       `${JSON.stringify(path.join(common, 'refs', 'remotes', 'origin'))}="write", ${JSON.stringify(path.join(common, 'logs', 'refs', 'remotes', 'origin'))}="write", ` +
+      `${JSON.stringify(path.join(common, 'refs', 'tags'))}="write", ` +
       '"/run/user"="none", "/run/dbus"="none", "/run/systemd"="none", "/var/run/docker.sock"="none", ' +
       '"/run/docker.sock"="none", "/var/lib/incus"="none", "/run/incus"="none"}')
     // The directories a first commit or push writes to exist before the session starts.
@@ -221,6 +222,8 @@ describe('buildCodexArgv in skill-mode', () => {
     const common = path.join(repo, '.git')
 
     expect(filesystem).toContain(`${JSON.stringify(path.join(common, 'refs', 'remotes', 'origin'))}="write"`)
+    // CYAU-343 — release.sh creates the version tag locally before pushing it: read-only, every release on Codex died there.
+    expect(filesystem).toContain(`${JSON.stringify(path.join(common, 'refs', 'tags'))}="write"`)
     expect(filesystem).not.toContain(`${JSON.stringify(path.join(common, 'refs', 'heads'))}="write"`)
     expect(filesystem).not.toContain(`${JSON.stringify(path.join(common, 'refs'))}="write"`)
   })
