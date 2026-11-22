@@ -78,6 +78,17 @@ export interface RunRecord {
   checkpoints: Checkpoint[]
   /** Last known agent outcome, kept even if the later phases do not run a runtime. */
   result?: AgentRunResult
+  /**
+   * CYAU-311 — the base branch commit the code server confirmed when the work was prepared. Tools, gate policy and
+   * review comparison read it instead of the local `origin/<default>`, which a session can rewrite; the session
+   * cannot write here. Set once and never replaced; missing (older records included) means no trusted base.
+   */
+  trusted_base?: string
+}
+
+/** CYAU-311 — a full commit id is the only acceptable trusted base: anything else reads as missing. */
+export function isTrustedBaseCommit(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{40}$/.test(value)
 }
 
 // Segments that, used as a file name (`runs/<run-id>.json`) or as a key, would climb the path or
@@ -416,6 +427,8 @@ function coerceRunRecord(value: Record<string, unknown>): RunRecord {
     updated_at: updatedAt,
     checkpoints,
     ...(result ? {result} : {}),
+    // CYAU-311 — a malformed value is dropped, never guessed: the run then has no trusted base and must ask again.
+    ...(isTrustedBaseCommit(value.trusted_base) ? {trusted_base: value.trusted_base} : {}),
   }
 }
 
@@ -561,6 +574,7 @@ export function recordCheckpoint(existing: RunRecord | null, runId: string, meta
   // Emitted only if known (field omitted when null) → backward compat with RunRecords written before CYAU-31.
   const runtime = meta.runtime ?? existing?.runtime ?? null
   const result = inputResult ?? existing?.result ?? null
+  const trustedBase = existing?.trusted_base
   return {
     run_id: runId,
     ...(existing?.adopted_from ? {adopted_from: existing.adopted_from} : {}),
@@ -570,6 +584,8 @@ export function recordCheckpoint(existing: RunRecord | null, runId: string, meta
     updated_at: input.at,
     checkpoints: [...(existing?.checkpoints ?? []), checkpoint],
     ...(result !== null ? {result} : {}),
+    // CYAU-311 — carried over by every later phase: dropping it would let the next attempt confirm a new one.
+    ...(isTrustedBaseCommit(trustedBase) ? {trusted_base: trustedBase} : {}),
   }
 }
 

@@ -25,7 +25,10 @@ afterEach(() => {
   for (const directory of directories.splice(0)) fs.rmSync(directory, {recursive: true, force: true})
 })
 
-const snapshot = {baseCommit: 'a'.repeat(40), snapshotTree: 'b'.repeat(40), diffSha256: 'c'.repeat(64)}
+// CYAU-311 — the base commit the server confirmed for the adopted work, and a later different answer of the server.
+const KEPT_BASE = 'e'.repeat(40)
+const LATER_BASE = 'f'.repeat(40)
+const snapshot = {baseCommit:'a'.repeat(40), snapshotTree: 'b'.repeat(40), diffSha256: 'c'.repeat(64)}
 const result = normalizeAgentResult({
   runtime: 'codex',
   action: 'worker',
@@ -67,6 +70,7 @@ function inReviewRun(runId: string, worktree: string, adoptedFrom?: string): Run
     runtime: 'codex',
     updated_at: '2026-07-14T10:00:00.000Z',
     result,
+    trusted_base: KEPT_BASE,
     checkpoints: [{
       phase: 'in_review', branch: 'ticket/CYAU-37', commit: 'd'.repeat(40), worktree, dirty: false,
       artifacts: [
@@ -161,7 +165,7 @@ describe('crash-safe adoption of an in_review delivery', () => {
     expect(requests).toEqual(['run-1', 'run-2'])
     const adopted = readRun(runPath('run-2', runsBase)).run
     expect(adopted).toMatchObject({
-      run_id: 'run-2', adopted_from: 'run-1',
+      run_id: 'run-2', adopted_from: 'run-1', trusted_base: KEPT_BASE,
       checkpoints: [{phase: 'in_review', automation: {delivery: {publications: [{publicationKey: 'pub-1'}]}}}],
     })
 
@@ -171,14 +175,16 @@ describe('crash-safe adoption of an in_review delivery', () => {
       branch: ticketBranch('CYAU-37'),
       repoAction: 'reuse',
       worktreeAction: 'reuse',
+      confirmedBase: LATER_BASE,
     }
+    const resolveReviewDiff = vi.fn(async () => ({...snapshot, diff: 'diff'}))
     const effects = {push: 0, pr: 0, link: 0, status: 0, publish: 0, attest: 0}
     const cycle = makeTicketCycleProvider({
       runsBase,
       prepareWorkspace: () => workspace,
       inspectWorkspace: () => workspace,
       checkpointGit: {currentBranch: () => workspace.branch, headCommit: () => 'd'.repeat(40), isDirty: () => false},
-      resolveReviewDiff: vi.fn(async () => ({...snapshot, diff: 'diff'})),
+      resolveReviewDiff,
       delivery: {
         authorized: true,
         git: {commitApproved: () => { throw new Error('commit duplicato') }, attestCommit: () => { effects.attest++ }},
@@ -200,8 +206,28 @@ describe('crash-safe adoption of an in_review delivery', () => {
     // delivery adopted after a crash touches the status. The server writes it.
     expect(effects).toEqual({push: 0, pr: 0, link: 1, status: 0, publish: 0, attest: 1})
     expect(readRun(runPath('run-2', runsBase)).run).toMatchObject({
-      adopted_from: 'run-1', checkpoints: expect.arrayContaining([expect.objectContaining({phase: 'completed'})]),
+      adopted_from: 'run-1', trusted_base: KEPT_BASE,
+      checkpoints: expect.arrayContaining([expect.objectContaining({phase: 'completed'})]),
     })
+    // CYAU-311 — the resumed delivery compares against the adopted base, not the server's later answer.
+    expect(resolveReviewDiff).toHaveBeenCalled()
+    for (const [base] of resolveReviewDiff.mock.calls as unknown as Array<[string]>) expect(base).toBe(KEPT_BASE)
+  })
+
+  // CYAU-311 — an adopted record without a valid trusted base is a record without one: nothing is invented for it.
+  it('adoption never carries a malformed trusted base', () => {
+    const root = temporaryDirectory()
+    const runsBase = path.join(root, 'runs')
+    const worktree = path.join(root, 'worktree')
+    fs.mkdirSync(worktree, {recursive: true})
+    fs.mkdirSync(runsBase, {recursive: true})
+    fs.writeFileSync(runPath('old', runsBase), JSON.stringify({...inReviewRun('old', worktree), trusted_base: 'origin/main'}))
+
+    expect(adoptRecoverableTicketRun({
+      runId: 'next', ticket: 'CYAU-37', repository: 'closeyourit/automator',
+      expectedBranch: 'ticket/CYAU-37', expectedWorktree: worktree, runsBase,
+    })).toEqual({outcome: 'adopted', sourceRunId: 'old'})
+    expect(readRun(runPath('next', runsBase)).run?.trusted_base).toBeUndefined()
   })
 
   it('preserves the ancestors for audit, selects only the leaf and fails closed on a real fork', () => {

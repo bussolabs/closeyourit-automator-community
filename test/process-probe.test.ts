@@ -381,6 +381,8 @@ describe('runProcessProbe — process group escalation after timeout', () => {
 
     const pending = runProcessProbe('tool', ['--version'], {
       spawn,
+      // A still clock: the fake timers do not move performance.now(), and a slow runner would spend the grace.
+      now: () => 0,
       timeoutMs: 30,
       killGraceMs: 20,
       cleanupTimeoutMs: 0,
@@ -417,6 +419,8 @@ describe('runProcessProbe — process group escalation after timeout', () => {
 
     const pending = runProcessProbe('tool', [], {
       spawn,
+      // A still clock: the fake timers do not move performance.now(), and a slow runner would spend the grace.
+      now: () => 0,
       timeoutMs: 30,
       killGraceMs: 20,
       cleanupTimeoutMs: 0,

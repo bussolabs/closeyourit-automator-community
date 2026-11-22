@@ -7,6 +7,7 @@ import {TicketAutomationEvidenceSchema} from './ticket-evidence'
 import {
   isSafeRunId,
   isRecord,
+  isTrustedBaseCommit,
   mutateRunAtomically,
   readRun,
   runPath,
@@ -218,6 +219,8 @@ export function adoptRecoverableTicketRun(input: TicketRunAdoptionInput): Ticket
         ticket: source.run.ticket,
         repository: source.run.repository,
         ...(source.run.runtime ? {runtime: source.run.runtime} : {}),
+        // CYAU-311 — the adopted work keeps the base it was prepared and reviewed against.
+        ...(isTrustedBaseCommit(source.run.trusted_base) ? {trusted_base: source.run.trusted_base} : {}),
         updated_at: observedAt,
         result: source.run.result!,
         checkpoints: [{

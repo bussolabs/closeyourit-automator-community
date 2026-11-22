@@ -14,6 +14,7 @@ import {type GuidanceDeps} from '../src/lib/guidance'
 import {evaluateLimits} from '../src/lib/limits'
 import {phaseProfileDigest} from '../src/lib/phase-profile'
 import {type ClaudeActionT, PlaybookSchema} from '../src/lib/schema'
+import {AutomatorError, ErrorCodes} from '../src/errors/error-codes'
 
 // CYAU-132: the `--tools` argv the session REALLY receives, from the action recomposed from the phase PhaseProfile.
 // Closes the real chain profile → composeQueueSkillAction → buildClaudeArgv: checks declared == applied on the
@@ -1004,6 +1005,29 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
       outcome: 'stop', state: 'blocked', reason: expect.stringContaining('workspace ticket'),
     })
     expect(reserveLimits).not.toHaveBeenCalled()
+    expect(release).toHaveBeenCalledTimes(1)
+  })
+
+  // CYAU-311 — a base commit the code server did not confirm keeps its own reason, and the claim is released.
+  it('an unconfirmed base commit stops the dispatch with its own reason and releases the lease', async () => {
+    const release = vi.fn(async () => undefined)
+    const reason = 'il server del codice non ha confermato il commit di origin/main: si riprova al prossimo giro'
+    const preflight = buildTicketPreflight({
+      probe: probe(), guidance,
+      queue: {getTicketQueue: vi.fn(async () => ({outcome: 'candidate' as const, candidate: queueCandidate}))},
+      authorizeCwd: () => '/repo', attestRepository: () => true,
+      lease: {acquire: vi.fn(async () => ({
+        outcome: 'acquired' as const, runId: 'run-1',
+        lease: {renewEveryMs: 1000, renew: async () => true, release}, ...hostFirstLease('autopilot'),
+      }))},
+      ticketCycle: {prepare: vi.fn(async () => { throw new AutomatorError(ErrorCodes.Workspace.untrustedBase, reason, 1) })},
+      skills: {pluginDir: presentPluginDir, enabled: true},
+      attestConfinement: () => ({attested: true}),
+    })
+
+    const outcome = await preflight('worker', claudeAction, queueContext)
+    expect(outcome).toMatchObject({outcome: 'stop', state: 'blocked', reason: expect.stringContaining(`${reason} (fail-closed)`)})
+    expect((outcome as {reason: string}).reason).not.toContain('workspace ticket non attestabile')
     expect(release).toHaveBeenCalledTimes(1)
   })
 

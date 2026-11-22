@@ -171,6 +171,18 @@ describe('planWorkspace', () => {
 })
 
 // Fake Git recording the calls: isolates the orchestration (default URL/branch) from the real git.
+type FakeGitProbe = {
+  git: import('../src/lib/workspace').WorkspaceGit
+  clones: Array<{url: string; dest: string}>
+  worktrees: Array<{repoDir: string; worktreeDir: string; branch: string; createBranch: boolean; startPoint?: string}>
+  fetched: string[]
+  asked: string[]
+  defaultBranchReads: number
+  aligned: Array<{worktreeDir: string; branch: string}>
+  localConfig: Map<string, string>
+  managedIgnore: string[]
+}
+
 function fakeGit(
   state: Partial<import('../src/lib/workspace').WorkspaceState> & {
     localConfig?: Record<string, string>
@@ -179,26 +191,24 @@ function fakeGit(
     defaultRemoteBranch?: string | null
     ghBinary?: string | null
     alignFails?: boolean
+    /** CYAU-311 — what the server names for the base ref; `throws` simulates a failing question. */
+    remoteCommit?: string | null | 'throws'
   } = {},
-): {
-  git: import('../src/lib/workspace').WorkspaceGit
-  clones: Array<{url: string; dest: string}>
-  worktrees: Array<{repoDir: string; worktreeDir: string; branch: string; createBranch: boolean; startPoint?: string}>
-  fetched: string[]
-  aligned: Array<{worktreeDir: string; branch: string}>
-  localConfig: Map<string, string>
-  managedIgnore: string[]
-} {
+): FakeGitProbe {
   const clones: Array<{url: string; dest: string}> = []
   const worktrees: Array<{repoDir: string; worktreeDir: string; branch: string; createBranch: boolean; startPoint?: string}> = []
   const fetched: string[] = []
   const aligned: Array<{worktreeDir: string; branch: string}> = []
   const localConfig = new Map<string, string>(Object.entries(state.localConfig ?? {}))
   const managedIgnore: string[] = []
-  return {
+  const asked: string[] = []
+  // Annotated so the inner callbacks keep the WorkspaceGit parameter types (noImplicitAny).
+  const probe: FakeGitProbe = {
     clones,
     worktrees,
     fetched,
+    asked,
+    defaultBranchReads: 0,
     aligned,
     localConfig,
     managedIgnore,
@@ -212,7 +222,15 @@ function fakeGit(
         if (state.fetchFails) throw new Error('rete giù')
         fetched.push(repoDir)
       },
-      defaultRemoteBranch: () => (state.defaultRemoteBranch === undefined ? 'origin/main' : state.defaultRemoteBranch),
+      defaultRemoteBranch: () => {
+        probe.defaultBranchReads++
+        return state.defaultRemoteBranch === undefined ? 'origin/main' : state.defaultRemoteBranch
+      },
+      remoteCommit: (_repoDir, ref) => {
+        asked.push(ref)
+        if (state.remoteCommit === 'throws') throw new Error('server muto')
+        return state.remoteCommit === undefined ? SERVER_COMMIT : state.remoteCommit
+      },
       addWorktree: (repoDir, worktreeDir, branch, createBranch, startPoint) =>
         worktrees.push({repoDir, worktreeDir, branch, createBranch, startPoint}),
       alignTicketBranch: (worktreeDir, branch) => {
@@ -228,7 +246,12 @@ function fakeGit(
       ensureManagedIgnore: (repoDir) => { managedIgnore.push(repoDir) },
     },
   }
+  return probe
 }
+
+// CYAU-311 — the commit the fake server names for the base branch, and the one a run already keeps.
+const SERVER_COMMIT = '1'.repeat(40)
+const KEPT_COMMIT = '2'.repeat(40)
 
 describe('composeManagedIgnore (CYAU-142)', () => {
   const BEGIN = '# >>> closeyourit-automator (CYAU-142) — dependency install output, non committare >>>'
@@ -417,6 +440,97 @@ describe('prepareWorkspace (orchestration with fake git)', () => {
         {fullName: 'acme/widget', projectKey: 'ACME', ticket: 'CYAU-11', reposBase: '/r', worktreesBase: '/w'},
         f.git,
       )).toThrowError(expect.objectContaining({code: ErrorCodes.Workspace.diverged}))
+    })
+  })
+
+  // CYAU-311 — the local `origin/<default>` can be rewritten by an agent session working on the same repository:
+  // the trusted base is asked to the server, and a new ticket branch never starts from the local ref.
+  describe('the trusted base commit comes from the server, not from the local copy', () => {
+    const request = {fullName: 'acme/widget', projectKey: 'ACME', ticket: 'CYAU-11', reposBase: '/r', worktreesBase: '/w', base: 'origin/main'}
+
+    it('after the fetch it asks the server and returns the confirmed commit', () => {
+      const f = fakeGit({repoExists: true, repoIsGit: true})
+
+      const res = prepareWorkspace(request, f.git)
+
+      expect(f.fetched).toEqual(['/r/acme/widget'])
+      expect(f.asked).toEqual(['origin/main'])
+      expect(res.confirmedBase).toBe(SERVER_COMMIT)
+    })
+
+    it('a new ticket branch starts from the confirmed commit, without reading the local ref', () => {
+      const f = fakeGit()
+
+      prepareWorkspace(request, f.git)
+
+      expect(f.worktrees[0]).toMatchObject({createBranch: true, startPoint: SERVER_COMMIT})
+      expect(f.defaultBranchReads).toBe(0)
+    })
+
+    it('a commit already kept by the run wins over a new answer of the server', () => {
+      const f = fakeGit()
+
+      const res = prepareWorkspace({...request, pinnedBase: KEPT_COMMIT}, f.git)
+
+      expect(f.worktrees[0].startPoint).toBe(KEPT_COMMIT)
+      expect(res.confirmedBase).toBe(SERVER_COMMIT)
+    })
+
+    it('a failed fetch gives birth to no trusted point: the server is not even asked', () => {
+      const f = fakeGit({repoExists: true, repoIsGit: true, fetchFails: true})
+
+      const res = prepareWorkspace(request, f.git)
+
+      expect(f.asked).toEqual([])
+      expect(res.confirmedBase).toBeNull()
+    })
+
+    for (const [name, remoteCommit] of [
+      ['does not answer', 'throws'],
+      ['names nothing', null],
+      ['names something that is not a commit id', 'refs/heads/main'],
+    ] as const) {
+      it(`a server that ${name} confirms nothing`, () => {
+        const f = fakeGit({repoExists: true, repoIsGit: true, remoteCommit})
+
+        expect(prepareWorkspace(request, f.git).confirmedBase).toBeNull()
+      })
+    }
+
+    it('without a kept or confirmed commit a new branch is not created from the local copy', () => {
+      const f = fakeGit({fetchFails: true})
+
+      expect(() => prepareWorkspace(request, f.git))
+        .toThrowError(expect.objectContaining({code: ErrorCodes.Workspace.untrustedBase}))
+      expect(f.worktrees).toEqual([])
+      expect(f.defaultBranchReads).toBe(0)
+    })
+
+    it('with the server mute a new branch starts from the commit the run keeps', () => {
+      const f = fakeGit({fetchFails: true})
+
+      prepareWorkspace({...request, pinnedBase: KEPT_COMMIT}, f.git)
+
+      expect(f.worktrees[0].startPoint).toBe(KEPT_COMMIT)
+    })
+
+    it('a resumed branch with the server mute is prepared and says no commit was confirmed', () => {
+      const f = fakeGit({hasBranch: true, remoteCommit: 'throws'})
+
+      const res = prepareWorkspace(request, f.git)
+
+      expect(f.worktrees[0]).toMatchObject({createBranch: false, startPoint: undefined})
+      expect(res.confirmedBase).toBeNull()
+    })
+
+    it('without a base asked for, the preparation keeps its previous behaviour', () => {
+      const f = fakeGit()
+
+      const res = prepareWorkspace({...request, base: undefined}, f.git)
+
+      expect(f.asked).toEqual([])
+      expect(res).not.toHaveProperty('confirmedBase')
+      expect(f.worktrees[0].startPoint).toBe('origin/main')
     })
   })
 
@@ -666,6 +780,61 @@ describe('prepareWorkspace / defaultWorkspaceGit (real git)', () => {
 
     expect(res.worktreeAction).toBe('add')
     expect(currentBranch(res.worktreePath)).toBe('ticket/CYAU-11')
+  })
+
+  // CYAU-311 — "the server" is the local origin; "the session" rewrites the managed repository's remote-tracking ref.
+  describe('remoteCommit asks the server, never the local remote-tracking ref', () => {
+    const revParse = (dir: string, ref: string): string =>
+      spawnSync('git', ['-C', dir, 'rev-parse', ref], {encoding: 'utf8'}).stdout.trim()
+
+    function commitIn(dir: string, file: string): string {
+      fs.writeFileSync(path.join(dir, file), `${file}\n`)
+      git(['-C', dir, 'add', '.'])
+      git(['-C', dir, '-c', 'user.email=t@e.st', '-c', 'user.name=Test', 'commit', '-qm', file])
+      return revParse(dir, 'HEAD')
+    }
+
+    it('returns the commit the server names, even after the local ref was rewritten', () => {
+      const first = prepare('CYAU-11')
+      const real = revParse(origin, 'main')
+      const forged = commitIn(first.worktreePath, 'forged.txt')
+      git(['-C', first.repoPath, 'update-ref', 'refs/remotes/origin/main', forged])
+
+      expect(defaultWorkspaceGit().remoteCommit(first.repoPath, 'origin/main')).toBe(real)
+      expect(defaultWorkspaceGit().remoteCommit(first.repoPath, 'origin/HEAD')).toBe(real)
+    })
+
+    it('a new ticket branch starts from the server commit, not from a rewritten local ref', () => {
+      const first = prepare('CYAU-11')
+      const real = revParse(origin, 'main')
+      const forged = commitIn(first.worktreePath, 'forged.txt')
+      git(['-C', first.repoPath, 'update-ref', 'refs/remotes/origin/main', forged])
+
+      const second = prepareWorkspace({
+        fullName: 'acme/widget', projectKey: 'ACME', ticket: 'CYAU-12', url: origin, reposBase, worktreesBase, base: 'origin/main',
+      })
+
+      expect(second.confirmedBase).toBe(real)
+      expect(revParse(second.worktreePath, 'HEAD')).toBe(real)
+    })
+
+    it('a commit the server names but this machine does not have is not trusted', () => {
+      const first = prepare('CYAU-11')
+      commitIn(origin, 'later.txt')
+
+      expect(defaultWorkspaceGit().remoteCommit(first.repoPath, 'origin/main')).toBeNull()
+    })
+
+    it('an unreachable server, an unknown branch or a ref outside origin confirm nothing', () => {
+      const first = prepare('CYAU-11')
+      const probe = defaultWorkspaceGit()
+
+      expect(probe.remoteCommit(first.repoPath, 'origin/nope')).toBeNull()
+      expect(probe.remoteCommit(first.repoPath, 'main')).toBeNull()
+      expect(probe.remoteCommit(first.repoPath, 'origin/')).toBeNull()
+      git(['-C', first.repoPath, 'remote', 'set-url', 'origin', path.join(root, 'gone')])
+      expect(probe.remoteCommit(first.repoPath, 'origin/main')).toBeNull()
+    })
   })
 
   // CYAU-270 — the ticket branch is aligned with GitHub before every attempt. "GitHub" is the local origin;
@@ -999,6 +1168,21 @@ describe('defaultWorkspaceGit(): network commands with a time cap', () => {
       expect(options.timeout).toBeGreaterThan(0)
       expect(options.env?.GIT_TERMINAL_PROMPT).toBe('0')
     }
+  })
+
+  // CYAU-311 — the question to the server runs in the daemon beat too: a silent server must not stop it.
+  it('remoteCommit asks the server with a time cap and without credential prompts', () => {
+    const spawn = fakeSpawn(`${'1'.repeat(40)}\trefs/heads/main\n`)
+    expect(defaultWorkspaceGit(spawn, 4_242).remoteCommit(base, 'origin/main')).toBe('1'.repeat(40))
+    const [, args, options] = callsOf(spawn)[0]
+    expect(args).toEqual(['-C', base, 'ls-remote', 'origin', 'refs/heads/main'])
+    expect(options.timeout).toBe(4_242)
+    expect(options.env?.GIT_TERMINAL_PROMPT).toBe('0')
+  })
+
+  it('remoteCommit confirms nothing when the question times out', () => {
+    const spawn = vi.fn(() => ({status: null, stdout: '', stderr: ''})) as unknown as GitSpawnSync
+    expect(defaultWorkspaceGit(spawn).remoteCommit(base, 'origin/main')).toBeNull()
   })
 
   it('the time cap is configurable', () => {

@@ -75,6 +75,7 @@ import {latestRunPhase, planTransition, type RunPhase} from './state-machine'
 import {
   checkpointPublicationAt,
   mutateRunAtomically,
+  isTrustedBaseCommit,
   readRun,
   recordCheckpoint,
   runPath,
@@ -658,17 +659,51 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         throw new Error(`run ${input.runId} non riprendibile dalla fase ${initial}`)
       }
 
+      // CYAU-311 — the trusted base commit already kept in the run record (the machine's state dir, which the session
+      // cannot write). Read before the workspace is touched, so even a new branch starts from it.
+      const keptBase = (): string | null => mutateRunAtomically<string | null>(file, stamp(now()), (run) => {
+        assertRunIdentity(run, input)
+        const kept = run?.trusted_base
+        return {value: isTrustedBaseCommit(kept) ? kept : null}
+      }).value
+
+      // CYAU-311 — a kept base is reused and never replaced, not even by a later answer of the server: the work keeps
+      // the point it started from. Otherwise the commit the server just confirmed is kept, under the same lock that
+      // reads, so of two concurrent preparations the second adopts the first one's. Neither → the preparation stops.
+      const pinTrustedBase = (confirmed: string | null): string => {
+        const pinned = mutateRunAtomically<string | null>(file, stamp(now()), (run) => {
+          assertRunIdentity(run, input)
+          const kept = run?.trusted_base
+          if (isTrustedBaseCommit(kept)) return {value: kept}
+          if (run === null || confirmed === null) return {value: null}
+          return {run: {...run, trusted_base: confirmed}, value: confirmed}
+        }).value
+        if (pinned === null) {
+          throw new AutomatorError(
+            ErrorCodes.Workspace.untrustedBase,
+            `il server del codice non ha confermato il commit di ${input.base} e la lavorazione non ne conserva uno: ` +
+              'preparazione fermata senza installare strumenti, si riprova al prossimo giro',
+            1,
+          )
+        }
+        return pinned
+      }
+
       let prepared: PrepareResult
+      let trustedBase: string
       try {
-        prepared = prepare(workspaceInput)
+        prepared = prepare({...workspaceInput, base: input.base, pinnedBase: keptBase()})
+        const confirmedBase = prepared.confirmedBase ?? null
         const verified = inspect(workspaceInput)
         assertVerifiedWorkspace(prepared, verified)
         prepared = verified
+        trustedBase = pinTrustedBase(confirmedBase)
       } catch (error) {
         try { move('blocked') } catch { /* the original failure stays authoritative */ }
         // CYAU-270 — a branch that does not align with GitHub keeps its own reason: the generic one would hide
-        // a conflict that only a person can resolve.
-        if (error instanceof AutomatorError && error.code === ErrorCodes.Workspace.diverged) throw error
+        // a conflict that only a person can resolve. CYAU-311 — so does a base the server did not confirm.
+        if (error instanceof AutomatorError &&
+          (error.code === ErrorCodes.Workspace.diverged || error.code === ErrorCodes.Workspace.untrustedBase)) throw error
         // The underlying failure travels with the stop: the generic reason alone could not be diagnosed.
         const cause = error instanceof Error ? error.message.replace(/\s+/gu, ' ').slice(0, 200) : ''
         throw new Error(`workspace ticket non attestabile (fail-closed)${cause ? `: ${cause}` : ''}`)
@@ -682,7 +717,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
       let emulatorConfig: EmulatorTestConfig | null = null
       if (input.outcomeOwnedByServer) {
         try {
-          const trustedGate = loadTrustedGate(prepared.worktreePath, input.base)
+          const trustedGate = loadTrustedGate(prepared.worktreePath, trustedBase)
           if (trustedGate?.version === 2) remoteConfig = trustedGate.remote
           if (trustedGate?.emulator) emulatorConfig = trustedGate.emulator
         } catch {
@@ -789,7 +824,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         if (!deliveryOptions) return {outcome: 'complete', runStatus: 'success', errorCode: null}
         verifyAgain()
         if (signal?.aborted || input.signal?.aborted) throw new Error('delivery annullata')
-        const current = await resolveDiff(input.base, prepared.worktreePath, signal ?? input.signal)
+        const current = await resolveDiff(trustedBase, prepared.worktreePath, signal ?? input.signal)
         if (signal?.aborted || input.signal?.aborted) throw new Error('delivery annullata')
         if (!automation.gatedSnapshot || redactSecrets(current.diff) !== current.diff ||
           !sameSnapshot(current, automation.gatedSnapshot)) {
@@ -809,6 +844,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
           runId: input.runId,
           cwd: prepared.worktreePath,
           branch: prepared.branch,
+          // CYAU-311 — the proposal targets the base BRANCH by name, never the commit pinned for tools and review.
           trustedBase: input.base,
           authorized: deliveryOptions.authorized,
           automation,
@@ -862,7 +898,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         let snapshotFailure = false
         if (gate && persistedSnapshot) {
           try {
-            const current = await resolveDiff(input.base, prepared.worktreePath, signal ?? input.signal)
+            const current = await resolveDiff(trustedBase, prepared.worktreePath, signal ?? input.signal)
             if (redactSecrets(current.diff) !== current.diff) throw new Error('diff review contiene materiale sensibile')
             if (sameSnapshot(current, persistedSnapshot)) snapshot = current
             else gate = undefined // the worktree changed: the previous gate is no longer authoritative
@@ -873,7 +909,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
         if (!gate) {
           let beforeGate: ResolvedReviewDiff | undefined
           try {
-            beforeGate = await resolveDiff(input.base, prepared.worktreePath, signal ?? input.signal)
+            beforeGate = await resolveDiff(trustedBase, prepared.worktreePath, signal ?? input.signal)
             if (redactSecrets(beforeGate.diff) !== beforeGate.diff) {
               snapshotFailure = true
               beforeGate = undefined
@@ -928,7 +964,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
             gate = {checks, verdict: evaluateGate(checks)}
           } else if (gate.verdict.passed && beforeGate) {
             try {
-              const afterGate = await resolveDiff(input.base, prepared.worktreePath, signal ?? input.signal)
+              const afterGate = await resolveDiff(trustedBase, prepared.worktreePath, signal ?? input.signal)
               if (redactSecrets(afterGate.diff) !== afterGate.diff || !sameSnapshot(beforeGate, afterGate)) {
                 throw new Error('snapshot mutato durante il gate')
               }
@@ -969,7 +1005,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
             mode: input.reviewMode,
             reviewerModel: input.reviewerModel,
             snapshot,
-            base: input.base,
+            base: trustedBase,
             requirements: untrustedReviewEvidence('requirements', input.requirements),
             testEvidence: untrustedReviewEvidence('test-evidence', gateEvidenceText(gate)),
             cwd: prepared.worktreePath,
@@ -1074,7 +1110,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
 
             let snapshot: ResolvedReviewDiff
             try {
-              snapshot = await resolveDiff(input.base, prepared.worktreePath, signal ?? input.signal)
+              snapshot = await resolveDiff(trustedBase, prepared.worktreePath, signal ?? input.signal)
               // A diff carrying sensitive material is sent to no reviewer, not even a local one. CYRA-1197 — the
               // reviewer reads a copy with those values masked instead of nothing: token-shaped text is often the fake
               // token of a redaction test, and refusing left the work unreviewed. The fingerprints still name the
@@ -1110,7 +1146,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
                 mode: input.reviewMode,
                 reviewerModel: input.reviewerModel,
                 snapshot,
-                base: input.base,
+                base: trustedBase,
                 requirements: untrustedReviewEvidence('requirements', input.requirements),
                 // In skill-mode the checks were run by the skill: the evidence is in its report, and
                 // reaches the reviewer as UNTRUSTED evidence, exactly like the ticket.
@@ -1337,7 +1373,7 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
           if (phase !== 'ready' && phase !== 'implementing') {
             throw new Error(`run ${input.runId} non avviabile dalla fase ${phase ?? '∅'}`)
           }
-          await provisionTools(prepared.repoPath, input.base)
+          await provisionTools(prepared.repoPath, trustedBase)
           move('implementing', prepared)
         },
         async afterRuntime(raw, result, signal) {

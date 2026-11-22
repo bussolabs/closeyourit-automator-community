@@ -4,6 +4,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import {repositoriesDir, worktreesDir} from './paths'
 import {normalizeGitHubRemote, readGitHubAliases} from './discover'
+import {isTrustedBaseCommit} from './state'
 import {AutomatorError, ErrorCodes} from '../errors/error-codes'
 
 // Management of checkouts and worktrees in an Automator directory (CYAU-11). The automator does NOT work in the
@@ -152,6 +153,12 @@ export interface WorkspaceGit {
   fetchOrigin(repoDir: string): void
   /** Default branch of the remote in the form `origin/<name>`; null if not resolvable. */
   defaultRemoteBranch(repoDir: string): string | null
+  /**
+   * CYAU-311 — the commit the REMOTE names for `ref` (`origin/<name>` or `origin/HEAD`), asked to the server directly
+   * and never read from the local remote-tracking ref, which an agent session can write. Accepted only when that
+   * commit is already present locally; null when the server does not answer, names nothing or names a missing commit.
+   */
+  remoteCommit(repoDir: string, ref: string): string | null
   addWorktree(repoDir: string, worktreeDir: string, branch: string, createBranch: boolean, startPoint?: string): void
   /**
    * Aligns the checked-out ticket branch with `origin/<branch>` as last fetched (CYAU-270): fast-forward when only
@@ -192,6 +199,13 @@ export interface PrepareInput {
   reposBase?: string // override of the repositories base (test)
   worktreesBase?: string // override of the worktrees base (test)
   githubHosts?: ReadonlySet<string> // already resolved GitHub SSH aliases (test/integration)
+  /**
+   * CYAU-311 — the trusted base ref (`origin/<default>`): when given, the server is asked for its commit after the
+   * fetch, and a new ticket branch starts from a confirmed commit instead of the local ref.
+   */
+  base?: string
+  /** CYAU-311 — the trusted base commit already kept in the run record: it wins over a new answer of the server. */
+  pinnedBase?: string | null
 }
 
 export interface PrepareResult {
@@ -200,6 +214,11 @@ export interface PrepareResult {
   branch: string
   repoAction: RepoAction
   worktreeAction: WorktreeAction
+  /**
+   * CYAU-311 — the base commit the server confirmed during THIS preparation; null when the fetch or the question
+   * failed (no new trusted point is born). Absent when no `base` was asked for, and on a mere inspection.
+   */
+  confirmedBase?: string | null
 }
 
 /** Inspects and validates what would be reused, without creating, resetting or cleaning any path. */
@@ -256,8 +275,15 @@ export function prepareWorkspace(input: PrepareInput, git: WorkspaceGit = defaul
   const {repoPath, worktreePath: wtPath, branch} = inspected
 
   if (inspected.repoAction === 'clone') git.clone(input.url ?? cloneUrl(input.fullName), repoPath)
-  fetchTolerant(repoPath, git)
-  if (inspected.worktreeAction === 'add') createTicketWorktree(repoPath, wtPath, branch, git)
+  const fetched = fetchTolerant(repoPath, git)
+  // CYAU-311 — after a failed fetch the server is not asked: a failed update must not give birth to a new trusted point.
+  const confirmedBase = input.base === undefined ? undefined : (fetched ? confirmRemoteCommit(repoPath, input.base, git) : null)
+  if (inspected.worktreeAction === 'add') {
+    const startPoint = input.base === undefined
+      ? undefined
+      : () => trustedStartPoint(input.pinnedBase, confirmedBase ?? null, repoPath)
+    createTicketWorktree(repoPath, wtPath, branch, git, startPoint)
+  }
   // Every attempt, resumed or not, starts from the branch as GitHub has it (CYAU-270), see `alignTicketBranch`.
   git.alignTicketBranch(wtPath, branch)
   ensurePushableRepo(repoPath, git)
@@ -265,7 +291,35 @@ export function prepareWorkspace(input: PrepareInput, git: WorkspaceGit = defaul
   // always (re)applied — idempotent, additive, never destructive — so a repo cloned before the fix receives it on reuse.
   git.ensureManagedIgnore(repoPath)
 
-  return inspected
+  return confirmedBase === undefined ? inspected : {...inspected, confirmedBase}
+}
+
+/** The server's answer, kept only when it is a full commit id: anything else counts as no answer. */
+function confirmRemoteCommit(repoPath: string, base: string, git: WorkspaceGit): string | null {
+  try {
+    const commit = git.remoteCommit(repoPath, base)
+    return isTrustedBaseCommit(commit) ? commit : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * CYAU-311 — a new ticket branch starts from the trusted base commit (the one kept in the run record, otherwise the
+ * one the server just confirmed), never from the local `origin/<default>`, which a session on the same repository
+ * can move. Without either the branch is not created: it would start from a point a session may have chosen.
+ */
+function trustedStartPoint(pinned: string | null | undefined, confirmed: string | null, repoPath: string): string {
+  const startPoint = isTrustedBaseCommit(pinned) ? pinned : confirmed
+  if (startPoint === null) {
+    throw new AutomatorError(
+      ErrorCodes.Workspace.untrustedBase,
+      `Il server del codice non ha confermato il commit del ramo principale per ${repoPath}: il branch del ticket non nasce dalla copia locale`,
+      1,
+    )
+  }
+
+  return startPoint
 }
 
 /**
@@ -275,11 +329,14 @@ export function prepareWorkspace(input: PrepareInput, git: WorkspaceGit = defaul
  * answer, falling back to slightly old remote-tracking refs is still vastly better than nothing, and blocking
  * every piece of work for a blip would be worse than the disease.
  */
-function fetchTolerant(repoPath: string, git: WorkspaceGit): void {
+function fetchTolerant(repoPath: string, git: WorkspaceGit): boolean {
   try {
     git.fetchOrigin(repoPath)
+    return true
   } catch {
-    // Deliberately swallowed: continue with the remote-tracking refs already present (see above).
+    // Deliberately swallowed: continue with the remote-tracking refs already present (see above). The caller learns
+    // it all the same, so no new trusted base commit is confirmed on top of a failed update (CYAU-311).
+    return false
   }
 }
 
@@ -301,7 +358,13 @@ function fetchTolerant(repoPath: string, git: WorkspaceGit): void {
  * Fail-closed on the default branch: without it, we would silently fall back to exactly the behaviour that
  * this function exists to remove. The fetch (`fetchTolerant`, run before this) instead is tolerant.
  */
-function createTicketWorktree(repoPath: string, wtPath: string, branch: string, git: WorkspaceGit): void {
+function createTicketWorktree(
+  repoPath: string,
+  wtPath: string,
+  branch: string,
+  git: WorkspaceGit,
+  trustedStart?: () => string,
+): void {
   const createBranch = !git.hasBranch(repoPath, branch)
   if (!createBranch) {
     // The branch already exists (resumed work): the starting point does not apply, the alignment follows.
@@ -309,7 +372,8 @@ function createTicketWorktree(repoPath: string, wtPath: string, branch: string, 
     return
   }
 
-  const startPoint = git.defaultRemoteBranch(repoPath)
+  // CYAU-311 — with a trusted base the local ref is never read: it is the one a session can move.
+  const startPoint = trustedStart ? trustedStart() : git.defaultRemoteBranch(repoPath)
   if (!startPoint) {
     throw new AutomatorError(
       ErrorCodes.Workspace.gitFailed,
@@ -524,6 +588,21 @@ export function defaultWorkspaceGit(
       }
       const ref = r.ok ? r.stdout.trim() : ''
       return ref === '' ? null : ref
+    },
+    remoteCommit(repoDir, ref) {
+      // `origin/HEAD` is the remote's HEAD, `origin/<name>` one of its branches: nothing else is a base to ask about.
+      if (!ref.startsWith('origin/') || ref.length === 'origin/'.length) return null
+      const name = ref.slice('origin/'.length)
+      const wanted = name === 'HEAD' ? 'HEAD' : `refs/heads/${name}`
+      // Same cap as every other network command (GIT_TIMEOUT_MS): a server that goes silent is a failed question.
+      const answer = runGit(['-C', repoDir, 'ls-remote', 'origin', wanted])
+      if (!answer.ok) return null
+      // `ls-remote` matches patterns by their tail: only the exact name counts, and only once.
+      const matches = answer.stdout.split('\n').map((line) => line.split('\t')).filter((fields) => fields[1]?.trim() === wanted)
+      const commit = matches.length === 1 ? matches[0][0].trim() : ''
+      if (!isTrustedBaseCommit(commit)) return null
+      // Trusted only once the commit itself is here: nothing can start from, or be compared with, a missing object.
+      return runGit(['-C', repoDir, 'cat-file', '-e', `${commit}^{commit}`]).ok ? commit : null
     },
     addWorktree(repoDir, worktreeDir, branch, createBranch, startPoint) {
       fs.mkdirSync(path.dirname(worktreeDir), {recursive: true})

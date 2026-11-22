@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.64.3] - 2026-11-22
+
+### Fixed
+
+- **Strumenti e revisione partono sempre dal vero ramo principale.** All'avvio di una lavorazione la macchina chiede al server del codice l'ultimo commit del ramo principale e lo conserva nel proprio registro, dove la sessione non può scrivere. Da quel commit nascono il nuovo ramo, gli strumenti installati, le regole dei controlli e il confronto per la revisione, anche dopo una correzione chiesta dalla revisione. La copia locale, che una sessione può alterare, non viene più usata. Se il server non risponde e la lavorazione non ha un commit conservato, la preparazione si ferma con il motivo e riprova al giro dopo. (CYAU-311)
+
 ## [0.64.2] - 2026-11-22
 
 ### Changed

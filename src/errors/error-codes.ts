@@ -208,6 +208,9 @@ export const ErrorCodes = {
     // The ticket branch cannot be aligned with its GitHub copy without rewriting local work (conflict, or
     // uncommitted changes in the way): the alignment is undone and the attempt stops (CYAU-270).
     diverged: 'C409-WORKSPACE-007',
+    // CYAU-311 — the code server did not confirm the base branch commit and no trusted one is kept: the work does not
+    // start from the local copy, which an agent session can rewrite.
+    untrustedBase: 'C503-WORKSPACE-008',
   },
   Guidance: {
     // Invalid context preparation input (CYAU-26): project key not safe as a segment (it ends up

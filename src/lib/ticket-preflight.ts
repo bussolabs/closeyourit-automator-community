@@ -1792,7 +1792,9 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
               })
             } catch (error) {
               // CYAU-270 — a ticket branch that does not align with GitHub says why, instead of the generic reason.
-              if (error instanceof AutomatorError && error.code === ErrorCodes.Workspace.diverged) {
+              // CYAU-311 — so does a base commit the code server did not confirm, with none kept by the run.
+              if (error instanceof AutomatorError &&
+                (error.code === ErrorCodes.Workspace.diverged || error.code === ErrorCodes.Workspace.untrustedBase)) {
                 return denyDispatch(`${error.message} (fail-closed)`)
               }
               // The cause travels with the stop: «not attestable» alone left a claimed ticket idle with no trace

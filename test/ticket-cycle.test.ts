@@ -37,12 +37,16 @@ afterEach(() => {
   for (const directory of directories.splice(0)) fs.rmSync(directory, {recursive: true, force: true})
 })
 
+// CYAU-311 — the base commit the code server confirms when the work is prepared.
+const CONFIRMED_BASE = 'e'.repeat(40)
+
 const workspace: PrepareResult = {
   repoPath: '/managed/repositories/closeyourit/automator',
   worktreePath: '/managed/worktrees/CYAU/CYAU-35',
   branch: 'ticket/CYAU-35',
   repoAction: 'reuse',
   worktreeAction: 'reuse',
+  confirmedBase: CONFIRMED_BASE,
 }
 
 const input = {
@@ -123,7 +127,7 @@ describe('persistent ticket cycle', () => {
 
     await lifecycle.beforeRuntime()
 
-    expect(provisionTools).toHaveBeenCalledWith(workspace.repoPath, input.base)
+    expect(provisionTools).toHaveBeenCalledWith(workspace.repoPath, CONFIRMED_BASE)
   })
 
   it('the automatic policy accepts only the trusted gate and rejects a no-op in the worktree', () => {
@@ -2025,7 +2029,7 @@ describe('emulator test in the delivery path (CYAU-295)', () => {
     await expect(lifecycle.emulatorTestWorkflowDelivery!({state: 'delivered'}, controller.signal))
       .resolves.toEqual({status: 'passed', summary: 'Prova su telefono superata.'})
 
-    expect(loadGateAtRef).toHaveBeenCalledWith(workspace.worktreePath, input.base)
+    expect(loadGateAtRef).toHaveBeenCalledWith(workspace.worktreePath, CONFIRMED_BASE)
     expect(runEmulatorTest).toHaveBeenCalledWith({
       config: emulator, cwd: workspace.worktreePath, ticket: input.ticket, signal: controller.signal,
     })
@@ -2187,5 +2191,182 @@ describe('emulator test in the delivery path (CYAU-295)', () => {
     await expect(lifecycle.emulatorTestWorkflowDelivery!({})).resolves.toEqual({
       status: 'passed', summary: expect.stringContaining('Android SDK assente'),
     })
+  })
+})
+
+// CYAU-311 — an agent session can rewrite the local `origin/<default>` of the managed repository. The trusted base is
+// the commit the code server confirmed at preparation, kept in the run record (the session cannot write there).
+describe('the trusted base commit of a run (CYAU-311)', () => {
+  const KEPT = 'f'.repeat(40)
+  const LATER = '9'.repeat(40)
+  const file = (runsBase: string) => runPath(input.runId, runsBase)
+  const mute = (): PrepareResult => ({...workspace, confirmedBase: null})
+  const answering = (commit: string) => (): PrepareResult => ({...workspace, confirmedBase: commit})
+  const changesRequested = {
+    status: 'completed' as const, reviewer: 'claude' as const,
+    findings: [{severity: 'major' as const, aspect: 'tests' as const, title: 'Correggere', detail: null}],
+    detail: null,
+    attestation: {reviewedBaseCommit: 'a'.repeat(40), reviewedSnapshotTree: 'b'.repeat(40), reviewedDiffSha256: 'c'.repeat(64)},
+  }
+  const approved = {...changesRequested, findings: []}
+
+  /** A run started before this change: its record has phases but no trusted base. */
+  function legacyRun(runsBase: string): void {
+    saveRun(file(runsBase), recordCheckpoint(null, input.runId, {
+      ticket: input.ticket, repository: input.repository, runtime: input.runtime,
+    }, {phase: 'validating', at: '2026-07-14T09:00:00.000Z'}))
+  }
+
+  it('the first preparation keeps the commit the server confirmed, and asks with the base ref', async () => {
+    const runsBase = temporaryDirectory()
+    const prepareWorkspace = vi.fn(answering(CONFIRMED_BASE))
+
+    await provider(runsBase, {prepareWorkspace}).prepare(input)
+
+    expect(prepareWorkspace).toHaveBeenCalledWith(expect.objectContaining({base: 'origin/main', pinnedBase: null}))
+    expect(readRun(file(runsBase)).run?.trusted_base).toBe(CONFIRMED_BASE)
+  })
+
+  // AC-1 — the session rewrote the local ref, the review asks for a fix and the run restarts: tools and the review
+  // comparison stay on the commit read at the start, and the server's later answer replaces nothing.
+  it('after a requested fix and a restart, tools and review comparison stay on the initial commit', async () => {
+    const runsBase = temporaryDirectory()
+    const provisionTools = vi.fn(async () => ({status: 'none' as const, detail: ''}))
+    const resolveReviewDiff = vi.fn(async () => ({
+      baseCommit: 'a'.repeat(40), snapshotTree: 'b'.repeat(40), diffSha256: 'c'.repeat(64), diff: 'diff',
+    }))
+    const executeReview = vi.fn().mockResolvedValueOnce(changesRequested).mockResolvedValueOnce(approved)
+    const first = await provider(runsBase, {provisionTools, resolveReviewDiff, executeReview}).prepare(input)
+    await first.beforeRuntime()
+    const execution = result()
+    expect(await first.afterRuntime(execution.raw, execution.normalized)).toMatchObject({outcome: 'retry'})
+
+    // Restart of the same run: the local copy now points elsewhere, and the server has moved on too.
+    const prepareWorkspace = vi.fn(answering(LATER))
+    const restarted = await provider(runsBase, {prepareWorkspace, provisionTools, resolveReviewDiff, executeReview})
+      .prepare(input)
+    await restarted.beforeRuntime()
+    expect(await restarted.afterRuntime(execution.raw, execution.normalized))
+      .toEqual({outcome: 'complete', runStatus: 'success', errorCode: null})
+
+    expect(prepareWorkspace).toHaveBeenCalledWith(expect.objectContaining({pinnedBase: CONFIRMED_BASE}))
+    expect(provisionTools.mock.calls).toEqual([[workspace.repoPath, CONFIRMED_BASE], [workspace.repoPath, CONFIRMED_BASE]])
+    expect(resolveReviewDiff.mock.calls.length).toBeGreaterThan(0)
+    for (const [base] of resolveReviewDiff.mock.calls as unknown as Array<[string]>) expect(base).toBe(CONFIRMED_BASE)
+    for (const [request] of executeReview.mock.calls as unknown as Array<[{base: string}]>) expect(request.base).toBe(CONFIRMED_BASE)
+    // Every later phase carried the value over: the record still names the initial commit.
+    const run = readRun(file(runsBase)).run
+    expect(run?.checkpoints.at(-1)?.phase).toBe('in_review')
+    expect(run?.trusted_base).toBe(CONFIRMED_BASE)
+  })
+
+  // AC-2 — resuming with the local copy rewritten and the server mute: the kept commit is used and does not change.
+  it('resuming with the server mute reuses the kept commit and leaves it unchanged', async () => {
+    const runsBase = temporaryDirectory()
+    await provider(runsBase, {prepareWorkspace: vi.fn(answering(KEPT))}).prepare(input)
+    const provisionTools = vi.fn(async () => ({status: 'none' as const, detail: ''}))
+
+    const resumed = await provider(runsBase, {prepareWorkspace: vi.fn(mute), provisionTools}).prepare(input)
+    await resumed.beforeRuntime()
+
+    expect(provisionTools).toHaveBeenCalledWith(workspace.repoPath, KEPT)
+    expect(readRun(file(runsBase)).run?.trusted_base).toBe(KEPT)
+  })
+
+  // AC-3 — no kept commit and no answer: the preparation stops with a clear reason, before any tool is installed.
+  it('without a kept commit and with the server mute the preparation stops and installs nothing', async () => {
+    const runsBase = temporaryDirectory()
+    const provisionTools = vi.fn()
+    const loadGateAtRef = vi.fn(() => null)
+
+    await expect(provider(runsBase, {prepareWorkspace: vi.fn(mute), provisionTools, loadGateAtRef})
+      .prepare({...input, outcomeOwnedByServer: true}))
+      .rejects.toMatchObject({
+        code: ErrorCodes.Workspace.untrustedBase,
+        message: expect.stringMatching(/non ha confermato il commit di origin\/main.*si riprova/),
+      })
+
+    expect(provisionTools).not.toHaveBeenCalled()
+    expect(loadGateAtRef).not.toHaveBeenCalled()
+    const run = readRun(file(runsBase)).run
+    expect(run?.checkpoints.map((entry) => entry.phase)).toEqual(['validating', 'blocked'])
+    expect(run?.trusted_base).toBeUndefined()
+  })
+
+  it('a new branch that cannot start from a trusted commit stops with the same reason', async () => {
+    const runsBase = temporaryDirectory()
+    const prepareWorkspace = vi.fn(() => {
+      throw new AutomatorError(ErrorCodes.Workspace.untrustedBase, 'commit del ramo principale non confermato', 1)
+    })
+
+    await expect(provider(runsBase, {prepareWorkspace}).prepare(input))
+      .rejects.toMatchObject({code: ErrorCodes.Workspace.untrustedBase})
+    expect(readRun(file(runsBase)).run?.checkpoints.map((entry) => entry.phase)).toEqual(['validating', 'blocked'])
+  })
+
+  // AC-4 — a run started before this change has no kept commit: the local copy is no longer enough.
+  it('a run started before the change stops with the server mute', async () => {
+    const runsBase = temporaryDirectory()
+    legacyRun(runsBase)
+    const provisionTools = vi.fn()
+
+    await expect(provider(runsBase, {prepareWorkspace: vi.fn(mute), provisionTools}).prepare(input))
+      .rejects.toMatchObject({code: ErrorCodes.Workspace.untrustedBase})
+    expect(provisionTools).not.toHaveBeenCalled()
+  })
+
+  it('a run started before the change adopts the commit the server confirms', async () => {
+    const runsBase = temporaryDirectory()
+    legacyRun(runsBase)
+
+    const lifecycle = await provider(runsBase, {prepareWorkspace: vi.fn(answering(LATER))}).prepare(input)
+
+    expect(lifecycle.authorizedCwd).toBe(workspace.worktreePath)
+    expect(readRun(file(runsBase)).run?.trusted_base).toBe(LATER)
+  })
+
+  it('a malformed kept value counts as no trusted base', async () => {
+    const runsBase = temporaryDirectory()
+    legacyRun(runsBase)
+    const raw = JSON.parse(fs.readFileSync(file(runsBase), 'utf8'))
+    fs.writeFileSync(file(runsBase), JSON.stringify({...raw, trusted_base: 'origin/main'}))
+
+    await expect(provider(runsBase, {prepareWorkspace: vi.fn(mute)}).prepare(input))
+      .rejects.toMatchObject({code: ErrorCodes.Workspace.untrustedBase})
+  })
+
+  // Two preparations of the same run at once: the one that keeps a commit first wins, the other adopts it
+  // instead of replacing it, so both use the same base.
+  it('a commit kept by a concurrent preparation is adopted, never replaced', async () => {
+    const runsBase = temporaryDirectory()
+    const provisionTools = vi.fn(async () => ({status: 'none' as const, detail: ''}))
+    const prepareWorkspace = vi.fn(() => {
+      const current = readRun(file(runsBase)).run!
+      saveRun(file(runsBase), {...current, trusted_base: KEPT})
+      return {...workspace, confirmedBase: LATER}
+    })
+
+    const lifecycle = await provider(runsBase, {prepareWorkspace, provisionTools}).prepare(input)
+    await lifecycle.beforeRuntime()
+
+    expect(prepareWorkspace).toHaveBeenCalledWith(expect.objectContaining({pinnedBase: null}))
+    expect(provisionTools).toHaveBeenCalledWith(workspace.repoPath, KEPT)
+    expect(readRun(file(runsBase)).run?.trusted_base).toBe(KEPT)
+  })
+
+  it('the trusted base survives every later write of the record and is dropped when malformed', () => {
+    const meta = {ticket: input.ticket, repository: input.repository}
+    const started = {
+      ...recordCheckpoint(null, input.runId, meta, {phase: 'validating', at: '2026-07-14T09:00:00.000Z'}),
+      trusted_base: KEPT,
+    }
+    const next = recordCheckpoint(started, input.runId, meta, {phase: 'ready', at: '2026-07-14T09:00:01.000Z'})
+    expect(next.trusted_base).toBe(KEPT)
+
+    const runsBase = temporaryDirectory()
+    fs.writeFileSync(file(runsBase), JSON.stringify({...next, trusted_base: 'not-a-commit'}))
+    expect(readRun(file(runsBase)).run).not.toHaveProperty('trusted_base')
+    fs.writeFileSync(file(runsBase), JSON.stringify(next))
+    expect(readRun(file(runsBase)).run?.trusted_base).toBe(KEPT)
   })
 })
