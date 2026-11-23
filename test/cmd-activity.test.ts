@@ -77,7 +77,35 @@ describe('activity command', () => {
     saveRun(runFile('run-1'), run())
     const {result, stdout} = await runCaptured(Activity, [])
     expect((result as HostActivity).host_status).toBe('recovery_required')
-    expect(stdout).toContain('ferma')
+    expect(stdout).toContain('ferma (lease scaduto)')
+  })
+
+  // CYAU-276 — the last step and the silence of the Claude session, in the operator's words.
+  it('shows last step and silence; an open session silent for 8 minutes is stopped for no step', async () => {
+    saveLease(lease())
+    saveRun(runFile('run-1'), run({runtime: 'claude'}))
+    const lastStep = new Date(Date.now() - 9 * 60 * 1000).toISOString()
+    fs.mkdirSync(path.join(stateDir, 'pulse'))
+    fs.writeFileSync(path.join(stateDir, 'pulse', 'run-1.json'), JSON.stringify({session_open: true, opened_at: lastStep, last_step_kind: 'command', last_step_at: lastStep}))
+
+    const {result, stdout} = await runCaptured(Activity, [])
+
+    const activity = result as HostActivity
+    expect(activity.host_status).toBe('recovery_required')
+    expect(activity.active_runs[0]).toMatchObject({last_step_kind: 'command', last_step_at: lastStep, stalled: true, stall_reason: 'silent'})
+    expect(stdout).toContain('ultimo passo')
+    expect(stdout).toContain('silenzio')
+    expect(stdout).toContain(`comando ${lastStep}`)
+    expect(stdout).toMatch(/9m0\ds/)
+    expect(stdout).toContain('ferma (nessun passo)')
+  })
+
+  it('without a note the new columns stay empty and the run is not stopped', async () => {
+    saveLease(lease())
+    saveRun(runFile('run-1'), run({runtime: 'codex'}))
+    const {result, stdout} = await runCaptured(Activity, [])
+    expect((result as HostActivity).active_runs[0]).toMatchObject({last_step_kind: null, silent_seconds: null, stalled: false})
+    expect(stdout).not.toContain('ferma')
   })
 
   it('filters out the leases of another host identity (stale records)', async () => {

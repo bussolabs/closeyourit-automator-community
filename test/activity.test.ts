@@ -12,6 +12,7 @@ import {
   readHostActivity,
 } from '../src/lib/activity'
 import {type LeaseRecord, saveLease} from '../src/lib/lease'
+import {type SessionPulse} from '../src/lib/session-pulse'
 import {type Checkpoint, type RunRecord, saveRun} from '../src/lib/state'
 
 const NOW = new Date('2026-07-13T12:00:00.000Z')
@@ -114,7 +115,7 @@ describe('deriveActiveRun', () => {
 })
 
 describe('hostStatus', () => {
-  const base: ActiveRun = {ticket: 'T', run_id: 'r', phase: 'implementing', runtime: 'claude', started_at: null, updated_at: null, lease_expires_at: null, lease_health: 'active', stalled: false}
+  const base: ActiveRun = {ticket: 'T', run_id: 'r', phase: 'implementing', runtime: 'claude', started_at: null, updated_at: null, lease_expires_at: null, lease_health: 'active', stalled: false, stall_reason: null, last_step_kind: null, last_step_at: null, silent_seconds: null}
 
   it('no run → idle', () => {
     expect(hostStatus([])).toBe('idle')
@@ -228,7 +229,110 @@ describe('readHostActivity', () => {
       saveLease(lease({ticket: 'CYAU-31', run_id: '..'}))
       const activity = readHostActivity({host: {id: 'h1', token: 't'}}, {now: () => NOW})
       expect(activity.active_runs).toHaveLength(1)
-      expect(activity.active_runs[0]).toMatchObject({ticket: 'CYAU-31', phase: null, runtime: null})
+      expect(activity.active_runs[0]).toMatchObject({ticket: 'CYAU-31', phase: null, runtime: null, last_step_kind: null})
     })
+
+    // CYAU-276 — the note the runner writes at every step, read from the same state dir at every beat.
+    it('reads the session pulse of the run and marks it stopped after 8 silent minutes', () => {
+      saveLease(lease({ticket: 'CYAU-31', run_id: 'run-1', expires_at: FUTURE}))
+      saveRun(path.join(stateDir, 'runs', 'run-1.json'), run({runtime: 'claude'}))
+      fs.mkdirSync(path.join(stateDir, 'pulse'))
+      fs.writeFileSync(path.join(stateDir, 'pulse', 'run-1.json'), JSON.stringify(pulse({last_step_at: '2026-07-13T11:50:00.000Z'})))
+      const activity = readHostActivity({host: {id: 'h1', token: 't'}}, {now: () => NOW})
+      expect(activity.host_status).toBe('recovery_required')
+      expect(activity.active_runs[0]).toMatchObject({last_step_kind: 'command', last_step_at: '2026-07-13T11:50:00.000Z', silent_seconds: 600, stalled: true, stall_reason: 'silent'})
+    })
+
+    it('a corrupt note: the beat goes on, the run simply has no last step', () => {
+      saveLease(lease({ticket: 'CYAU-31', run_id: 'run-1', expires_at: FUTURE}))
+      saveRun(path.join(stateDir, 'runs', 'run-1.json'), run({runtime: 'claude'}))
+      fs.mkdirSync(path.join(stateDir, 'pulse'))
+      fs.writeFileSync(path.join(stateDir, 'pulse', 'run-1.json'), '{"session_open": true, "opened_at": "2026-07-1')
+      const activity = readHostActivity({host: {id: 'h1', token: 't'}}, {now: () => NOW})
+      expect(activity.host_status).toBe('busy')
+      expect(activity.active_runs[0]).toMatchObject({ticket: 'CYAU-31', last_step_kind: null, last_step_at: null, silent_seconds: null, stalled: false})
+    })
+
+    it('a note that is a folder (unreadable) counts as no information', () => {
+      saveLease(lease({ticket: 'CYAU-31', run_id: 'run-1', expires_at: FUTURE}))
+      fs.mkdirSync(path.join(stateDir, 'pulse', 'run-1.json'), {recursive: true})
+      const activity = readHostActivity({host: {id: 'h1', token: 't'}}, {now: () => NOW})
+      expect(activity.active_runs[0]).toMatchObject({last_step_kind: null, stalled: false})
+    })
+  })
+
+  it('a pulse probe that throws costs only that run its last step, never the beat', () => {
+    const activity = readHostActivity(
+      {host: {id: 'h1', token: 't'}},
+      {
+        leases: () => [lease({run_id: 'run-1'}), lease({ticket: 'CYAU-32', run_id: 'run-2'})],
+        readRunById: () => run({runtime: 'claude'}),
+        readPulseByRunId: (id) => {
+          if (id === 'run-1') throw new Error('disco rotto')
+          return pulse()
+        },
+        now: () => NOW,
+      },
+    )
+    expect(activity.active_runs.map((r) => [r.ticket, r.last_step_kind])).toEqual([['CYAU-31', null], ['CYAU-32', 'command']])
+  })
+})
+
+// CYAU-276 — a Claude session open but silent: the lease is renewed at every beat, so only the step note tells it.
+function pulse(over: Partial<SessionPulse> = {}): SessionPulse {
+  return {session_open: true, opened_at: '2026-07-13T11:40:00.000Z', last_step_kind: 'command', last_step_at: '2026-07-13T11:58:00.000Z', ...over}
+}
+
+describe('session pulse in the activity (CYAU-276)', () => {
+  const claude = (): RunRecord => run({runtime: 'claude'})
+
+  it('a working Claude session carries kind and time of the last step, and is not stopped', () => {
+    const ar = deriveActiveRun(lease(), claude(), NOW, pulse())
+    expect(ar).toMatchObject({last_step_kind: 'command', last_step_at: '2026-07-13T11:58:00.000Z', silent_seconds: 120, stalled: false, stall_reason: null})
+  })
+
+  it('only kind and time leave: no path, command or argument field exists on the row', () => {
+    const ar = deriveActiveRun(lease(), claude(), NOW, pulse())
+    expect(Object.keys(ar).sort()).toEqual([
+      'last_step_at', 'last_step_kind', 'lease_expires_at', 'lease_health', 'phase', 'run_id', 'runtime', 'silent_seconds',
+      'stall_reason', 'stalled', 'started_at', 'ticket', 'updated_at',
+    ])
+  })
+
+  it('threshold: 7m59s of silence is working, 8 minutes is stopped', () => {
+    expect(deriveActiveRun(lease(), claude(), NOW, pulse({last_step_at: '2026-07-13T11:52:01.000Z'})).stalled).toBe(false)
+    const stopped = deriveActiveRun(lease(), claude(), NOW, pulse({last_step_at: '2026-07-13T11:52:00.000Z'}))
+    expect(stopped).toMatchObject({stalled: true, stall_reason: 'silent', silent_seconds: 480, last_step_kind: 'command'})
+  })
+
+  it('a stopped run working again: the next beat shows it at work, no intervention', () => {
+    const before = deriveHostActivity({leases: [lease()], runs: [claude()], hostId: 'h1', now: NOW, pulses: new Map([['run-1', pulse({last_step_at: '2026-07-13T11:45:00.000Z'})]])})
+    expect(before.host_status).toBe('recovery_required')
+    const after = deriveHostActivity({leases: [lease()], runs: [claude()], hostId: 'h1', now: NOW, pulses: new Map([['run-1', pulse({last_step_at: '2026-07-13T11:59:30.000Z'})]])})
+    expect(after.host_status).toBe('busy')
+    expect(after.active_runs[0].stalled).toBe(false)
+  })
+
+  it('a session that opened 8 minutes ago without any step is stopped (silence from the opening)', () => {
+    const ar = deriveActiveRun(lease(), claude(), NOW, pulse({opened_at: '2026-07-13T11:52:00.000Z', last_step_kind: null, last_step_at: null}))
+    expect(ar).toMatchObject({stalled: true, stall_reason: 'silent', silent_seconds: 480, last_step_kind: null})
+  })
+
+  it('a closed session (delivery, review) is never stopped for silence, however long', () => {
+    const ar = deriveActiveRun(lease(), claude(), NOW, pulse({session_open: false, last_step_at: '2026-07-13T11:00:00.000Z'}))
+    expect(ar).toMatchObject({stalled: false, stall_reason: null, silent_seconds: null, last_step_kind: 'command'})
+  })
+
+  it('Codex: no last step and never stopped for silence, even with a note on disk', () => {
+    const withNote = deriveActiveRun(lease(), run({runtime: 'codex'}), NOW, pulse({last_step_at: '2026-07-13T11:00:00.000Z'}))
+    expect(withNote).toMatchObject({last_step_kind: null, last_step_at: null, silent_seconds: null, stalled: false})
+    const without = deriveActiveRun(lease(), run({runtime: 'codex'}), NOW)
+    expect(without).toMatchObject({last_step_kind: null, stalled: false, stall_reason: null})
+  })
+
+  it('the older reasons keep precedence: blocked phase, then expired lease', () => {
+    const silent = pulse({last_step_at: '2026-07-13T11:00:00.000Z'})
+    expect(deriveActiveRun(lease(), run({checkpoints: [checkpoint({phase: 'blocked'})]}), NOW, silent).stall_reason).toBe('blocked')
+    expect(deriveActiveRun(lease({expires_at: PAST}), claude(), NOW, silent).stall_reason).toBe('lease_expired')
   })
 })

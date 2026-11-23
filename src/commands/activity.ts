@@ -1,8 +1,28 @@
 import {BaseCommand} from '../base'
-import {type HostActivity, readHostActivity} from '../lib/activity'
+import {type HostActivity, readHostActivity, type StallReason} from '../lib/activity'
 import {loadSecrets} from '../lib/config'
 import {renderTable} from '../lib/output'
+import {type PulseStepKind} from '../lib/session-pulse'
 import {scanTicketAttempts, type TicketAttemptRecord, type UnreadableTicketAttempts} from '../lib/ticket-attempts'
+
+// CYAU-276 — the session pulse in the operator's words.
+const STEP_LABELS: Record<PulseStepKind, string> = {
+  file_read: 'lettura',
+  file_change: 'modifica',
+  search: 'ricerca',
+  command: 'comando',
+}
+
+const STALL_LABELS: Record<StallReason, string> = {
+  blocked: 'bloccata',
+  lease_expired: 'lease scaduto',
+  silent: 'nessun passo',
+}
+
+/** `125` → `2m05s`: the silence of an open session. */
+function formatSilence(seconds: number): string {
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`
+}
 
 /** What the command returns: the current activity plus the spend accumulated per ticket (CYAU-155). */
 interface ActivityReport extends HostActivity {
@@ -13,7 +33,7 @@ interface ActivityReport extends HostActivity {
 
 export default class Activity extends BaseCommand {
   static description =
-    "Mostra le lavorazioni attive di questo host (ticket, fase, runtime, durata, stato del lease), la spesa accumulata per ticket e lo stato operativo aggregato: la stessa vista che l'automator invia a CloseYourIt via heartbeat per la dashboard Automation (CYAU-31). Read-only e best-effort (uno state dir illeggibile → host idle), nessun gate: esce sempre 0"
+    "Mostra le lavorazioni attive di questo host (ticket, fase, runtime, durata, stato del lease, ultimo passo e silenzio della sessione Claude), la spesa accumulata per ticket e lo stato operativo aggregato: la stessa vista che l'automator invia a CloseYourIt via heartbeat per la dashboard Automation (CYAU-31). Read-only e best-effort (uno state dir illeggibile → host idle), nessun gate: esce sempre 0"
 
   static examples = ['<%= config.bin %> activity', '<%= config.bin %> activity --json']
 
@@ -42,9 +62,11 @@ export default class Activity extends BaseCommand {
         run.runtime ?? '-',
         run.started_at ?? '-',
         run.lease_health,
-        run.stalled ? 'ferma' : '',
+        run.last_step_kind ? `${STEP_LABELS[run.last_step_kind]} ${run.last_step_at}` : '-',
+        run.silent_seconds === null ? '-' : formatSilence(run.silent_seconds),
+        run.stalled ? `ferma (${STALL_LABELS[run.stall_reason ?? 'blocked']})` : '',
       ])
-      this.log(renderTable(['ticket', 'fase', 'runtime', 'inizio', 'lease', 'stato'], rows))
+      this.log(renderTable(['ticket', 'fase', 'runtime', 'inizio', 'lease', 'ultimo passo', 'silenzio', 'stato'], rows))
     }
     this.printTicketSpend(activity.ticket_spend, activity.ticket_spend_unreadable)
   }

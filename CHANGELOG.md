@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.68.0] - 2026-11-23
+
+### Added
+
+- **Il pannello vede un Claude fermo entro 9 minuti.** Durante una sessione la macchina annota il tipo e l'ora dell'ultimo passo: lettura, modifica, ricerca o comando. Il battito di ogni minuto lo manda all'app, senza percorsi né comandi. Dopo 8 minuti di sessione aperta senza passi la lavorazione risulta ferma, e `activity` mostra ultimo passo e silenzio. Consegna e rilettura non contano, Codex resta escluso e un appunto rovinato vale come nessuna informazione. (CYAU-276)
+
 ## [0.67.0] - 2026-11-23
 
 ### Added

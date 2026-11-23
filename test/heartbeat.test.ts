@@ -1,8 +1,13 @@
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import {describe, expect, it, vi} from 'vitest'
 import {buildCapabilities as buildCapabilitiesRaw, collectRuntimes, combineBeats, heartbeatMissingReason, makeHeartbeat as makeHeartbeatRaw, sendHangBeat, sendHeartbeat, type HostCapabilities} from '../src/lib/heartbeat'
+import {type HostActivity, IDLE_ACTIVITY, readHostActivity} from '../src/lib/activity'
+import {type LeaseRecord} from '../src/lib/lease'
+import {openPulseWriter, pulsePath, readPulse} from '../src/lib/session-pulse'
 import {HOST_TOKEN_PREFIX} from '../src/lib/credential-format'
 import {makeHostEnginesStore} from '../src/lib/host-engines'
-import {type HostActivity, IDLE_ACTIVITY} from '../src/lib/activity'
 import {type HeartbeatConfig} from '../src/lib/config'
 import {type ProbeResult} from '../src/lib/deps'
 
@@ -326,7 +331,7 @@ describe('makeHeartbeat', () => {
     const activity: HostActivity = {
       host_status: 'busy',
       active_runs: [
-        {ticket: 'CYAU-31', run_id: 'run-1', phase: 'implementing', runtime: 'claude', started_at: '2026-07-13T11:30:00.000Z', updated_at: '2026-07-13T11:50:00.000Z', lease_expires_at: '2026-07-13T13:00:00.000Z', lease_health: 'active', stalled: false},
+        {ticket: 'CYAU-31', run_id: 'run-1', phase: 'implementing', runtime: 'claude', started_at: '2026-07-13T11:30:00.000Z', updated_at: '2026-07-13T11:50:00.000Z', lease_expires_at: '2026-07-13T13:00:00.000Z', lease_health: 'active', stalled: false, stall_reason: null, last_step_kind: null, last_step_at: null, silent_seconds: null},
       ],
     }
     const hb = makeHeartbeat({heartbeat: cfg, host: {id: 'h1', token: 'cyi_ah_host'}}, {version: '0.0.1', runtimes: [], fetchFn: fn, activity: () => activity})
@@ -338,6 +343,41 @@ describe('makeHeartbeat', () => {
     // the monitor fields stay first and intact (cron_missed watchdog unchanged)
     expect(body.status).toBe('ok')
     expect(body.expected_interval_minutes).toBe(2)
+  })
+
+  // CYAU-276 — the step a Claude session narrated reaches the app with the beat: kind and time, never what it touched.
+  it('carries kind and time of the last step and the silent stop, without any path or command', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-hb-pulse-'))
+    try {
+      const file = pulsePath('run-1', dir)
+      let clock = new Date('2026-07-13T11:40:00.000Z')
+      const writer = openPulseWriter(file, () => clock)
+      writer.open()
+      clock = new Date('2026-07-13T11:50:00.000Z')
+      writer.step([{kind: 'file_read', path: 'config/secret-place.rb'}, {kind: 'command', command: 'pnpm test /home/automator/private'}])
+      const lease: LeaseRecord = {ticket: 'CYAU-31', host_id: 'h1', run_id: 'run-1', agent: 'a', ttl_seconds: 3600, expires_at: '2026-07-13T13:00:00.000Z', acquired_at: '2026-07-13T11:30:00.000Z', updated_at: '2026-07-13T11:59:00.000Z'}
+      const activity = readHostActivity({host: {id: 'h1', token: 't'}}, {
+        leases: () => [lease],
+        readRunById: () => null,
+        readPulseByRunId: (id) => readPulse(pulsePath(id, dir)),
+        now: () => new Date('2026-07-13T12:00:00.000Z'),
+      })
+      const {fn, calls} = fakeFetch()
+      const hb = makeHeartbeat({heartbeat: cfg, host: {id: 'h1', token: 'cyi_ah_host'}}, {version: '0.0.1', runtimes: [], fetchFn: fn, activity: () => activity})
+      await hb!(true)
+      const raw = calls[0].opts.body as string
+      const body = JSON.parse(raw)
+      expect(body.host_status).toBe('recovery_required')
+      expect(body.active_runs[0]).toMatchObject({last_step_kind: 'command', last_step_at: '2026-07-13T11:50:00.000Z', silent_seconds: 600, stalled: true, stall_reason: 'silent'})
+      expect(raw).not.toContain('pnpm test')
+      expect(raw).not.toContain('secret-place')
+      const runs = JSON.stringify(body.active_runs)
+      expect(runs).not.toContain('/home/automator/private')
+      expect(runs).not.toContain(dir)
+      expect(runs).not.toContain('/')
+    } finally {
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
   })
 
   it('the activity is RECOMPUTED at every beat (not a snapshot at boot)', async () => {

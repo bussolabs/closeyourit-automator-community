@@ -108,6 +108,11 @@ export function runsDir(): string {
   return path.join(stateDir(), 'runs')
 }
 
+/** Per-run session pulse notes (CYAU-276): last step of a Claude session and when, read by the heartbeat. */
+export function pulseDir(): string {
+  return path.join(stateDir(), 'pulse')
+}
+
 /**
  * Directory of the agent conversations of the ticket phases (CYAU-285): one `<ticket>--<phase>.json` file names the
  * conversation a phase session is having, so a restart can resume it. Keyed by ticket and phase, not by run: a

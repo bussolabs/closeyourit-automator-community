@@ -1,5 +1,6 @@
 import {type Secrets} from './config'
 import {type LeaseRecord, listLeases} from './lease'
+import {isSilent, type PulseStepKind, pulsePath, readPulse, type SessionPulse, silentSeconds} from './session-pulse'
 import {readRun, type RunRecord, runPath} from './state'
 import {latestRunPhase, type RunPhase} from './state-machine'
 
@@ -14,7 +15,7 @@ import {latestRunPhase, type RunPhase} from './state-machine'
  * Operational state of the host derived from its runs. `online`/`offline` are NOT here: the server decides them
  * from the beat (`cron_missed` watchdog). These are the states only the host knows:
  * - `idle` no active run; `busy` at least one progressing; `waiting` waiting for the customer;
- * - `recovery_required` at least one stopped run (blocked phase or expired lease) → needs a look.
+ * - `recovery_required` at least one stopped run (blocked phase, expired lease or silent session) → needs a look.
  */
 export type HostStatus = 'idle' | 'busy' | 'waiting' | 'recovery_required'
 
@@ -31,8 +32,19 @@ export interface ActiveRun {
   updated_at: string | null // last sign of activity: the most recent between the last checkpoint and the lease renewal
   lease_expires_at: string | null // lease expiry from the server
   lease_health: LeaseHealth
-  stalled: boolean // the run is stopped: blocked phase or expired lease → highlighted in the dashboard (DoD)
+  stalled: boolean // the run is stopped: blocked phase, expired lease or silent session → highlighted in the dashboard (DoD)
+  /** Why the run is stopped, `null` when it is not: the remedy differs for each. */
+  stall_reason: StallReason | null
+  // CYAU-276 — the session pulse: only the step KIND and its time, never a path, a command or an argument.
+  // `null` for Codex (it narrates no step) and when the note is missing or unreadable.
+  last_step_kind: PulseStepKind | null
+  last_step_at: string | null
+  /** Seconds since the last step (or the opening) of an OPEN Claude session; `null` when no session is open. */
+  silent_seconds: number | null
 }
+
+/** `silent`: an open Claude session with no step for STALL_AFTER_MS (CYAU-276). */
+export type StallReason = 'blocked' | 'lease_expired' | 'silent'
 
 /** Full snapshot: aggregate operational state + list of active runs. */
 export interface HostActivity {
@@ -80,11 +92,16 @@ export function leaseHealth(expiresAt: string | null, now: Date): LeaseHealth {
  * Composes the row of an active run from a lease and (if already started) from its run. The phase is
  * the last known checkpoint (`null` = acquired but no phase yet); the runtime comes from the RunRecord (CYAU-31);
  * the start from the lease acquisition (fallback: first checkpoint). `stalled` marks stopped work (DoD "blocked
- * runs evident"): `blocked` phase or expired lease.
+ * runs evident"): `blocked` phase, expired lease or — CYAU-276 — an open Claude session silent for STALL_AFTER_MS.
+ * The lease alone never says it: the beat renews it even when the agent is stuck. A Codex run ignores any note.
  */
-export function deriveActiveRun(lease: LeaseRecord, run: RunRecord | null, now: Date): ActiveRun {
+export function deriveActiveRun(lease: LeaseRecord, run: RunRecord | null, now: Date, pulse: SessionPulse | null = null): ActiveRun {
   const phase = latestRunPhase(run)
   const health = leaseHealth(lease.expires_at, now)
+  const note = run?.runtime === 'codex' ? null : pulse
+  const stallReason: StallReason | null = phase === 'blocked'
+    ? 'blocked'
+    : health === 'expired' ? 'lease_expired' : isSilent(note, now) ? 'silent' : null
   return {
     ticket: lease.ticket,
     run_id: lease.run_id,
@@ -97,7 +114,11 @@ export function deriveActiveRun(lease: LeaseRecord, run: RunRecord | null, now: 
     updated_at: mostRecent(run?.updated_at, lease.updated_at),
     lease_expires_at: lease.expires_at,
     lease_health: health,
-    stalled: phase === 'blocked' || health === 'expired',
+    stalled: stallReason !== null,
+    stall_reason: stallReason,
+    last_step_kind: note?.last_step_kind ?? null,
+    last_step_at: note?.last_step_at ?? null,
+    silent_seconds: silentSeconds(note, now),
   }
 }
 
@@ -118,6 +139,8 @@ export interface HostActivityInput {
   runs: RunRecord[] // known runs, matched to the leases by run_id (one without a lease is no longer active → excluded)
   hostId: string | null // filters the leases of THIS host identity; `null` = no filter (no known identity)
   now: Date
+  /** Session pulse notes by run_id (CYAU-276); a run without one has no last step and is never silent. */
+  pulses?: ReadonlyMap<string, SessionPulse>
 }
 
 /**
@@ -134,7 +157,7 @@ export function deriveHostActivity(input: HostActivityInput): HostActivity {
 
   const activeRuns = input.leases
     .filter((lease) => input.hostId === null || lease.host_id === input.hostId)
-    .map((lease) => deriveActiveRun(lease, runById.get(lease.run_id) ?? null, input.now))
+    .map((lease) => deriveActiveRun(lease, runById.get(lease.run_id) ?? null, input.now, input.pulses?.get(lease.run_id) ?? null))
     .sort((a, b) => (a.ticket === b.ticket ? a.run_id.localeCompare(b.run_id) : a.ticket.localeCompare(b.ticket)))
 
   return {host_status: hostStatus(activeRuns), active_runs: activeRuns}
@@ -144,6 +167,7 @@ export function deriveHostActivity(input: HostActivityInput): HostActivity {
 export interface ReadActivityDeps {
   leases?: () => LeaseRecord[]
   readRunById?: (runId: string) => RunRecord | null
+  readPulseByRunId?: (runId: string) => SessionPulse | null
   now?: () => Date
 }
 
@@ -154,6 +178,29 @@ function defaultReadRunById(runId: string): RunRecord | null {
   } catch {
     return null
   }
+}
+
+/** Reads a run-id's session pulse; hostile run-id, missing/corrupt/oversized note → `null` (no information). */
+function defaultReadPulseByRunId(runId: string): SessionPulse | null {
+  try {
+    return readPulse(pulsePath(runId))
+  } catch {
+    return null
+  }
+}
+
+/** One note per lease, each read in isolation: a broken one costs only its own run's last step. */
+function readPulses(leases: LeaseRecord[], read: (runId: string) => SessionPulse | null): Map<string, SessionPulse> {
+  const pulses = new Map<string, SessionPulse>()
+  for (const lease of leases) {
+    try {
+      const pulse = read(lease.run_id)
+      if (pulse) pulses.set(lease.run_id, pulse)
+    } catch {
+      // No information for this run.
+    }
+  }
+  return pulses
 }
 
 /**
@@ -173,7 +220,8 @@ export function readHostActivity(secrets: Secrets, deps: ReadActivityDeps = {}):
       const run = readById(lease.run_id)
       if (run) runs.push(run)
     }
-    return deriveHostActivity({leases, runs, hostId: secrets.host?.id ?? null, now})
+    const pulses = readPulses(leases, deps.readPulseByRunId ?? defaultReadPulseByRunId)
+    return deriveHostActivity({leases, runs, hostId: secrets.host?.id ?? null, now, pulses})
   } catch {
     return IDLE_ACTIVITY
   }

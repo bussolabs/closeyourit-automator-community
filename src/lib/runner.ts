@@ -1,9 +1,10 @@
 import {type BrowserBlock, type BrowserReport} from './browser-tester'
 import {type TesterBlock, type TesterEngine, type TesterReport} from './tester'
 import * as fs from 'node:fs'
+import * as path from 'node:path'
 import {type Action, type Playbook} from './schema'
 import {selectDue} from './scheduler'
-import {quarantineCorruptState, readState, type RunStatus, saveState, updateAction} from './state'
+import {isSafeRunId, quarantineCorruptState, readState, type RunStatus, saveState, updateAction} from './state'
 import {type RunResult, type SpawnFn, runPrecondition} from './executor'
 import {addRetryFindings} from './claude'
 import {codexSessionUsage, sessionCostUsd, sumTokenUsage, type TokenUsage} from './session-cost'
@@ -64,6 +65,7 @@ import {
 import {liveEventsFromClaude} from './live-events'
 import {openLiveSender, type LiveSender} from './live-sender'
 import {openLiveSpool, type LiveRecord} from './live-spool'
+import {openPulseWriter, type PulseWriter, pulsePath} from './session-pulse'
 
 // runOnce(): a single iteration, shared by `tick` (one-shot) and `daemon` (loop).
 // Takes the lock (skip if already held), seeds the baselines, runs the due actions in sequence,
@@ -1084,6 +1086,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       // CYAU-335 — a review the machine could not run held the delivery: the attempt goes back, like a quota pause.
       let reviewFaultHeld = false
       let liveSender: LiveSender | undefined
+      let pulse: PulseWriter | undefined
       try {
         let retryPrompt = recoveredRetryPrompt ?? ticketRun?.retryPrompt
         const originalRun = effectiveAction.run
@@ -1096,9 +1099,17 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           : undefined
         const sendLiveEvents = workflowDelivery?.sendLiveEvents
         liveSender = liveSpool && sendLiveEvents ? openLiveSender({send: (records) => sendLiveEvents(records)}) : undefined
+        // CYAU-276 — next to the queue, a small note with the last step and when, under the run's identity (the
+        // lease's): the heartbeat reads it to tell an open but silent session. Next to the state file, like the runs.
+        const pulseRunId = ticketRun?.runId ?? (queueClaim?.outcome === 'claimed' ? queueClaim.claim.runId : undefined)
+        pulse = liveSpool && pulseRunId && isSafeRunId(pulseRunId)
+          ? openPulseWriter(pulsePath(pulseRunId, path.join(path.dirname(opts.stateFile), 'pulse')))
+          : undefined
         const onStreamEvent = liveSpool && sessionCwd
           ? (event: Record<string, unknown>) => {
-            const written = liveSpool.append(liveEventsFromClaude(event, {cwd: sessionCwd, includeCode: liveSender?.includeCode ?? false}))
+            const events = liveEventsFromClaude(event, {cwd: sessionCwd, includeCode: liveSender?.includeCode ?? false})
+            pulse?.step(events)
+            const written = liveSpool.append(events)
             liveSender?.push(written)
           }
           : undefined
@@ -1156,6 +1167,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           }
           // A fresh token per session: it lasts one hour, the same as the phase cap.
           const githubToken = claimedTicket && opts.githubToken ? await opts.githubToken(claimedTicket) : undefined
+          pulse?.open()
           execution = await executeRuntime(runtime, name, attemptAction, {
             playbookDir: opts.playbookDir,
             logDir: opts.logDir,
@@ -1172,6 +1184,8 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             ...(conversation ? {conversation} : {}),
             ...(onConversationStarted ? {onConversationStarted} : {}),
           }, executionLease, async (raw, lifecycleSignal, leaseLost) => {
+            // The session is over: delivery and review that follow are not silence of a stuck agent.
+            pulse?.close()
             // The app takes steps only while the attempt runs: the last ones leave before the delivery closes it.
             await liveSender?.drain()
             result = raw
@@ -1705,6 +1719,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         if (ticketRun) await ticketRun.block().catch(() => undefined)
         throw error
       } finally {
+        pulse?.remove()
         await liveSender?.close().catch(() => undefined)
         // The terminal checkpoint (or the fail-closed blocked attempt) always precedes the ownership release.
         if (executionLease) await executionLease.release().catch(() => undefined)

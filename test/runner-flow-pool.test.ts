@@ -8,6 +8,7 @@ import {type RunResult, type SpawnFn} from '../src/lib/executor'
 import {type AgentRuntime} from '../src/lib/runtime'
 import {emptyState, loadState, saveState, updateAction} from '../src/lib/state'
 import {PlaybookSchema, type Playbook} from '../src/lib/schema'
+import {readPulse, type SessionPulse} from '../src/lib/session-pulse'
 
 // CYAU-69: the dispatch of the due actions uses `runFlowPool` (PER-STEP concurrency) ONLY in skill-mode; in
 // prompt-mode it stays SERIAL and unchanged. Here we verify both paths with a "gated" runtime: every
@@ -784,6 +785,102 @@ describe('runOnce — atomic queue take-over (CYAU-169)', () => {
     expect(spool).toMatch(/^q-CYAU-7-.*\.live\.jsonl$/)
     const [line] = fs.readFileSync(path.join(p.logDir, spool!), 'utf8').trim().split('\n').map((text) => JSON.parse(text))
     expect(line).toMatchObject({seq: 1, event: {kind: 'file_read', path: 'app.rb'}})
+  })
+
+  // CYAU-276 — next to the queue, the session pulse: open at the start, the last step at every step, closed when the
+  // session ends (delivery is not silence), gone with the run. Under the lease's run identity, next to the state file.
+  it('a Claude ticket session keeps a pulse note: open with the last step, closed before the delivery, removed at the end', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const pulseFile = path.join(path.dirname(p.stateFile), 'pulse', 'run-CYAU-11.json')
+    const seen: Array<SessionPulse | null> = []
+    const runtime: AgentRuntime = {
+      id: 'fake',
+      healthCheck: async () => ({available: true}),
+      execute: (_name, _action, context) => {
+        seen.push(readPulse(pulseFile)) // opened, no step yet
+        context.onStreamEvent?.({type: 'assistant', message: {content: [{type: 'tool_use', id: 't', name: 'Bash', input: {command: 'pnpm test'}}]}})
+        seen.push(readPulse(pulseFile)) // the step, by kind only
+        return {result: Promise.resolve(ok()), cancel: () => undefined}
+      },
+    }
+    const {claimQueue} = claimSource(['CYAU-11'])
+    const workflowDelivery = {
+      executionPhase: 'triage' as const, attemptId: 'at11', ticketCode: 'CYAU-11',
+      deliver: vi.fn(async () => {
+        seen.push(readPulse(pulseFile)) // the session is over while delivering
+        return {outcome: 'ok' as const, status: 200}
+      }),
+    }
+
+    await runOnce({
+      playbook: PlaybookSchema.parse({version: 1, actions: {q: {schedule: 'every 1m', type: 'claude', run: 'work'}}}),
+      playbookDir: dir, now, ...p, runtime, skillsMode: true, flowMaxParallel: 1,
+      ticketQueues: {q: target}, claimQueue, authorizedCwds: {q: dir},
+      preflight: async () => ({outcome: 'admit' as const, state: 'ready' as const, reason: 'ok', audit: [], workflowDelivery}),
+    })
+
+    expect(seen[0]).toMatchObject({session_open: true, last_step_kind: null, last_step_at: null})
+    expect(seen[1]).toMatchObject({session_open: true, last_step_kind: 'command', last_step_at: expect.any(String)})
+    expect(seen[2]).toMatchObject({session_open: false, last_step_kind: 'command'})
+    expect(workflowDelivery.deliver).toHaveBeenCalledTimes(1)
+    expect(fs.existsSync(pulseFile)).toBe(false)
+  })
+
+  it('a pulse note that cannot be written never stops the session nor changes its delivery', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    // The pulse folder is a FILE: every write fails, as on a full or read-only disk.
+    fs.mkdirSync(path.dirname(p.stateFile), {recursive: true})
+    fs.writeFileSync(path.join(path.dirname(p.stateFile), 'pulse'), 'not a folder')
+    const runtime: AgentRuntime = {
+      id: 'fake',
+      healthCheck: async () => ({available: true}),
+      execute: (_name, _action, context) => {
+        context.onStreamEvent?.({type: 'assistant', message: {content: [{type: 'tool_use', id: 't', name: 'Read', input: {file_path: path.join(dir, 'app.rb')}}]}})
+        return {result: Promise.resolve(ok()), cancel: () => undefined}
+      },
+    }
+    const {claimQueue} = claimSource(['CYAU-12'])
+    const deliver = vi.fn(async () => ({outcome: 'ok' as const, status: 200}))
+    const workflowDelivery = {executionPhase: 'triage' as const, attemptId: 'at12', ticketCode: 'CYAU-12', deliver}
+
+    const result = await runOnce({
+      playbook: PlaybookSchema.parse({version: 1, actions: {q: {schedule: 'every 1m', type: 'claude', run: 'work'}}}),
+      playbookDir: dir, now, ...p, runtime, skillsMode: true, flowMaxParallel: 1,
+      ticketQueues: {q: target}, claimQueue, authorizedCwds: {q: dir},
+      preflight: async () => ({outcome: 'admit' as const, state: 'ready' as const, reason: 'ok', audit: [], workflowDelivery}),
+    })
+
+    expect(deliver).toHaveBeenCalledTimes(1)
+    expect(result.executed).toHaveLength(1)
+    // The live queue still has the step: only the pulse was lost.
+    const spool = fs.readdirSync(p.logDir).find((file) => file.endsWith('.live.jsonl'))
+    expect(fs.readFileSync(path.join(p.logDir, spool!), 'utf8')).toContain('"file_read"')
+  })
+
+  it('a Codex ticket session writes no pulse note', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const pulseDir = path.join(path.dirname(p.stateFile), 'pulse')
+    const existed: boolean[] = []
+    const runtime: AgentRuntime = {
+      id: 'fake',
+      healthCheck: async () => ({available: true}),
+      execute: () => {
+        existed.push(fs.existsSync(pulseDir))
+        return {result: Promise.resolve(ok()), cancel: () => undefined}
+      },
+    }
+    const {claimQueue} = claimSource(['CYAU-13'])
+
+    await runOnce({
+      playbook: PlaybookSchema.parse({version: 1, actions: {q: {schedule: 'every 1m', type: 'codex', run: 'work'}}}),
+      playbookDir: dir, now, ...p, runtime, codexRuntime: runtime, skillsMode: true, flowMaxParallel: 1,
+      ticketQueues: {q: target}, claimQueue, preflight: claimAwarePreflight([]), authorizedCwds: {q: dir},
+    })
+
+    expect(existed).toEqual([false])
   })
 
   it('sends the live steps to the attempt, the last ones before the delivery closes it', async () => {
