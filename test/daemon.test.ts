@@ -3,6 +3,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {afterAll, describe, expect, it, vi} from 'vitest'
 import {defaultSleep, formatIterationLines, runDaemon, runHeartbeatKeepalive} from '../src/lib/daemon'
+import {holdIdleHost} from '../src/lib/host-idle'
 import {readLock} from '../src/lib/lock'
 import {type SpawnFn} from '../src/lib/executor'
 import {type DeliveryRecord, type ExecutedAction, type RunOnceResult} from '../src/lib/runner'
@@ -343,6 +344,62 @@ describe('runDaemon — council pass (CYAU-273)', () => {
     await runDaemon({...s, ...base, maxIterations: 1, council, isAlive: () => true, log: (m) => logs.push(m)})
     expect(council).not.toHaveBeenCalled()
     expect(logs).toContain('council: machine busy, skipped this round')
+    // Someone else's lock is never removed.
+    expect(readLock(s.lockFile)?.label).toBe('automator-update')
+  })
+})
+
+// CYAU-318: the supporter pass holds the cycle lock like the council, so the update waits for its sessions.
+describe('runDaemon — supporter pass (CYAU-318)', () => {
+  const base = {
+    spawn: noopSpawn,
+    sleep: async () => undefined,
+    registerSignals: false,
+    now: () => new Date('2026-07-07T09:00:00.000Z'),
+  }
+
+  it('runs the supporter holding the cycle lock, so the update finds the machine busy and waits', async () => {
+    const s = scenario(VALID)
+    const heldBy: (string | undefined)[] = []
+    const update: Array<ReturnType<typeof holdIdleHost>> = []
+    const supporter = vi.fn(async (signal: AbortSignal) => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+      heldBy.push(readLock(s.lockFile)?.label)
+      // The automatic update starts while the supporter works: it must be postponed.
+      update.push(holdIdleHost({lockFile: s.lockFile, isAlive: () => true}))
+    })
+    let iterations = 0
+    await runDaemon({...s, ...base, label: 'automator', maxIterations: 1, supporter, onIteration: () => (iterations += 1)})
+    expect(heldBy).toEqual(['automator-supporter'])
+    expect(update[0].held).toBe(false)
+    expect(update[0].held ? '' : update[0].reason).toContain('aggiornamento rimandato')
+    // The lock is released before the ticket round.
+    expect(iterations).toBe(1)
+    expect(fs.existsSync(s.lockFile)).toBe(false)
+  })
+
+  it('a supporter pass that throws does not skip the ticket round', async () => {
+    const s = scenario(VALID)
+    const logs: string[] = []
+    const supporter = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    let result: RunOnceResult | undefined
+    await runDaemon({...s, ...base, maxIterations: 1, supporter, log: (m) => logs.push(m), onIteration: (r) => (result = r)})
+    expect(supporter).toHaveBeenCalledTimes(1)
+    expect(result?.skipped).toBeFalsy()
+    expect(logs).toContain('supporter: error (continuing): boom')
+    expect(fs.existsSync(s.lockFile)).toBe(false)
+  })
+
+  it('skips the supporter while the update holds the cycle lock', async () => {
+    const s = scenario(VALID)
+    fs.writeFileSync(s.lockFile, JSON.stringify({pid: 999_999, startedAt: '2026-07-07T08:59:00.000Z', label: 'automator-update'}))
+    const supporter = vi.fn(async () => undefined)
+    const logs: string[] = []
+    await runDaemon({...s, ...base, maxIterations: 1, supporter, isAlive: () => true, log: (m) => logs.push(m)})
+    expect(supporter).not.toHaveBeenCalled()
+    expect(logs).toContain('supporter: machine busy, skipped this round')
     // Someone else's lock is never removed.
     expect(readLock(s.lockFile)?.label).toBe('automator-update')
   })

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.64.4] - 2026-11-22
+
+### Fixed
+
+- **L'aggiornamento automatico aspetta che il supporter abbia finito.** Il supporter lavora tenendo occupata la macchina, come il consiglio, e salta il giro se la trova occupata. Una sessione interrotta dallo spegnimento non manda più la risposta vuota: le domande restano aperte e le riprende il giro successivo. Gli altri errori passano ancora le domande a una persona. (CYAU-318)
+
 ## [0.64.3] - 2026-11-22
 
 ### Fixed

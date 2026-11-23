@@ -117,6 +117,24 @@ describe('makeSupporterPass', () => {
     expect(JSON.parse(String(post?.init?.body)).answers).toEqual([])
   })
 
+  // CYAU-318 — the shutdown cut the session: nothing is sent, the round stays open for a later pass.
+  it('sends no answer at all when the shutdown interrupts the session', async () => {
+    const {fetchFn, calls} = server(round)
+    const controller = new AbortController()
+    const run = vi.fn<SupporterRun>(async () => {
+      controller.abort()
+      return {ok: false, detail: 'cancelled'}
+    })
+    const log = vi.fn()
+
+    await makeSupporterPass(secrets, {fetchFn, run, log})?.(controller.signal)
+
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(calls.some((call) => call.url.includes('/supporter_rounds/'))).toBe(false)
+    expect(calls.some((call) => call.init?.method === 'POST')).toBe(false)
+    expect(log).toHaveBeenCalledWith('supporter: LAB-7 session interrupted, round round-1 left open')
+  })
+
   it('leaves a round of a project outside the host map to a person', async () => {
     const {fetchFn} = server({...round, project_key: 'OTHER'})
     const run = vi.fn<SupporterRun>()

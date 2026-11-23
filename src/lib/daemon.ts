@@ -104,7 +104,8 @@ export interface DaemonOptions {
   // API-driven sync: when present, at every round it fetches the agents from CloseYourIt and uses the playbook
   // generated from the host-scoped manifest instead of the local file. null from sync() = nothing to run (skip the round).
   sync?: SyncFn
-  /** CYAU-235 — one supporter pass per round, before the work: answers an open question round if there is one. */
+  /** CYAU-235 — one supporter pass per round, before the work: answers an open question round if there is one.
+   *  CYAU-318 — it runs holding the cycle lock, and is skipped while the machine is busy. */
   supporter?: (signal: AbortSignal) => Promise<void>
   /** CYAU-273 — one council pass per round, after the supporter: one project slice if one is due. */
   council?: (signal: AbortSignal) => Promise<void>
@@ -121,29 +122,30 @@ export interface DaemonOptions {
 }
 
 /**
- * Runs the council pass holding the cycle lock, so the automatic update (which takes the same lock) never
+ * Runs a supporter or council pass holding the cycle lock, so the automatic update (which takes the same lock) never
  * restarts the service in the middle of its sessions. A busy lock skips the pass; nothing it does or throws
  * reaches the ticket round, and the lock is released before `runOnce` takes it again.
  */
-async function runCouncilPass(
-  council: (signal: AbortSignal) => Promise<void>,
+async function runLockedPass(
+  name: 'supporter' | 'council',
+  pass: (signal: AbortSignal) => Promise<void>,
   signal: AbortSignal,
   opts: Pick<DaemonOptions, 'lockFile' | 'label' | 'isAlive'>,
   log: (message: string) => void,
 ): Promise<void> {
   try {
-    if (!acquire(opts.lockFile, `${opts.label ?? 'automator'}-council`, opts.isAlive)) {
-      log('council: machine busy, skipped this round')
+    if (!acquire(opts.lockFile, `${opts.label ?? 'automator'}-${name}`, opts.isAlive)) {
+      log(`${name}: machine busy, skipped this round`)
       return
     }
   } catch (error) {
-    log(`council: cycle lock unavailable, skipped this round: ${redactSecrets(error instanceof Error ? error.message : String(error))}`)
+    log(`${name}: cycle lock unavailable, skipped this round: ${redactSecrets(error instanceof Error ? error.message : String(error))}`)
     return
   }
   try {
-    await council(signal)
+    await pass(signal)
   } catch (error) {
-    log(`council: error (continuing): ${redactSecrets(error instanceof Error ? error.message : String(error))}`)
+    log(`${name}: error (continuing): ${redactSecrets(error instanceof Error ? error.message : String(error))}`)
   } finally {
     release(opts.lockFile)
   }
@@ -281,10 +283,11 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
         }
 
         // A supporter pass never stops the round: it only proposes answers and plan verdicts the server judges.
-        if (opts.supporter) await opts.supporter(controller.signal)
+        // CYAU-318: it holds the cycle lock like the council, so the update waits for its sessions.
+        if (opts.supporter) await runLockedPass('supporter', opts.supporter, controller.signal, opts, log)
 
         // A council pass never stops the round: it only proposes and votes; the server decides.
-        if (opts.council) await runCouncilPass(opts.council, controller.signal, opts, log)
+        if (opts.council) await runLockedPass('council', opts.council, controller.signal, opts, log)
 
         if (playbook) {
           const result = await runOnce({

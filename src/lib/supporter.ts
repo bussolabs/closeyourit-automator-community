@@ -437,6 +437,12 @@ export function makeSupporterPass(
         return
       }
       const session = await run(round.engine, {prompt: buildSupporterPrompt(round), cwd, model: round.model, timeoutMs: SESSION_TIMEOUT_MS, signal})
+      // CYAU-318 — a session cut by the shutdown sends nothing: the round stays open and a later pass takes it up.
+      // Any other failure still sends the empty answer, which hands the round to a person.
+      if (signal?.aborted) {
+        log(`supporter: ${round.ticket.code} session interrupted, round ${round.round_id} left open`)
+        return
+      }
       const answers = session.ok ? parseSupporterAnswers(session.text) : null
       if (!answers) {
         log(`supporter: ${round.ticket.code} no readable answer (${session.ok ? 'invalid output' : session.detail}), round left to a person`)
