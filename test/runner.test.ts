@@ -570,6 +570,45 @@ describe('runOnce', () => {
     expect(renew).toHaveBeenCalledTimes(2)
   })
 
+  it.each([false, true])('handles preparation failure in a fix round (shutdown=%s)', async (shutdown) => {
+    const p = paths()
+    saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
+    const controller = new AbortController()
+    const reportFailure = vi.fn(async () => undefined)
+    const release = vi.fn(async () => undefined)
+    const block = vi.fn(async () => undefined)
+    const beforeRuntime = vi.fn().mockResolvedValueOnce(undefined).mockImplementationOnce(async () => {
+      if (shutdown) controller.abort()
+      throw new Error(shutdown ? 'Repository setup cancelled' : 'Repository setup timeout: exceeded 30 seconds')
+    })
+    const execute = vi.fn(() => ({
+      result: Promise.resolve({status: 'success' as const, exitCode: 0, errorCode: null, durationMs: 1, logPath: '/x', stdout: ''}),
+      cancel: () => undefined,
+    }))
+    const run = runOnce({
+      playbook, playbookDir: dir, now, ...p, signal: controller.signal,
+      runtime: {id: 'fake', healthCheck: async () => ({available: true}), execute},
+      preflight: async () => ({
+        outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+        executionLease: {renewEveryMs: 60_000, renew: async () => true, release},
+        workflowDelivery: {reportFailure, executionPhase: 'autopilot', attemptId: 'setup-retry',
+          deliver: async () => ({outcome: 'ok' as const, status: 200})},
+        ticketRun: {
+          runId: 'setup-retry', branch: 'ticket/CYAU-35', authorizedCwd: dir,
+          beforeRuntime, afterRuntime: async () => ({outcome: 'retry', retryPrompt: 'Correct the finding'}), block,
+        },
+      }),
+    })
+    if (shutdown) await run
+    else await expect(run).rejects.toThrow(/Repository setup timeout/)
+    expect(beforeRuntime).toHaveBeenCalledTimes(2)
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(block).toHaveBeenCalledTimes(1)
+    expect(release).toHaveBeenCalledTimes(1)
+    if (shutdown) expect(reportFailure).not.toHaveBeenCalled()
+    else expect(reportFailure).toHaveBeenCalledExactlyOnceWith('Repository setup timeout: exceeded 30 seconds')
+  })
+
   it('retry without findings/prompt is a fail-closed error and releases the lease', async () => {
     const p = paths()
     saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
@@ -875,6 +914,32 @@ describe('runOnce', () => {
     expect(result.preflightStopped).toEqual([expect.objectContaining({state: 'blocked', reason: expect.stringContaining('fail-closed')})])
   })
 
+  it('reports setup failure to the attempt without starting the agent', async () => {
+    const p = paths()
+    saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
+    const reportFailure = vi.fn(async () => undefined)
+    const execute = vi.fn()
+    const release = vi.fn(async () => undefined)
+    await runOnce({
+      playbook, playbookDir: dir, now, ...p,
+      runtime: {id: 'fake', healthCheck: async () => ({available: true}), execute},
+      preflight: async () => ({
+        outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+        executionLease: {renewEveryMs: 60_000, renew: async () => true, release},
+        workflowDelivery: {reportFailure, executionPhase: 'autopilot', attemptId: 'setup-attempt',
+          deliver: async () => ({outcome: 'ok' as const, status: 200})},
+        ticketRun: {
+          runId: 'setup-failure', branch: 'ticket/CYAU-35', authorizedCwd: '/managed/worktrees/CYAU/CYAU-35',
+          beforeRuntime: async () => { throw new Error('Repository setup timeout: exceeded 30 seconds') },
+          afterRuntime: vi.fn(), block: async () => undefined,
+        },
+      }),
+    })
+    expect(execute).not.toHaveBeenCalled()
+    expect(reportFailure).toHaveBeenCalledWith(expect.stringContaining('Repository setup timeout'))
+    expect(release).toHaveBeenCalledTimes(1)
+  })
+
   it('ticket lifecycle without lease is blocked without starting the runtime', async () => {
     const p = paths()
     saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
@@ -998,13 +1063,14 @@ describe('runOnce', () => {
     expect(result.preflightStopped).toHaveLength(1)
   })
 
-  it('shutdown during beforeRuntime blocks and releases without reaching the spawn', async () => {
+  it.each([false, true])('shutdown during beforeRuntime blocks and releases without reaching the spawn (throws=%s)', async (throws) => {
     const p = paths()
     saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
     const controller = new AbortController()
     const release = vi.fn(async () => undefined)
     const block = vi.fn(async () => undefined)
     const execute = vi.fn()
+    const reportFailure = vi.fn(async () => undefined)
 
     const result = await runOnce({
       playbook, playbookDir: dir, now, ...p, signal: controller.signal,
@@ -1012,15 +1078,18 @@ describe('runOnce', () => {
       preflight: async () => ({
         outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
         executionLease: {renewEveryMs: 1000, renew: vi.fn(async () => true), release},
+        workflowDelivery: {reportFailure, executionPhase: 'autopilot', attemptId: 'setup-stop',
+          deliver: async () => ({outcome: 'ok' as const, status: 200})},
         ticketRun: {
           runId: 'run-35', branch: 'ticket/CYAU-35', authorizedCwd: dir,
-          beforeRuntime: async () => { controller.abort() },
+          beforeRuntime: async () => { controller.abort(); if (throws) throw new Error('Repository setup cancelled') },
           afterRuntime: vi.fn(async () => undefined), block,
         },
       }),
     })
 
     expect(execute).not.toHaveBeenCalled()
+    expect(reportFailure).not.toHaveBeenCalled()
     expect(block).toHaveBeenCalledTimes(1)
     expect(release).toHaveBeenCalledTimes(1)
     expect(result.executed).toHaveLength(0)
@@ -1033,6 +1102,7 @@ describe('runOnce', () => {
     const order: string[] = []
     const block = vi.fn(async () => { order.push('blocked') })
     const release = vi.fn(async () => { order.push('release') })
+    const reportFailure = vi.fn(async () => undefined)
 
     await expect(runOnce({
       playbook, playbookDir: dir, now, ...p,
@@ -1043,6 +1113,8 @@ describe('runOnce', () => {
       preflight: async () => ({
         outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
         executionLease: {renewEveryMs: 1000, renew: vi.fn(async () => true), release},
+        workflowDelivery: {reportFailure, executionPhase: 'autopilot', attemptId: 'runtime-error',
+          deliver: async () => ({outcome: 'ok' as const, status: 200})},
         ticketRun: {
           runId: 'run-35', branch: 'ticket/CYAU-35', authorizedCwd: dir,
           beforeRuntime: vi.fn(async () => undefined), afterRuntime: vi.fn(async () => undefined), block,
@@ -1050,6 +1122,7 @@ describe('runOnce', () => {
       }),
     })).rejects.toThrow(/runtime reject/)
 
+    expect(reportFailure).not.toHaveBeenCalled()
     expect(order).toEqual(['blocked', 'release'])
     expect(block).toHaveBeenCalledTimes(1)
     expect(release).toHaveBeenCalledTimes(1)

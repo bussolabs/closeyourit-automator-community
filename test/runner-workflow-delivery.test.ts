@@ -61,12 +61,13 @@ function scenario() {
 }
 
 /** Fake runtime that completes successfully emitting the given stdout (and writing into the given log path). */
-function runtimeWith(stdout: string, logPath: string, stdoutTruncated = false): AgentRuntime {
+function runtimeWith(stdout: string, logPath: string, stdoutTruncated = false, usageStdout?: string | string[]): AgentRuntime {
   return {
     id: 'fake-claude', healthCheck: async () => ({available: true}),
     execute: () => ({
       result: Promise.resolve<RunResult>({
         status: 'success', exitCode: 0, errorCode: null, durationMs: 1, logPath, stdout, stdoutTruncated,
+        usageStdout: Array.isArray(usageStdout) ? usageStdout.shift() : usageStdout,
       }),
       cancel: () => undefined,
     }),
@@ -88,7 +89,11 @@ function approvingReviewer(seen?: {action?: {cwd?: string}}): AgentRuntime {
 }
 
 async function dispatch(opts: {
+  engine?: 'claude' | 'codex'
+  model?: string
+  recordSessionCost?: (stdout: string, model?: string) => void
   stdout: string
+  usageStdout?: string | string[]
   deliver: (payload: AttemptDelivery) => Promise<AttemptDeliveryResult>
   stdoutTruncated?: boolean
   cwd?: string
@@ -138,7 +143,8 @@ async function dispatch(opts: {
   const s = scenario()
   const release = vi.fn(async () => undefined)
   const result = await runOnce({
-    playbook: opts.cwd
+    playbook: opts.engine ? PlaybookSchema.parse({version: 1,
+      actions: {work: {schedule: 'every 1m', type: opts.engine, run: 'phase prompt', model: opts.model}}}) : opts.cwd
       ? PlaybookSchema.parse({
           version: 1,
           actions: {work: {schedule: 'every 1m', type: 'claude', run: 'prompt della fase', cwd: opts.cwd}},
@@ -146,11 +152,15 @@ async function dispatch(opts: {
       : playbook,
     playbookDir: dir, now,
     stateFile: s.stateFile, logDir: s.logDir, lockFile: s.lockFile,
-    claudeRuntime: opts.implementer ?? runtimeWith(opts.stdout, s.logPath, opts.stdoutTruncated),
-    codexRuntime: opts.reviewer ?? approvingReviewer(opts.seenReviewer),
+    // On a Codex action Claude is the cross-reviewer: it answers with a verdict, not with the phase result.
+    claudeRuntime: opts.implementer ?? (opts.engine === 'codex'
+      ? approvingReviewer(opts.seenReviewer)
+      : runtimeWith(opts.stdout, s.logPath, opts.stdoutTruncated)),
+    codexRuntime: opts.engine === 'codex' ? runtimeWith(opts.stdout, s.logPath, opts.stdoutTruncated, opts.usageStdout) : opts.reviewer ?? approvingReviewer(opts.seenReviewer),
     sleep: opts.sleep ?? (async () => undefined),
     preflight: async () => ({
       outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+      ...(opts.recordSessionCost ? {ticketAttempt: {recordSessionCost: opts.recordSessionCost}} : {}),
       executionLease: {renewEveryMs: 60_000, renew: async () => true, release},
       ...(opts.settleQuotaPause ? {
         ticketAttempt: {recordSessionCost: () => undefined, settleQuotaPause: opts.settleQuotaPause},
@@ -1361,8 +1371,96 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
 })
 
 // CYRA-872 — how much the attempt cost and with which model, next to the result: the server sums them per phase
-// and per project. It is the same spend `automator activity` sums per ticket, so the two totals match.
+// and per project. Local ticket spend additionally includes reported auxiliary session costs.
 describe('runOnce — cost and model at delivery (CYRA-872)', () => {
+  const tokens = {input_tokens: 1000, cached_input_tokens: 400, output_tokens: 100}
+  const codexOut = (usage: boolean) => [
+    JSON.stringify({type: 'item.completed', item: {type: 'agent_message', text: JSON.stringify(TRIAGE_RESULT)}}),
+    ...(usage ? [JSON.stringify({type: 'turn.completed', usage: tokens})] : []),
+  ].join('\n')
+
+  it('does not attribute Claude review and tester spend to the Codex model', async () => {
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const auxiliary = JSON.stringify({type: 'result', is_error: false, total_cost_usd: 2,
+      result: JSON.stringify({status: 'accepted', summary: 'Reviewed'})})
+    const recordSessionCost = vi.fn()
+    await dispatch({engine: 'codex', stdout: JSON.stringify(AUTOPILOT_RESULT), usageStdout: codexOut(true),
+      executionPhase: 'autopilot', implementer: runtimeWith(auxiliary, ''), deliver, recordSessionCost,
+      tester: async (_engine, ask) => {
+        await ask('Check the work')
+        return {status: 'passed', summary: 'Checked', block: null}
+      }})
+    expect(deliver.mock.calls[0][0]).toMatchObject({cost_usd: 0.0114, token_usage: tokens, model: 'gpt-6-astra'})
+    expect(recordSessionCost).toHaveBeenCalledWith(auxiliary, undefined)
+  })
+
+  it('delivers Codex tokens and estimated cost, charges the ticket and records the estimate', async () => {
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const recordSessionCost = vi.fn()
+    const {log} = await dispatch({engine: 'codex', stdout: JSON.stringify(TRIAGE_RESULT), usageStdout: codexOut(true), deliver, recordSessionCost})
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({cost_usd: 0.0114,
+      token_usage: tokens, model: 'gpt-6-astra', result: TRIAGE_RESULT}))
+    expect(recordSessionCost).toHaveBeenCalledWith(codexOut(true), 'gpt-6-astra')
+    expect(log).toContain('session_cost_usd: 0.0114')
+    expect(log).toContain('cost_basis: estimated-standard')
+  })
+
+  it('sums Codex retries exactly once in the delivery', async () => {
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const afterRuntime = vi.fn()
+      .mockResolvedValueOnce({outcome: 'retry', retryPrompt: 'Try again'})
+      .mockResolvedValue({outcome: 'complete', runStatus: 'success', errorCode: null})
+    await dispatch({engine: 'codex', stdout: JSON.stringify(TRIAGE_RESULT), usageStdout: codexOut(true), deliver, authorizedCwd: dir, afterRuntime})
+    expect(deliver).toHaveBeenCalledTimes(1)
+    expect(deliver.mock.calls[0][0]).toMatchObject({cost_usd: 0.0228,
+      token_usage: {input_tokens: 2000, cached_input_tokens: 800, output_tokens: 200}})
+  })
+
+  it('delivers unknown-model tokens without a cost and missing usage without either field', async () => {
+    for (const usage of [true, false]) {
+      const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+      await dispatch({engine: 'codex', model: 'unknown', stdout: JSON.stringify(TRIAGE_RESULT), usageStdout: usage ? codexOut(true) : '', deliver})
+      expect(deliver).toHaveBeenCalledTimes(1)
+      expect(deliver.mock.calls[0][0].cost_usd).toBeUndefined()
+      expect(deliver.mock.calls[0][0].token_usage).toEqual(usage ? tokens : undefined)
+    }
+  })
+
+  it.each([true, false])('omits partial attempt cost when missing usage comes first: %s', async (missingFirst) => {
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const recordSessionCost = vi.fn()
+    const afterRuntime = vi.fn()
+      .mockResolvedValueOnce({outcome: 'retry', retryPrompt: 'Try again'})
+      .mockResolvedValue({outcome: 'complete', runStatus: 'success', errorCode: null})
+    await dispatch({engine: 'codex', stdout: JSON.stringify(TRIAGE_RESULT),
+      usageStdout: missingFirst ? ['', codexOut(true)] : [codexOut(true), ''],
+      deliver, recordSessionCost, authorizedCwd: dir, afterRuntime})
+    expect(deliver).toHaveBeenCalledTimes(1)
+    expect(deliver.mock.calls[0][0].cost_usd).toBeUndefined()
+    expect(deliver.mock.calls[0][0].token_usage).toEqual(tokens)
+    // Local spend also records the cross-review; only the two work sessions belong to the delivery.
+    expect(recordSessionCost).toHaveBeenCalledTimes(3)
+    expect(recordSessionCost.mock.calls.filter(([, model]) => model === 'gpt-6-astra')).toEqual(
+      (missingFirst ? ['', codexOut(true)] : [codexOut(true), '']).map(stdout => [stdout, 'gpt-6-astra']),
+    )
+    expect(recordSessionCost.mock.calls.filter(([, model]) => model === undefined)).toEqual([
+      ['{"status":"accepted","summary":"Conforme"}', undefined],
+    ])
+  })
+
+  it('preserves all Codex session usage when red checks reach the cycle limit', async () => {
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const afterVerificationFailure = vi.fn()
+      .mockResolvedValueOnce({outcome: 'retry', retryPrompt: 'Fix the checks'})
+      .mockResolvedValue({outcome: 'complete', runStatus: 'failure', errorCode: 'C409-CYCLE-002'})
+    await dispatch({engine: 'codex', stdout: JSON.stringify(AUTOPILOT_RESULT), usageStdout: codexOut(true),
+      executionPhase: 'autopilot', ticketCode: 'CYAU-277', authorizedCwd: dir, deliver,
+      verify: async () => ({status: 'failed', summary: 'Checks failed'}), afterVerificationFailure})
+    expect(deliver).toHaveBeenCalledTimes(1)
+    expect(deliver.mock.calls[0][0]).toMatchObject({cost_usd: 0.0228,
+      token_usage: {input_tokens: 2000, cached_input_tokens: 800, output_tokens: 200},
+      result: {state: 'blocked', failure: {category: 'quality_gate', retryable: false}}})
+  })
   const claudeOut = (cost?: number) => JSON.stringify({
     type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(TRIAGE_RESULT),
     ...(cost === undefined ? {} : {total_cost_usd: cost}),
@@ -1373,6 +1471,28 @@ describe('runOnce — cost and model at delivery (CYRA-872)', () => {
     await dispatch({stdout: claudeOut(1.25), deliver})
 
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({cost_usd: 1.25, model: 'claude-opus-5-5'}))
+  })
+
+  it('also excludes Codex review usage from the Claude model delivery', async () => {
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const verdict = JSON.stringify({status: 'accepted', summary: 'Reviewed'})
+    await dispatch({stdout: claudeOut(1.25), reviewer: runtimeWith(verdict, '', false, codexOut(true)), deliver})
+    expect(deliver.mock.calls[0][0]).toMatchObject({cost_usd: 1.25, model: 'claude-opus-5-5'})
+    expect(deliver.mock.calls[0][0].token_usage).toBeUndefined()
+  })
+
+  it('does not deliver known Claude spend as the total when a later session has no cost', async () => {
+    const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const implementer = runtimeWith(claudeOut(0.4), '')
+    const execute = implementer.execute
+    let calls = 0
+    implementer.execute = (...args) => ++calls === 1 ? execute(...args) : runtimeWith(claudeOut(), '').execute(...args)
+    const afterRuntime = vi.fn()
+      .mockResolvedValueOnce({outcome: 'retry', retryPrompt: 'Try again'})
+      .mockResolvedValue({outcome: 'complete', runStatus: 'success', errorCode: null})
+    await dispatch({stdout: '', implementer, deliver, authorizedCwd: dir, afterRuntime})
+    expect(deliver).toHaveBeenCalledTimes(1)
+    expect(deliver.mock.calls[0][0].cost_usd).toBeUndefined()
   })
 
   it('sums the sessions of the attempt: a retry is paid too', async () => {

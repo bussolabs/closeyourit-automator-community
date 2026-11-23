@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-11-23
+
+### Fixed
+
+- **Costi coerenti con il modello del lavoro.** Riletture e tester non entrano nel costo consegnato per entrambi i motori; le loro spese note restano nel conto locale. Le riprese Codex senza baseline attendibile lasciano consumi e costo assenti per non duplicare totali storici. Gli eventi dei comandi tornano nel registro diagnostico, soggetti al limite ordinario. (CYAU-277)
+
+### Added
+
+- **Anche Codex comunica consumi e costo stimato.** I token di ingresso, cache e uscita viaggiano con il risultato; il costo stimato usa lo stesso campo di Claude ed entra nel conto del ticket e nel registro. Per GPT-6 Astra la stima usa le tariffe standard pubblicate; senza prezzo noto o consumo valido non viene inventato un costo. La rilettura Codex resta esclusa. Salvare i token e mostrarli con il costo nella pagina dei dettagli richiede un intervento sul server. (CYAU-277)
+
+- **Un costo parziale non viene consegnato come totale.** Se una sessione Codex non riporta consumi calcolabili, il costo del tentativo resta assente anche quando altre sessioni lo riportano. I token disponibili continuano a essere trasmessi. (CYAU-277)
+
+## [0.65.0] - 2026-11-23
+
+### Added
+
+- **Il progetto viene preparato prima di avviare l'agente.** Ogni repository può dichiarare una preparazione obbligatoria e le cartelle di dipendenze da riutilizzare. Le regole arrivano dalla revisione principale conservata: il ticket non può cambiarle. La preparazione gira isolata dalle credenziali e, se fallisce, ferma l'avvio con il motivo sul ticket. Le dipendenze compatibili vengono copiate privatamente; quelle cambiate si preparano senza alterare il materiale condiviso. Anche le riprese ricontrollano la compatibilità e nessuna preparazione interrotta viene riutilizzata come riuscita. (CYAU-280)
+
 ## [0.64.4] - 2026-11-22
 
 ### Fixed

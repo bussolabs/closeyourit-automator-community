@@ -120,6 +120,48 @@ function provider(runsBase: string, overrides: Record<string, unknown> = {}) {
 }
 
 describe('persistent ticket cycle', () => {
+  it('prepares before every launch using the pinned policy even for locally owned outcomes', async () => {
+    const order: string[] = []
+    const setup = {run: 'prepare', timeout: 30, network: false}
+    const prepareRepository = vi.fn(async () => { order.push('setup') })
+    const loadGateAtRef = vi.fn(() => ({version: 1, runner: [], timeout: 30, checks: [{stage: 'unit', run: 'test', required: true}], setup}))
+    const lifecycle = await provider(temporaryDirectory(), {loadGateAtRef, prepareRepository,
+      provisionTools: async () => { order.push('tools'); return {status: 'installed', detail: ''} },
+    }).prepare(input)
+    await lifecycle.beforeRuntime()
+    await lifecycle.beforeRuntime()
+    expect(order).toEqual(['tools', 'setup', 'tools', 'setup'])
+    expect(loadGateAtRef).toHaveBeenCalledWith(workspace.worktreePath, CONFIRMED_BASE)
+    expect(prepareRepository).toHaveBeenCalledWith(expect.objectContaining({trustedBase: CONFIRMED_BASE, setup}))
+  })
+
+  it('stops before preparation if required tool installation fails', async () => {
+    const prepareRepository = vi.fn()
+    const lifecycle = await provider(temporaryDirectory(), {prepareRepository,
+      loadGateAtRef: () => ({version: 1, setup: {run: 'prepare', timeout: 30, network: false}}),
+      provisionTools: async () => ({status: 'failed', detail: 'installer failed'}),
+    }).prepare(input)
+    await expect(lifecycle.beforeRuntime()).rejects.toThrow(/setup installation/)
+    expect(prepareRepository).not.toHaveBeenCalled()
+  })
+
+  it('preserves legacy startup when no setup is declared', async () => {
+    const prepareRepository = vi.fn()
+    const lifecycle = await provider(temporaryDirectory(), {prepareRepository,
+      provisionTools: async () => ({status: 'failed', detail: 'legacy behavior'}),
+    }).prepare(input)
+    await expect(lifecycle.beforeRuntime()).resolves.toBeUndefined()
+    expect(prepareRepository).not.toHaveBeenCalled()
+  })
+
+  it('propagates preparation failures to the pre-runtime failure channel', async () => {
+    const lifecycle = await provider(temporaryDirectory(), {
+      loadGateAtRef: () => ({version: 1, setup: {run: 'prepare', timeout: 30, network: false}}),
+      prepareRepository: async () => { throw new Error('Repository setup timeout') },
+    }).prepare(input)
+    await expect(lifecycle.beforeRuntime()).rejects.toThrow('Repository setup timeout')
+  })
+
   // CYAU-250 — the session cannot install a missing pinned tool: the daemon does it first, from the base ref.
   it('installs the base ref tools before the session starts', async () => {
     const provisionTools = vi.fn(async () => ({status: 'installed' as const, detail: ''}))
@@ -174,6 +216,7 @@ describe('persistent ticket cycle', () => {
       },
       now: () => new Date('2026-07-14T10:00:00.000Z'),
       runGate,
+      loadGateAtRef: () => null,
       resolveReviewDiff: vi.fn(async () => ({
         baseCommit: 'a'.repeat(40), snapshotTree: 'b'.repeat(40), diffSha256: 'c'.repeat(64), diff: 'diff',
       })),
@@ -2011,10 +2054,10 @@ describe('emulator test in the delivery path (CYAU-295)', () => {
     expect(runEmulatorTest).not.toHaveBeenCalled()
   })
 
-  it('outside skill-mode the base branch is not read and no test is offered', async () => {
+  it('outside skill-mode the trusted policy is read but no emulator test is offered', async () => {
     const loadGateAtRef = vi.fn(() => baseGate({}))
     const lifecycle = await provider(temporaryDirectory(), {loadGateAtRef}).prepare(input)
-    expect(loadGateAtRef).not.toHaveBeenCalled()
+    expect(loadGateAtRef).toHaveBeenCalledWith(workspace.worktreePath, CONFIRMED_BASE)
     expect(lifecycle.emulatorTestWorkflowDelivery).toBeUndefined()
   })
 

@@ -181,6 +181,7 @@ describe('crash-safe adoption of an in_review delivery', () => {
     const effects = {push: 0, pr: 0, link: 0, status: 0, publish: 0, attest: 0}
     const cycle = makeTicketCycleProvider({
       runsBase,
+      loadGateAtRef: () => null,
       prepareWorkspace: () => workspace,
       inspectWorkspace: () => workspace,
       checkpointGit: {currentBranch: () => workspace.branch, headCommit: () => 'd'.repeat(40), isDirty: () => false},

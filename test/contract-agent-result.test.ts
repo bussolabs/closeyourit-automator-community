@@ -114,6 +114,13 @@ describe('contract agent-result/v1 — the envelope admits the host cost and mod
     const envelope = {...(readJson('fixtures/valid/delivery_envelope.json') as object), cost_usd: 0.42, model: 'claude-opus-5-5'}
     expect(validate(envelope), JSON.stringify(validate.errors)).toBe(true)
   })
+  it('admits optional Codex tokens alongside the existing cost field', () => {
+    const validate = validatorFor('delivery_envelope')
+    const envelope = {...(readJson('fixtures/valid/delivery_envelope.json') as object),
+      cost_usd: 0.0369, model: 'gpt-6-astra',
+      token_usage: {input_tokens: 3000, cached_input_tokens: 900, output_tokens: 300}}
+    expect(validate(envelope), JSON.stringify(validate.errors)).toBe(true)
+  })
 })
 
 // CYAU-188 — the two checks below are what makes the list of examples tested against zod DERIVED, and not

@@ -6,6 +6,8 @@ import {AGENT_RUNTIMES, type AgentRuntime, ClaudeRuntime, CodexRuntime, probeRun
 import {type ChildLike, type SpawnFn} from '../src/lib/executor'
 import {type ProbeKillFn} from '../src/lib/process-probe'
 import {type Action, PlaybookSchema} from '../src/lib/schema'
+import {codexFinalMessage} from '../src/lib/codex-output'
+import {codexSessionUsage} from '../src/lib/session-cost'
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-runtime-'))
 const now = new Date('2026-07-07T00:00:00.000Z')
@@ -470,6 +472,39 @@ describe('CodexRuntime · healthCheck', () => {
 
 describe('CodexRuntime · execute · outcome via exit code', () => {
   const ctx = (extra?: Record<string, unknown>) => ({playbookDir: '/pb', logDir: dir, now, guardrailsInstalled: () => true, ...TEST_EXEC_CTX, ...extra})
+
+  it('preserves usage, conversation identity and the separately written final result together', async () => {
+    const started = vi.fn()
+    const usage = {input_tokens: 1000, cached_input_tokens: 400, output_tokens: 100}
+    const {spawn} = makeSpawn({code: 0, stdout: [
+      JSON.stringify({type: 'thread.started', thread_id: '0192f0c4-5d8a-7f7e-9a3c-2f1e8c3b9d10'}),
+      JSON.stringify({type: 'item.completed', item: {type: 'command_execution', aggregated_output: 'usage limit reached'}}),
+      JSON.stringify({type: 'item.completed', item: {type: 'agent_message', text: 'Earlier message'}}),
+      JSON.stringify({type: 'turn.completed', usage}),
+    ].join('\n')})
+    const withFile: SpawnFn = (cmd, args, options) => {
+      fs.writeFileSync(args[args.indexOf('--output-last-message') + 1], 'Authoritative result')
+      return spawn(cmd, args, options)
+    }
+    const res = await new CodexRuntime({spawn: withFile}).execute('a', action({type: 'codex', run: 'x'}),
+      ctx({onConversationStarted: started})).result
+    expect(res.status).toBe('success')
+    expect(res.quotaLimit).toBeUndefined()
+    expect(started).toHaveBeenCalledWith('0192f0c4-5d8a-7f7e-9a3c-2f1e8c3b9d10')
+    expect(res.stdout).toBe('Authoritative result')
+    expect(codexSessionUsage(res.usageStdout!, 'gpt-6-astra')).toEqual({tokens: usage, costUsd: 0.0114})
+  })
+
+  it('does not treat usage as a successful result when Codex reports a quota error', async () => {
+    const {spawn} = makeSpawn({code: 0, stdout: [
+      JSON.stringify({type: 'turn.completed', usage: {input_tokens: 1, cached_input_tokens: 0, output_tokens: 0}}),
+      JSON.stringify({type: 'error', message: 'You have hit your usage limit. Try again in 2 hours.'}),
+    ].join('\n')})
+    const res = await new CodexRuntime({spawn}).execute('a', action({type: 'codex', run: 'x'}), ctx()).result
+    expect(res.status).toBe('failure')
+    expect(res.quotaLimit).toBeDefined()
+    expect(codexFinalMessage(res.stdout)).toBe('')
+  })
 
   it('spawns `codex exec` with the resolved argv (default sandbox + prompt after `--`)', async () => {
     const {spawn, calls} = makeSpawn({code: 0})

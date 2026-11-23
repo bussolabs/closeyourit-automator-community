@@ -5,8 +5,8 @@ import {type Action, type Playbook} from './schema'
 import {selectDue} from './scheduler'
 import {quarantineCorruptState, readState, type RunStatus, saveState, updateAction} from './state'
 import {type RunResult, type SpawnFn, runPrecondition} from './executor'
-import {addRetryFindings, claudeSessionCostUsd} from './claude'
-import {sessionCostUsd} from './session-cost'
+import {addRetryFindings} from './claude'
+import {codexSessionUsage, sessionCostUsd, sumTokenUsage, type TokenUsage} from './session-cost'
 import {CLAUDE_MODEL, CODEX_MODEL} from './models'
 import {type AgentRuntime, ClaudeRuntime, CodexRuntime, SpawnRuntime} from './runtime'
 import {type AgentRunResult, normalizeAgentResult} from './agent-result'
@@ -150,7 +150,7 @@ export interface ActionPreflightDecision {
  * here the raw stdout passes and whoever keeps the counter decides whether it yields a cost or nothing.
  */
 export interface TicketAttemptSink {
-  recordSessionCost(stdout: string): void
+  recordSessionCost(stdout: string, codexModel?: string): void
   /**
    * CYAU-275: once the session is over — `true` when it stopped on a quota limit, which gives the attempt back.
    * CYAU-335: `true` as well when a review the MACHINE could not run held the delivery; same capped counter,
@@ -459,17 +459,17 @@ export function hasDiffToReview(result: Record<string, unknown>): boolean {
  * daemon can say so: a log mute about being mute would be the same failure as before.
  */
 /**
- * CYRA-872 — cost and model of the attempt for the delivery. The cost is the Claude spend already summed plus that
- * of the session just ended (which is summed after the delivery); for Codex, or if no session declares it, there is none.
+ * Known implementer spend plus the current session, charged after delivery. Auxiliary spend is local only.
  */
 function deliveryUsage(
   runtime: 'claude' | 'codex', model: string | undefined, knownCost: number | null, currentStdout: string,
-): Pick<AttemptDelivery, 'cost_usd' | 'model'> {
+  knownTokens: TokenUsage | null, costComplete: boolean,
+): Pick<AttemptDelivery, 'cost_usd' | 'model' | 'token_usage'> {
   const usage = {model: model ?? (runtime === 'claude' ? CLAUDE_MODEL : CODEX_MODEL)}
-  if (runtime !== 'claude') return usage
-  const current = claudeSessionCostUsd(currentStdout)
-  const cost = current === null ? knownCost : (knownCost ?? 0) + current
-  return cost === null ? usage : {...usage, cost_usd: cost}
+  const current = sessionCostUsd(currentStdout, runtime === 'codex' ? usage.model : undefined)
+  const cost = !costComplete || current === null ? null : (knownCost ?? 0) + current
+  const tokens = runtime === 'codex' ? sumTokenUsage(knownTokens, codexSessionUsage(currentStdout).tokens) : null
+  return {...usage, ...(cost === null ? {} : {cost_usd: cost}), ...(tokens ? {token_usage: tokens} : {})}
 }
 
 function recordDelivery(
@@ -954,7 +954,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             if (!resumed.retryPrompt) throw new Error('recovery retry privo di finding strutturati')
             recoveredRetryPrompt = resumed.retryPrompt
           }
-          await ticketRun.beforeRuntime()
+          await ticketRun.beforeRuntime(opts.signal)
           // `beforeRuntime` may do I/O: a shutdown arriving during the wait must not reach the spawn.
           if (opts.signal?.aborted) {
             await ticketRun.block().catch(() => undefined)
@@ -971,6 +971,14 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           effectiveAction = {...effectiveAction, cwd: ticketRun.authorizedCwd}
         } catch (error) {
           await ticketRun.block().catch(() => undefined)
+          if (opts.signal?.aborted) {
+            await executionLease.release().catch(() => undefined)
+            const reason = 'shutdown durante la preparazione ticket: runtime annullato'
+            preflightStopped.push({name, state: 'blocked', reason,
+              audit: [{phase: 'workspace', state: 'stopped', reason}]})
+            updateAction(state, name, {last_run: nowIso, last_status: 'skipped'})
+            return 'stop'
+          }
           // The cause travels with the stop and reaches the attempt: the label alone sent whoever reads the ticket
           // to the host's logs (seen on AAC-13).
           const cause = error instanceof Error ? redactSecrets(error.message).replace(/\s+/gu, ' ').slice(0, 200) : ''
@@ -994,12 +1002,19 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       // Best-effort: the spend is a measurement, not a gate — a counter that cannot be updated invalidates nothing.
       // CYRA-872 — the same spend summed on the attempt, which travels with the delivery.
       let attemptCostUsd: number | null = null
-      const chargeSession = (stdout: string): void => {
-        const cost = sessionCostUsd(stdout)
-        if (cost !== null) attemptCostUsd = (attemptCostUsd ?? 0) + cost
+      let attemptTokens: TokenUsage | null = null
+      let attemptCostComplete = true
+      const chargeSession = (stdout: string, codexModel?: string, workSession = false): void => {
+        const cost = sessionCostUsd(stdout, codexModel)
+        // Delivery describes the implementer's model; auxiliary engines are local spend only.
+        if (workSession) {
+          if (cost === null) attemptCostComplete = false
+          if (cost !== null) attemptCostUsd = (attemptCostUsd ?? 0) + cost
+          if (codexModel) attemptTokens = sumTokenUsage(attemptTokens, codexSessionUsage(stdout).tokens)
+        }
         if (!ticketAttempt) return
         try {
-          ticketAttempt.recordSessionCost(stdout)
+          ticketAttempt.recordSessionCost(stdout, codexModel)
         } catch {
           // No effect on the outcome: a lost measurement cannot make a successful run fail.
         }
@@ -1224,7 +1239,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                   review: {status: 'accepted', depth: 'result', summary: HOST_SYNTHETIC_REVIEW_SUMMARY},
                   ...(observed ? {observed: {head_sha: observed}} : {}),
                   ...deliveryUsage(effectiveAction.type, 'model' in effectiveAction ? effectiveAction.model : undefined,
-                                   attemptCostUsd, raw.stdout),
+                                   attemptCostUsd, raw.usageStdout ?? raw.stdout, attemptTokens, attemptCostComplete),
                 })
                 deliveryRecord = recordDelivery(workflowDelivery, {
                   outcome: delivered.outcome,
@@ -1275,7 +1290,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                         review: {status: 'accepted', depth: 'result', summary: HOST_SYNTHETIC_REVIEW_SUMMARY},
                         ...(observed ? {observed: {head_sha: observed}} : {}),
                         ...deliveryUsage(effectiveAction.type, 'model' in effectiveAction ? effectiveAction.model : undefined,
-                                         attemptCostUsd, raw.stdout),
+                                         attemptCostUsd, raw.usageStdout ?? raw.stdout, attemptTokens, attemptCostComplete),
                       })
                       // The local cause stays the cycle limit; the record says what the server did with the block.
                       deliveryRecord = recordDelivery(workflowDelivery, {
@@ -1528,7 +1543,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                 review: payloadReview,
                 ...(observed ? {observed: {head_sha: observed}} : {}),
                 ...deliveryUsage(effectiveAction.type, 'model' in effectiveAction ? effectiveAction.model : undefined,
-                                 attemptCostUsd, raw.stdout),
+                                 attemptCostUsd, raw.usageStdout ?? raw.stdout, attemptTokens, attemptCostComplete),
               }
               const reviewAccepted = payload.review.status === 'accepted'
               // The PR stays draft during CI and review. Only the cross approval allows
@@ -1598,7 +1613,13 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             : execution.result
           // One session per cycle round: the spend is summed here, not after the loop, otherwise the attempts
           // before a retry would disappear from the ticket's account.
-          chargeSession(execution.result.stdout)
+          const codexModel = effectiveAction.type === 'codex' ? effectiveAction.model ?? CODEX_MODEL : undefined
+          const usageStdout = execution.result.usageStdout ?? execution.result.stdout
+          chargeSession(usageStdout, codexModel, true)
+          const sessionCost = sessionCostUsd(usageStdout, codexModel)
+          if (sessionCost !== null) appendLogFooter(execution.result.logPath, {
+            session_cost_usd: sessionCost, cost_basis: codexModel ? 'estimated-standard' : 'reported',
+          })
           // CYAU-285 — the run log says which conversation the session had, and why an existing one was not resumed.
           if (conversation && execution.result.logPath) {
             appendLogFooter(execution.result.logPath, {
@@ -1641,7 +1662,20 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             await ticketRun?.block().catch(() => undefined)
             break
           }
-          await ticketRun?.beforeRuntime()
+          try {
+            await ticketRun?.beforeRuntime(opts.signal)
+          } catch (error) {
+            if (!opts.signal?.aborted) {
+              const detail = error instanceof Error ? error.message : String(error)
+              await workflowDelivery?.reportFailure?.(redactSecrets(detail).replace(/\s+/gu, ' ').slice(0, 500)).catch(() => undefined)
+              throw error
+            }
+          }
+          if (opts.signal?.aborted) {
+            await ticketRun?.block().catch(() => undefined)
+            agentResult = normalizeAgentResult({runtime: runtime.id, action: name, result, cancelled: true})
+            break
+          }
         }
         // CYAU-285 — the phase is over, well or badly: the next phase starts a conversation of its own. A shutdown or
         // a lost lease is no end — that conversation is exactly the one a restart resumes.

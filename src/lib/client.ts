@@ -336,8 +336,10 @@ export interface AttemptDelivery {
   observed?: {head_sha: string}
   /** CYAU-329 — what the machine's Tester measured on the delivered commit. Missing when it did not run. */
   tester?: TesterBlock | BrowserBlock
-  /** CYRA-872 — the known Claude spend of the attempt, in dollars. Missing when unknown (Codex): never a zero. */
+  /** Reported spend (Claude) or estimated spend (Codex), in USD. Omitted when unknown. */
   cost_usd?: number
+  /** Codex work-session totals; input includes the cached subset. Optional for older servers. */
+  token_usage?: import('./session-cost').TokenUsage
   /** CYRA-872 — the work session's model, to compare costs across models. */
   model?: string
 }

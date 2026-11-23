@@ -1,4 +1,5 @@
 import {z} from 'zod'
+import {codexFinalMessage} from './codex-output'
 import {type AttemptDelivery} from './client'
 // CYAU-173 — a single judge of the PR URL shape. A looser copy lived here (it was enough to
 // start with https and end with pull/<digits>), and the vendored contract used exactly that one: the
@@ -537,6 +538,7 @@ function* balancedObjects(text: string): Generator<string> {
  * or a markdown fence around the JSON inside `result` are handled.
  */
 function jsonCandidates(stdout: string, depth = 0): unknown[] {
+  stdout = codexFinalMessage(stdout)
   const parsed: unknown[] = []
   for (const slice of jsonSlices(stdout)) {
     if (parsed.length >= CANDIDATE_LIMIT) break

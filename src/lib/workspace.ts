@@ -472,6 +472,19 @@ const MANAGED_IGNORE_PATTERNS: readonly string[] = [
 const MANAGED_IGNORE_BEGIN = '# >>> closeyourit-automator (CYAU-142) — dependency install output, non committare >>>'
 const MANAGED_IGNORE_END = '# <<< closeyourit-automator (CYAU-142) <<<'
 
+/** Trusted setup outputs must not enter ticket commits. Append-only keeps concurrent declarations intact. */
+export function excludeSetupDirectories(repoPath: string, directories: string[]): void {
+  if (directories.length === 0) return
+  const result = spawnSync('git', ['-C', repoPath, 'rev-parse', '--git-path', 'info/exclude'], {encoding: 'utf8', timeout: 30_000})
+  if (result.status !== 0 || !result.stdout.trim()) throw new Error('Cannot exclude repository setup outputs')
+  const raw = result.stdout.trim()
+  const file = path.resolve(repoPath, raw)
+  fs.mkdirSync(path.dirname(file), {recursive: true})
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n') : []
+  const added = directories.map((dir) => `/${dir}/`).filter((pattern) => !existing.includes(pattern))
+  if (added.length) fs.appendFileSync(file, `\n${added.join('\n')}\n`)
+}
+
 /**
  * Composes the content of `info/exclude` with the managed block, PRESERVING what the user wrote BEFORE
  * the marker. Idempotent: an already identical block → `changed:false`. Robust to corrupt/duplicate markers:

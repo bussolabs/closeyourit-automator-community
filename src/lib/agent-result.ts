@@ -1,4 +1,5 @@
 import {z} from 'zod'
+import {codexFinalMessage} from './codex-output'
 import {type RunResult} from './executor'
 
 // UNIFORM outcome of an agent run (Claude/Codex/shell), comparable across runtimes so the workflow can
@@ -121,7 +122,7 @@ function extractReportObject(stdout: string): unknown {
  * recognisable report or it does not match `AgentReportSchema` (invalid output) → the rich fields stay at defaults.
  */
 export function parseAgentReport(stdout: string): {report: AgentReport | null; parsed: boolean} {
-  const raw = extractReportObject(stdout)
+  const raw = extractReportObject(codexFinalMessage(stdout))
   if (raw === undefined) return {report: null, parsed: false}
   const result = AgentReportSchema.safeParse(raw)
   // Valid only if it matches the schema AND carries at least one recognised field: an empty object or one with only

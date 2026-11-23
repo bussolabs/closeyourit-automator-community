@@ -40,6 +40,41 @@ Per ritirare una vecchia installazione Apple, segui la [procedura di dismissione
   Un suo errore non ferma i ticket, ma una fetta lenta li ritarda fino a circa un'ora (quattro sessioni
   da 15 minuti). Un server senza consiglio (204 o 404) non produce niente.
 - Gli **orari cron sono in UTC** (prevedibile sui server).
+- Codex comunica i token di ingresso (inclusa la quota in cache) e di uscita tramite gli eventi della CLI.
+  Il costo è una **stima a tariffa standard**, con prezzi centralizzati in `src/lib/session-cost.ts`:
+  senza prezzo noto o dati validi viene omesso. Il costo va al server, al conto del ticket e nel log;
+  riletture e tester restano esclusi dal costo consegnato per entrambi i motori. Il salvataggio dei token e la pagina dei dettagli richiedono lavoro sul server.
+
+### Stima dei consumi Codex
+
+Tariffe standard USD per milione di token, verificate il 23 novembre 2026 sulla
+[pagina ufficiale GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra):
+ingresso 10, ingresso riutilizzato 1, uscita 50. La cache è un sottoinsieme dell'ingresso:
+si sottrae prima di applicare la tariffa ordinaria. Oltre 272.000 token di ingresso la fonte
+indica ingresso e cache doppi e uscita a 1,5 volte. Modelli diversi non ereditano questi prezzi.
+Questa è una stima comparativa: non riproduce abbonamenti, scritture della cache o tariffe del livello di servizio.
+
+L'esecutore conserva separatamente gli eventi `turn.completed.usage` con `input_tokens`,
+`cached_input_tokens` e `output_tokens`, prima del troncamento dei log e della risposta finale.
+Il tentativo somma le sessioni eseguite, comprese correzioni e riprese fallite seguite da un nuovo avvio.
+Se una sessione Codex non ha costo calcolabile, `cost_usd` del tentativo resta assente anche se
+altre sessioni sono misurabili; `token_usage` contiene soltanto i consumi disponibili.
+Il conto locale registra le sole misure note, comprese le spese dichiarate da riletture e tester:
+è una spesa del ticket, distinta dal costo consegnato del modello che lavora, e non attesta completezza.
+Gli eventi dei comandi e il loro output restano nel registro diagnostico fino al limite ordinario;
+raggiungerlo non cancella i consumi conservati separatamente.
+
+La verifica locale ha identificato `codex-cli 0.162.1`; le fixture degli eventi restano sintetiche:
+non attestano che una ripresa reale emetta consumi incrementali anziché cumulativi della conversazione.
+Per questo una ripresa senza baseline attendibile non contribuisce ai token né al costo:
+il totale storico non viene mai aggiunto come nuovo consumo. Il costo del tentativo resta assente
+anche se la ripresa fallisce e il successivo avvio da zero ha consumi validi.
+Anche la soglia di contesto applicata al totale dell'evento è un'approssimazione se il turno contiene
+più richieste. Prima di attestare il confronto completo servono una cattura controllata di avvio e
+ripresa su questa versione e una prova d'integrazione con il server precedente.
+Il contratto vendorizzato accetta i campi facoltativi esterni al risultato, ma non prova da solo
+la ricezione HTTP. Il rilascio server deve permettere e conservare `token_usage`, mostrarlo accanto
+al costo e distinguere misure parziali; solo dopo si può verificare la pagina delle lavorazioni.
 
 ## Setup
 
@@ -268,6 +303,57 @@ separato, interrotto alla scadenza). L'avviso non blocca la macchina.
 Ogni comando supporta `--json`.
 
 ## Sicurezza
+
+### Preparazione del progetto prima dell'agente
+
+La revisione base conservata nella lavorazione può dichiarare in `.closeyourit/quality-gate.yml`
+(versione 1 o 2):
+
+```yaml
+setup:
+  run: pnpm install --frozen-lockfile
+  timeout: 300                 # secondi, massimo 3600
+  network: true                # false se omesso
+shared_directories:
+  - node_modules
+```
+
+Senza queste dichiarazioni resta il comportamento precedente. Con `setup`, dopo l'installazione degli
+strumenti e prima di ogni avvio o ripresa dell'agente, la preparazione deve riuscire. Configurazione
+invalida o illeggibile, installazione fallita, isolamento assente, comando fallito e scadenza fermano
+l'avvio; il motivo ripulito e limitato arriva all'errore del tentativo. Il ticket non può cambiare il
+comando o aprire la rete modificando il proprio file di configurazione.
+
+Il comando gira con ambiente minimo, home temporanea, filesystem costruito da una lista consentita,
+strumenti installati in sola lettura e scrittura soltanto nella copia privata, nella home temporanea e
+in `/tmp` isolato. Home dell'host, credenziali, altri ticket e socket dei servizi non sono montati.
+Bubblewrap e lo scope systemd limitano accessi, memoria, CPU e durata; tutti i processi devono risultare
+fermati anche dopo errore o annullamento. Servono gli stessi requisiti Linux delle sessioni fortemente
+isolate, più `/usr/bin/flock` e `/usr/bin/tar`.
+
+Le cartelle devono essere relative, senza duplicati, sovrapposizioni, traversal o metadati Git; non
+possono contenere sorgenti tracciati. Vengono escluse dai commit. Una cache nello state dir contiene
+soltanto preparazioni riuscite di una copia della revisione fidata, creata sotto lock esclusivo. Ogni
+ticket riceve copie con inode separati (reflink quando possibile, altrimenti copia normale), mai hard
+link. Il comando viene comunque eseguito privatamente dopo il ripristino, anche per produrre file
+esterni alle cartelle riutilizzabili. I risultati del ticket non alimentano mai la cache.
+
+L'attesa del lock è annullabile, senza una scadenza fissa più breve della preparazione in corso.
+Un arresto richiesto durante la preparazione interrompe il tentativo senza segnalarlo come guasto,
+anche nei giri di correzione. Il lock viene rilasciato soltanto dopo la pulizia del produttore.
+La cache, non esposta ai comandi del progetto, viene ricontrollata tramite inventario e identità dei
+file (inode, dimensione, permessi, mtime e ctime a nanosecondi), senza rileggerne tutti i contenuti.
+Le impronte dei binari installati vengono memorizzate nel processo e ricalcolate quando cambia tale
+identità. Le copie private e la preparazione restano necessarie a ogni avvio.
+
+La compatibilità è prudente: comprende repository, revisione e sorgenti effettivi, istruzioni e
+strumenti installati. Sono riconosciuti i lockfile alla radice `pnpm-lock.yaml`, `package-lock.json`,
+`yarn.lock`, `Gemfile.lock`, `pubspec.lock`, `Cargo.lock`, `uv.lock`, `poetry.lock`, `composer.lock`,
+`go.sum`. Senza uno di questi, con submodule, sorgenti diversi o file aggiuntivi fuori dalle cartelle
+dichiarate, la preparazione è privata. Anche una modifica ai sorgenti senza cambio di dipendenze può
+quindi rinunciare al riutilizzo. Ogni avvio ricontrolla i file reali e la presenza delle cartelle; il
+registro dell'esito resta fuori dal worktree. La cache non ha ancora una pulizia automatica: lo spazio
+insufficiente interrompe la preparazione con un errore, senza avviare l'agente.
 
 - **Mai `bypassPermissions`** nelle azioni claude schedulate (non presidiate). Read-only → `permission_mode: plan`;
   scrittura → `acceptEdits` con `allowed_tools` stretti e `cwd` isolato.

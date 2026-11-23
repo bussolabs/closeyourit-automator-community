@@ -1923,8 +1923,8 @@ export function buildTicketPreflight(options: BuildTicketPreflightOptions): Acti
         // its output and here it is added to the ticket (DoD "the cost spent per ticket is visible").
         ...(attemptIdentity ? {
           ticketAttempt: {
-            recordSessionCost: (stdout: string): void => {
-              const cost = sessionCostUsd(stdout)
+            recordSessionCost: (stdout: string, codexModel?: string): void => {
+              const cost = sessionCostUsd(stdout, codexModel)
               if (cost === null) return // uninterpretable output: better no datum than a made-up cost
               addTicketAttemptCost({...attemptIdentity, cost, now: now()}, attemptsStore)
             },

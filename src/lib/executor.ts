@@ -13,6 +13,7 @@ import {detectQuotaLimit, type QuotaLimit, type QuotaRuntime} from './agent-quot
 import {buildCodexArgv, type CodexArgvOptions, CODEX_BIN, readCodexEvent} from './codex'
 import {type AgentConversation} from './agent-conversation'
 import {gitAdminDirectory} from './busy-marker'
+import {codexSessionUsage} from './session-cost'
 import {evaluateAction} from './command-policy'
 import {openLog} from './logger'
 import {ErrorCodes} from '../errors/error-codes'
@@ -96,6 +97,8 @@ export interface BuiltCommand {
 }
 
 export interface RunResult {
+  /** Validated Codex usage events, separate from the human-readable final result. */
+  usageStdout?: string
   quotaLimit?: QuotaLimit
   status: 'success' | 'failure' | 'timeout'
   exitCode: number | null
@@ -868,7 +871,19 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
   const executed = containment?.command ?? built
   let codexThread: string | undefined
   let codexLastMessage: string | undefined
+  let codexUsage = ''
+  // A resumed thread can report historical totals. Without an authenticated starting
+  // baseline, no invocation delta can be established; never charge that total again.
+  let codexUsageUnavailable = ctx.conversation?.mode === 'resume'
   const codexEvents = (event: Record<string, unknown>): void => {
+    // Keep usage independently of diagnostic logs and the separately written final message.
+    if (event.type === 'turn.completed' && !codexUsageUnavailable) {
+      const line = `${JSON.stringify({type: event.type, usage: event.usage})}\n`
+      if (!codexSessionUsage(line).tokens || Buffer.byteLength(codexUsage) + Buffer.byteLength(line) > OUTPUT_MAX_BYTES) {
+        codexUsage = ''
+        codexUsageUnavailable = true
+      } else codexUsage += line
+    }
     const read = readCodexEvent(event)
     if (read.lastMessage !== undefined) codexLastMessage = read.lastMessage
     if (read.threadId && !codexThread) {
@@ -942,6 +957,7 @@ export async function runAction(name: string, action: Action, ctx: RunContext): 
     logPath: log.path,
     stdout: safeStdout,
     stdoutTruncated: outcome.stdoutTruncated,
+    ...(action.type === 'codex' ? {usageStdout: codexUsage} : {}),
     ...(status !== 'success' && outcome.quotaLimit ? {quotaLimit: outcome.quotaLimit} : {}),
   }
 }

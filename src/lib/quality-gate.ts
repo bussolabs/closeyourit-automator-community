@@ -106,7 +106,22 @@ export const GateCheckSchema = z
   .strict()
 export type GateCheck = z.infer<typeof GateCheckSchema>
 
+export const RepositorySetupSchema = z.object({
+  run: z.string().trim().min(1),
+  timeout: TimeoutSchema.default(300),
+  network: z.boolean().default(false),
+}).strict()
+export type RepositorySetup = z.infer<typeof RepositorySetupSchema>
+
+const SharedDirectoriesSchema = z.array(z.string().regex(
+  /^(?!.*(?:^|\/)\.{1,2}(?:\/|$))(?!.*(?:^|\/)\.git(?:\/|$))[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/,
+  'Expected a relative directory without traversal or Git metadata',
+)).refine((dirs) => dirs.every((dir, i) => dirs.every((other, j) =>
+  i === j || (dir !== other && !dir.startsWith(`${other}/`)))), 'Duplicate or overlapping shared directories')
+
 const QualityGateBaseSchema = z.object({
+    setup: RepositorySetupSchema.optional(),
+    shared_directories: SharedDirectoriesSchema.optional(),
     /** Runner prefix common to all checks (Technical analysis: "run with mise"); [] = no wrap. */
     runner: z.array(z.string()).default([...DEFAULT_RUNNER]),
     /** Global timeout (seconds), used by the checks without their own `timeout`. */

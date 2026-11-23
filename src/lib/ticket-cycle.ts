@@ -22,6 +22,7 @@ import {type SupporterRun} from './supporter'
 import {isRuntimeCredentialFailure} from './runtime-failure'
 import {type PreviousReviewFinding} from './ticket-coordinator'
 import {provisionRepoTools, type ToolsOutcome} from './repo-tools'
+import {prepareRepository, RepositorySetupError, type RepositorySetupInput} from './repository-setup'
 import {
   decideVerdict,
   isBlockingSeverity,
@@ -246,7 +247,7 @@ export interface TicketRunLifecycle {
   lastReviewFault?(): ReviewFaultKind | null
   /** Resumes only gate/review already started after a crash, without needlessly relaunching the implementer. */
   resumeAfterInterruption?(signal?: AbortSignal): Promise<TicketRunAfterResult | null>
-  beforeRuntime(): Promise<void>
+  beforeRuntime(signal?: AbortSignal): Promise<void>
   afterRuntime(raw: RunResult, result: AgentRunResult, signal?: AbortSignal): Promise<TicketRunAfterResult>
   block(): Promise<void>
 }
@@ -276,7 +277,8 @@ export interface TicketCycleOptions {
   prepareWorkspace?: (input: PrepareInput) => PrepareResult
   inspectWorkspace?: (input: PrepareInput) => PrepareResult
   /** CYAU-250 — installs the base ref's pinned tools outside the sandbox; never throws. */
-  provisionTools?: (repoPath: string, ref: string) => Promise<ToolsOutcome>
+  provisionTools?: (repoPath: string, ref: string, signal?: AbortSignal) => Promise<ToolsOutcome>
+  prepareRepository?: (input: RepositorySetupInput) => Promise<void>
   checkpointGit?: CheckpointGit
   cycleLimit?: number
   reviewTimeoutMs?: number
@@ -325,11 +327,16 @@ export function loadQualityGateAtRef(cwd: string, ref: string): QualityGateConfi
     encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
   })
   if (base.error || base.status !== 0) throw new Error('ref base del quality gate non attestabile')
+  const listing = spawnSync('git', ['-C', cwd, 'ls-tree', '--name-only', ref, '--', '.closeyourit/quality-gate.yml'], {
+    encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
+  })
+  if (listing.error || listing.status !== 0) throw new RepositorySetupError('configuration', 'Cannot inspect trusted configuration')
+  if (!listing.stdout.trim()) return null
   const result = spawnSync('git', ['-C', cwd, 'show', `${ref}:.closeyourit/quality-gate.yml`], {
     encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
   })
   if (result.error || result.status === null) throw new Error('quality gate del ref base non leggibile')
-  if (result.status !== 0) return null
+  if (result.status !== 0) throw new RepositorySetupError('configuration', 'Cannot read trusted configuration')
   return QualityGateConfigSchema.parse(parseYaml(result.stdout))
 }
 
@@ -543,7 +550,7 @@ function snapshotIdentity(snapshot: ResolvedReviewDiff) {
 export function makeTicketCycleProvider(options: TicketCycleOptions = {}): TicketCycleProvider {
   const prepare = options.prepareWorkspace ?? prepareWorkspace
   const inspect = options.inspectWorkspace ?? inspectWorkspace
-  const provisionTools = options.provisionTools ?? ((repoPath: string, ref: string) => provisionRepoTools(repoPath, ref))
+  const provisionTools = options.provisionTools ?? ((repoPath: string, ref: string, signal?: AbortSignal) => provisionRepoTools(repoPath, ref, {signal}))
   const git = options.checkpointGit ?? defaultCheckpointGit()
   const now = options.now ?? (() => new Date())
   const reviewTimeoutMs = options.reviewTimeoutMs ?? 15 * 60_000
@@ -715,14 +722,15 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
       // CYAU-295 — the phone test takes the same road: a work branch that drops the section cannot switch it off.
       let remoteConfig: Extract<QualityGateConfig, {version: 2}>['remote'] | null = null
       let emulatorConfig: EmulatorTestConfig | null = null
-      if (input.outcomeOwnedByServer) {
+      let trustedGate: QualityGateConfig | null = null
+      {
         try {
-          const trustedGate = loadTrustedGate(prepared.worktreePath, trustedBase)
-          if (trustedGate?.version === 2) remoteConfig = trustedGate.remote
-          if (trustedGate?.emulator) emulatorConfig = trustedGate.emulator
-        } catch {
+          trustedGate = loadTrustedGate(prepared.worktreePath, trustedBase)
+          if (input.outcomeOwnedByServer && trustedGate?.version === 2) remoteConfig = trustedGate.remote
+          if (input.outcomeOwnedByServer && trustedGate?.emulator) emulatorConfig = trustedGate.emulator
+        } catch (error) {
           move('blocked', prepared)
-          throw new Error('quality gate del ramo base non interpretabile (fail-closed)')
+          throw new RepositorySetupError('configuration', error instanceof Error ? error.message : 'Cannot interpret trusted quality gate')
         }
       }
 
@@ -1367,13 +1375,21 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
             postRuntime = null
           }
         },
-        async beforeRuntime() {
+        async beforeRuntime(signal) {
           verifyAgain()
           const phase = currentPhase()
           if (phase !== 'ready' && phase !== 'implementing') {
             throw new Error(`run ${input.runId} non avviabile dalla fase ${phase ?? '∅'}`)
           }
-          await provisionTools(prepared.repoPath, trustedBase)
+          if (signal?.aborted) throw new RepositorySetupError('cancelled', 'Preparation cancelled')
+          const tools = await (signal ? provisionTools(prepared.repoPath, trustedBase, signal) : provisionTools(prepared.repoPath, trustedBase))
+          if (trustedGate?.setup) {
+            if (tools.status === 'failed') throw new RepositorySetupError('installation', tools.detail)
+            await (options.prepareRepository ?? prepareRepository)({
+              repository: input.repository, repoPath: prepared.repoPath, cwd: prepared.worktreePath,
+              trustedBase, setup: trustedGate.setup, directories: trustedGate.shared_directories ?? [], signal,
+            })
+          }
           move('implementing', prepared)
         },
         async afterRuntime(raw, result, signal) {

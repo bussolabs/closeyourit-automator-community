@@ -1463,6 +1463,37 @@ describe('runAction with stream events', () => {
     resultLine,
   ].join('\n') + '\n'
 
+  it('preserves Codex usage and the final answer after tool output exceeds the capture cap', async () => {
+    const usage = {type: 'turn.completed', usage: {input_tokens: 1000, cached_input_tokens: 400, output_tokens: 100}}
+    const final = {type: 'item.completed', item: {type: 'agent_message', text: report}}
+    const stdout = [JSON.stringify({type: 'item.completed', item: {type: 'command_execution',
+      aggregated_output: 'x'.repeat(2 * 1024 * 1024)}}), JSON.stringify(final), JSON.stringify(usage)].join('\n')
+    const {spawn, calls} = makeSpawn({code: 0, stdout})
+    const result = await runAction('a', action({type: 'codex', run: 'work'}), ctx(spawn))
+    expect(calls[0].args).toContain('--json')
+    expect(result.status).toBe('success')
+    expect(result.stdoutTruncated).toBe(false)
+    expect(result.stdout).toBe(report)
+    expect(result.usageStdout).toContain(JSON.stringify(usage))
+    expect(normalizeAgentResult({runtime: 'codex', action: 'a', result}).summary).toBe('added the scope')
+    expect(fs.readFileSync(result.logPath, 'utf8')).toContain('command_execution')
+    expect(fs.readFileSync(result.logPath, 'utf8')).toContain('aggregated_output')
+  })
+
+  it('keeps a near-limit final answer readable with usage stored separately', async () => {
+    const text = '"'.repeat(1024 * 1024 - 100)
+    const usage = {type: 'turn.completed', usage: {input_tokens: 1, cached_input_tokens: 0, output_tokens: 1}}
+    const {spawn} = makeSpawn({code: 0, stdout: JSON.stringify(usage) + '\n'})
+    const withFile: SpawnFn = (cmd, args, options) => {
+      fs.writeFileSync(args[args.indexOf('--output-last-message') + 1], text)
+      return spawn(cmd, args, options)
+    }
+    const result = await runAction('a', action({type: 'codex', run: 'work'}), ctx(withFile))
+    expect(result.stdout).toBe(text)
+    expect(result.stdoutTruncated).toBe(false)
+    expect(result.usageStdout).toContain(JSON.stringify(usage))
+  })
+
   it('keeps the json output and argv when nobody asks for events', async () => {
     const {spawn, calls} = makeSpawn({code: 0, stdout: resultLine})
     await runAction('a', action({type: 'claude', run: 'ciao'}), ctx(spawn))
@@ -1606,6 +1637,18 @@ describe('runAction with a Codex conversation', () => {
     const log = fs.readFileSync(outcome.logPath, 'utf8')
     expect(log).toContain('thread.started')
     expect(log).toContain(result)
+  })
+
+  it('omits resumed totals without a baseline rather than charging historical tokens again', async () => {
+    const usage = {type: 'turn.completed', usage: {input_tokens: 17, cached_input_tokens: 5, output_tokens: 3}}
+    for (const mode of ['new', 'resume'] as const) {
+      const {spawn} = codexSpawn(events([
+        {type: 'thread.started', thread_id: threadId}, usage,
+      ]), result)
+      const outcome = await run(spawn, {conversation: {mode, id: threadId}})
+      expect(outcome.usageStdout).toBe(mode === 'resume' ? '' : JSON.stringify(usage) + '\n')
+      expect(outcome.stdout).toBe(result)
+    }
   })
 
   it('without the file, the last agent message is the result', async () => {

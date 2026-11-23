@@ -155,6 +155,7 @@ describe('buildCodexArgv in skill-mode', () => {
     const argv = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined, {resolvePath: (p) => p})
 
     expect(argv.slice(0, 7)).toEqual(['--ask-for-approval', 'never', '--dangerously-bypass-hook-trust', 'exec', '--json', '--ignore-user-config', '--ignore-rules'])
+    expect(argv.filter((arg) => arg === '--json')).toHaveLength(1)
     expect(argv).toContain('features.hooks=true')
     expect(argv).toContain('features.network_proxy=true')
     expect(argv).toContain('default_permissions="automator"')

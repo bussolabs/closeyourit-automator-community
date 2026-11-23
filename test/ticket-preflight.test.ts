@@ -3107,6 +3107,14 @@ describe('ticket state and attempt counter — CYAU-155', () => {
     expect(JSON.stringify(result.audit)).toContain('"state":"failed"')
   })
 
+  it('records a Codex estimate in both ticket cost counters', async () => {
+    const dir = attemptsDir()
+    const result = await queuePreflight(triageCandidate, {attempts: {dir}})('worker', claudeAction, queueTarget)
+    result.ticketAttempt?.recordSessionCost(JSON.stringify({type: 'turn.completed',
+      usage: {input_tokens: 1000, cached_input_tokens: 400, output_tokens: 100}}), 'gpt-6-astra')
+    expect(readTicketAttempts('CYAU', 'CYAU-34', dir).record).toMatchObject({cost: 0.0114, total_cost: 0.0114})
+  })
+
   it('unreadable counter and a Retry after the damage: file set aside, the ticket restarts with the count at one', async () => {
     const dir = attemptsDir()
     const file = ticketAttemptsPath('CYAU', 'CYAU-34', dir)
