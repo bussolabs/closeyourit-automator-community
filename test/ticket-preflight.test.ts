@@ -2387,6 +2387,53 @@ describe('preflight ticket lease', () => {
     expect(store.remove).toHaveBeenCalledTimes(1)
   })
 
+  it('CYAU-312: the persisted lease names the process holding the work, and renewals keep it', async () => {
+    const client = {
+      acquireLease: vi.fn(async (request: {ticket: string; host_id: string; run_id: string}) => ({
+        outcome: 'acquired' as const,
+        lease: {ticket: request.ticket, host_id: request.host_id, run_id: request.run_id, expires_at: '2026-07-14T11:00:00Z'},
+      })),
+      renewLease: vi.fn(async (request: {ticket: string; host_id: string; run_id: string}) => ({
+        outcome: 'renewed' as const,
+        lease: {ticket: request.ticket, host_id: request.host_id, run_id: request.run_id, expires_at: '2026-07-14T12:00:00Z'},
+      })),
+      releaseLease: vi.fn(async () => true),
+    }
+    const store = {save: vi.fn(), update: vi.fn(), remove: vi.fn()}
+    const provider = makeTicketLeaseProvider(
+      {sync: {}, host: {id: 'host-1', token: 'cyi_ah_valid'}} as Secrets,
+      {client, store, runId: () => 'run-1', now: () => instant, ttlSeconds: 30, leaseOwner: () => ({owner_pid: 4321, owner_identity: 'linux:77'})},
+    )
+
+    const acquired = await provider.acquire('worker', ticket)
+    if (acquired.outcome !== 'acquired') throw new Error('lease non acquisito')
+    expect(store.save).toHaveBeenCalledWith(expect.objectContaining({owner_pid: 4321, owner_identity: 'linux:77'}))
+    await acquired.lease.renew()
+    expect(store.update).toHaveBeenCalledWith(expect.objectContaining({owner_pid: 4321, owner_identity: 'linux:77'}))
+    await acquired.lease.release()
+  })
+
+  it('CYAU-312: by default the owner is the current process', async () => {
+    const client = {
+      acquireLease: vi.fn(async (request: {ticket: string; host_id: string; run_id: string}) => ({
+        outcome: 'acquired' as const,
+        lease: {ticket: request.ticket, host_id: request.host_id, run_id: request.run_id, expires_at: '2026-07-14T11:00:00Z'},
+      })),
+      renewLease: vi.fn(async () => ({outcome: 'renewed' as const, lease: null})),
+      releaseLease: vi.fn(async () => true),
+    }
+    const store = {save: vi.fn(), update: vi.fn(), remove: vi.fn()}
+    const provider = makeTicketLeaseProvider(
+      {sync: {}, host: {id: 'host-1', token: 'cyi_ah_valid'}} as Secrets,
+      {client, store, runId: () => 'run-1', now: () => instant, ttlSeconds: 30},
+    )
+
+    const acquired = await provider.acquire('worker', ticket)
+    if (acquired.outcome !== 'acquired') throw new Error('lease non acquisito')
+    expect(store.save).toHaveBeenCalledWith(expect.objectContaining({owner_pid: process.pid, owner_identity: expect.any(String)}))
+    await acquired.lease.release()
+  })
+
   it('held lease blocks without creating a local record', async () => {
     const store = {save: vi.fn(), update: vi.fn(), remove: vi.fn()}
     const provider = makeTicketLeaseProvider(

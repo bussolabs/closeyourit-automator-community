@@ -6,8 +6,11 @@ import {
   buildLeaseRequest,
   buildRenewRequest,
   buildReleaseRequest,
+  currentLeaseOwner,
   DEFAULT_LEASE_TTL_SECONDS,
   fileLeaseStore,
+  isLeaseOwnerDead,
+  leaseOwnerState,
   type LeaseRecord,
   type LeaseStore,
   leasePath,
@@ -303,15 +306,20 @@ function memStore(initial: LeaseRecord[] = []): LeaseStore & {records: Map<strin
 }
 
 /** Renewal client with fixed or ticket-dependent outcome; counts the calls. */
-function stubRenew(outcome: LeaseRenewResult | ((ticket: string) => LeaseRenewResult)) {
+function stubRenew(outcome: LeaseRenewResult | ((ticket: string) => LeaseRenewResult), releaseOk = true) {
   const tickets: string[] = []
-  const client: Pick<AutomatorClient, 'renewLease'> = {
+  const released: string[] = []
+  const client: Pick<AutomatorClient, 'renewLease' | 'releaseLease'> = {
     renewLease: vi.fn(async (req) => {
       tickets.push(req.ticket)
       return typeof outcome === 'function' ? outcome(req.ticket) : outcome
     }),
+    releaseLease: vi.fn(async (req) => {
+      released.push(`${req.ticket}/${req.host_id}/${req.run_id}`)
+      return releaseOk
+    }),
   }
-  return {client, tickets}
+  return {client, tickets, released}
 }
 
 const fixedNow = (): Date => new Date('2026-07-12T14:30:00.000Z')
@@ -414,7 +422,7 @@ describe('renewActiveLeases', () => {
     const store = memStore([])
     const {client, tickets} = stubRenew({outcome: 'renewed', lease: null})
     const result = await renewActiveLeases(client, store, 'h1', fixedNow)
-    expect(result).toEqual({renewed: [], lost: [], errored: []})
+    expect(result).toEqual({renewed: [], lost: [], released: [], errored: []})
     expect(tickets).toEqual([])
   })
 
@@ -427,6 +435,131 @@ describe('renewActiveLeases', () => {
     })
     await renewActiveLeases(client, fileLeaseStore(dir), 'h1', fixedNow)
     expect(readLease('CYAU-13', dir)!.expires_at).toBe('2026-07-12T17:00:00.000Z')
+  })
+})
+
+// ── CYAU-312: the owner process of a lease ─────────────────────────────────────────────────────────────────
+// A pid well above any pid_max: kill(pid, 0) answers ESRCH, so the owner is provably gone.
+const GONE_PID = 2_147_483_000
+
+describe('lease owner (CYAU-312)', () => {
+  it('the owner fields survive the round-trip on disk', () => {
+    const dir = freshDir()
+    saveLease(record({owner_pid: 1234, owner_identity: 'linux:999'}), dir)
+    expect(readLease('CYAU-13', dir)).toEqual(record({owner_pid: 1234, owner_identity: 'linux:999'}))
+  })
+
+  it('a record written by the previous version (no owner) is still read, without owner', () => {
+    const dir = freshDir()
+    saveLease(record(), dir)
+    const read = readLease('CYAU-13', dir)!
+    expect(read.owner_pid).toBeUndefined()
+    expect(read.owner_identity).toBeUndefined()
+  })
+
+  it('half or malformed owner on disk → discarded as a whole, the lease stays readable', () => {
+    const dir = freshDir()
+    fs.writeFileSync(path.join(dir, 'CYAU-13.json'), JSON.stringify({...record(), owner_pid: -3, owner_identity: 'linux:1'}))
+    fs.writeFileSync(path.join(dir, 'CYAU-14.json'), JSON.stringify({...record({ticket: 'CYAU-14'}), owner_pid: 77}))
+    expect(readLease('CYAU-13', dir)?.owner_pid).toBeUndefined()
+    expect(readLease('CYAU-14', dir)?.owner_pid).toBeUndefined()
+    expect(readLease('CYAU-14', dir)?.ticket).toBe('CYAU-14')
+  })
+
+  it('currentLeaseOwner names this process with its start identity; nothing when it cannot be read', () => {
+    expect(currentLeaseOwner(() => 'linux:55')).toEqual({owner_pid: process.pid, owner_identity: 'linux:55'})
+    expect(currentLeaseOwner(() => null)).toEqual({})
+  })
+
+  it('leaseOwnerState: none / alive / dead / reused pid / unreadable', () => {
+    const owned = record({owner_pid: 500, owner_identity: 'linux:10'})
+    expect(leaseOwnerState(record())).toBe('none')
+    expect(leaseOwnerState(owned, {exists: () => true, identify: () => 'linux:10'})).toBe('alive')
+    expect(leaseOwnerState(owned, {exists: () => false, identify: () => 'linux:10'})).toBe('dead')
+    expect(leaseOwnerState(owned, {exists: () => true, identify: () => 'linux:11'})).toBe('dead') // pid reused
+    expect(leaseOwnerState(owned, {exists: () => true, identify: () => null})).toBe('unknown')
+    expect(leaseOwnerState(owned, {exists: () => null})).toBe('unknown')
+    const broken = (): boolean => {
+      throw new Error('probe rotto')
+    }
+    expect(leaseOwnerState(owned, {exists: broken})).toBe('unknown')
+  })
+
+  it('real probe: the current process is alive, a pid that does not exist is dead', () => {
+    const self = record(currentLeaseOwner())
+    expect(isLeaseOwnerDead(self)).toBe(false)
+    expect(isLeaseOwnerDead(record({owner_pid: GONE_PID, owner_identity: 'linux:1'}))).toBe(true)
+  })
+})
+
+describe('renewActiveLeases with the lease owner (CYAU-312)', () => {
+  it('dead owner (service stopped mid-run) → released to the server and local file removed, not renewed', async () => {
+    const dir = freshDir()
+    saveLease(record({owner_pid: GONE_PID, owner_identity: 'linux:1'}), dir)
+    const {client, tickets, released} = stubRenew({outcome: 'renewed', lease: null})
+    const result = await renewActiveLeases(client, fileLeaseStore(dir), 'h1', fixedNow)
+    expect(result.released).toEqual(['CYAU-13'])
+    expect(result.renewed).toEqual([])
+    expect(tickets).toEqual([]) // never renewed
+    expect(released).toEqual(['CYAU-13/h1/run-42'])
+    expect(readLease('CYAU-13', dir)).toBeNull()
+  })
+
+  it('live owner of the current service → renewed as before, nothing released', async () => {
+    const store = memStore([record(currentLeaseOwner())])
+    const {client, tickets, released} = stubRenew({outcome: 'renewed', lease: null})
+    const result = await renewActiveLeases(client, store, 'h1', fixedNow)
+    expect(result.renewed).toEqual(['CYAU-13'])
+    expect(tickets).toEqual(['CYAU-13'])
+    expect(released).toEqual([])
+  })
+
+  it('lease taken from the CLI (no owner) → renewed as before', async () => {
+    const store = memStore([record()])
+    const {client, released} = stubRenew({outcome: 'renewed', lease: null})
+    const result = await renewActiveLeases(client, store, 'h1', fixedNow)
+    expect(result.renewed).toEqual(['CYAU-13'])
+    expect(released).toEqual([])
+    expect(store.records.has('CYAU-13')).toBe(true)
+  })
+
+  it('same pid reused by a process with another start → considered dead and released', async () => {
+    const store = memStore([record({owner_pid: process.pid, owner_identity: 'linux:not-this-start'})])
+    const {client, tickets, released} = stubRenew({outcome: 'renewed', lease: null})
+    const result = await renewActiveLeases(client, store, 'h1', fixedNow)
+    expect(result.released).toEqual(['CYAU-13'])
+    expect(tickets).toEqual([])
+    expect(released).toEqual(['CYAU-13/h1/run-42'])
+    expect(store.records.has('CYAU-13')).toBe(false)
+  })
+
+  it('owner not readable → renewed as before (a live run is never given back by mistake)', async () => {
+    const store = memStore([record({owner_pid: 500, owner_identity: 'linux:10'})])
+    const {client, released} = stubRenew({outcome: 'renewed', lease: null})
+    const unreadable = (lease: LeaseRecord): boolean => isLeaseOwnerDead(lease, {exists: () => true, identify: () => null})
+    const result = await renewActiveLeases(client, store, 'h1', fixedNow, unreadable)
+    expect(result.renewed).toEqual(['CYAU-13'])
+    expect(released).toEqual([])
+  })
+
+  it('dead owner but the release does not go through → file kept, retried at the next beat', async () => {
+    const store = memStore([record({owner_pid: GONE_PID, owner_identity: 'linux:1'})])
+    const {client, tickets} = stubRenew({outcome: 'renewed', lease: null}, false)
+    const result = await renewActiveLeases(client, store, 'h1', fixedNow)
+    expect(result.errored).toEqual(['CYAU-13'])
+    expect(tickets).toEqual([]) // still not renewed
+    expect(store.records.has('CYAU-13')).toBe(true)
+  })
+
+  it('a dead lease does not stop the others from being renewed', async () => {
+    const store = memStore([
+      record({ticket: 'CYAU-13', owner_pid: GONE_PID, owner_identity: 'linux:1'}),
+      record({ticket: 'CYAU-14', run_id: 'run-77'}),
+    ])
+    const {client} = stubRenew({outcome: 'renewed', lease: null})
+    const result = await renewActiveLeases(client, store, 'h1', fixedNow)
+    expect(result.released).toEqual(['CYAU-13'])
+    expect(result.renewed).toEqual(['CYAU-14'])
   })
 })
 

@@ -198,6 +198,19 @@ describe('readHostActivity', () => {
     expect(activity.active_runs[0].runtime).toBe('codex')
   })
 
+  it('CYAU-312: leaves out the leases whose owner process is dead', () => {
+    const activity = readHostActivity(
+      {host: {id: 'h1', token: 't'}},
+      {
+        leases: () => [lease({ticket: 'CYAU-1', run_id: 'run-1'}), lease({ticket: 'CYAU-2', run_id: 'run-2'})],
+        readRunById: () => null,
+        now: () => NOW,
+        ownerDead: (l) => l.run_id === 'run-2',
+      },
+    )
+    expect(activity.active_runs.map((r) => r.ticket)).toEqual(['CYAU-1'])
+  })
+
   describe('lettura reale dallo state dir', () => {
     let stateDir: string
     const savedEnv = {...process.env}

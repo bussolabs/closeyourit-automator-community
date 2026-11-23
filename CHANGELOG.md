@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.68.1] - 2026-11-23
+
+### Fixed
+
+- **Le prenotazioni di una lavorazione interrotta non restano appese.** Ogni prenotazione presa dal servizio ricorda il processo che la detiene. Se il servizio si ferma di colpo e riparte, al primo battito la prenotazione rimasta viene restituita e il suo file cancellato, invece di essere rinnovata per sempre; intanto non occupa un posto di lavoro e non compare nel pannello. Le prenotazioni prese a mano e quelle scritte dalla versione precedente si rinnovano come prima. (CYAU-312)
+
 ## [0.68.0] - 2026-11-23
 
 ### Added

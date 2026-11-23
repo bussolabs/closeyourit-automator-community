@@ -6,7 +6,7 @@ import {z} from 'zod'
 import {leaseHealth} from './activity'
 import {hasOperationalHostIdentity, type Secrets} from './config'
 import {type FetchFn} from './heartbeat'
-import {type LeaseRecord} from './lease'
+import {isLeaseOwnerDead, type LeaseRecord} from './lease'
 import {policyCachePath, usageDir} from './paths'
 import {isSafeRunId, writeAtomicJson} from './state'
 import {AutomatorError, ErrorCodes} from '../errors/error-codes'
@@ -230,10 +230,16 @@ export function failClosedDecision(mode: LimitsMode, scope: LimitsScope | null =
 /**
  * Number of occupied slots = LIVE leases of this host. An expired one (`expired`) is a run no longer alive (recovery),
  * it does not occupy a slot; an unknown expiry (`unknown`) is conservatively counted (it occupies until it is known to
- * have expired). `hostId` null = no identity filter (counts all live leases).
+ * have expired). A lease whose owner process is provably dead (CYAU-312) is a run that no longer exists: it does not
+ * occupy a slot either, even before the beat releases it. `hostId` null = no identity filter (counts all live leases).
  */
-export function countRunningLeases(leases: LeaseRecord[], hostId: string | null, now: Date): number {
-  return leases.filter((l) => (hostId === null || l.host_id === hostId) && leaseHealth(l.expires_at, now) !== 'expired').length
+export function countRunningLeases(
+  leases: LeaseRecord[],
+  hostId: string | null,
+  now: Date,
+  ownerDead: (lease: LeaseRecord) => boolean = (lease) => isLeaseOwnerDead(lease),
+): number {
+  return leases.filter((l) => (hostId === null || l.host_id === hostId) && leaseHealth(l.expires_at, now) !== 'expired' && !ownerDead(l)).length
 }
 
 // ── Local policy cache (fail-closed) ─────────────────────────────────────────────────────────────────

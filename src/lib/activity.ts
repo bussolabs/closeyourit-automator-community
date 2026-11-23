@@ -1,5 +1,5 @@
 import {type Secrets} from './config'
-import {type LeaseRecord, listLeases} from './lease'
+import {isLeaseOwnerDead, type LeaseRecord, listLeases} from './lease'
 import {isSilent, type PulseStepKind, pulsePath, readPulse, type SessionPulse, silentSeconds} from './session-pulse'
 import {readRun, type RunRecord, runPath} from './state'
 import {latestRunPhase, type RunPhase} from './state-machine'
@@ -169,6 +169,7 @@ export interface ReadActivityDeps {
   readRunById?: (runId: string) => RunRecord | null
   readPulseByRunId?: (runId: string) => SessionPulse | null
   now?: () => Date
+  ownerDead?: (lease: LeaseRecord) => boolean
 }
 
 /** Reads a run-id's run from the state dir; missing/hostile run-id or unreadable file → `null`. */
@@ -207,14 +208,16 @@ function readPulses(leases: LeaseRecord[], read: (runId: string) => SessionPulse
  * Activity snapshot read from the state dir: the active leases + their runs. `hostId` from `secrets.host.id`
  * (filters out the stale leases of an old identity). BEST-EFFORT: any I/O error degrades to `IDLE_ACTIVITY`
  * → it must never fail the heartbeat (consistent with the beat swallowing network errors). Recomputed at EVERY
- * beat (the state changes): it must NOT be memoized like the static capabilities.
+ * beat (the state changes): it must NOT be memoized like the static capabilities. A lease whose owner process is
+ * provably dead (CYAU-312) is not an active run: it is left out, the beat releases it.
  */
 export function readHostActivity(secrets: Secrets, deps: ReadActivityDeps = {}): HostActivity {
   try {
     const list = deps.leases ?? (() => listLeases())
     const readById = deps.readRunById ?? defaultReadRunById
     const now = (deps.now ?? (() => new Date()))()
-    const leases = list()
+    const ownerDead = deps.ownerDead ?? ((lease: LeaseRecord) => isLeaseOwnerDead(lease))
+    const leases = list().filter((lease) => !ownerDead(lease))
     const runs: RunRecord[] = []
     for (const lease of leases) {
       const run = readById(lease.run_id)

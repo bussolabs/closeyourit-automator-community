@@ -34,6 +34,7 @@ import {
   buildLeaseRequest,
   buildReleaseRequest,
   buildRenewRequest,
+  currentLeaseOwner,
   DEFAULT_LEASE_TTL_SECONDS,
   listLeases,
   removeLeaseIfHeld,
@@ -256,6 +257,7 @@ export interface TicketLeaseProviderOptions {
   runsBase?: string
   worktreesBase?: string
   adoptRun?: (input: TicketRunAdoptionInput) => unknown
+  leaseOwner?: () => Pick<LeaseRecord, 'owner_pid' | 'owner_identity'>
 }
 
 function enrichTicketAction(action: Action, result: TicketPreflightResult, imagesSection?: string): Action {
@@ -1061,6 +1063,7 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
   const nextRunId = options.runId ?? randomUUID
   const ttlSeconds = options.ttlSeconds ?? DEFAULT_LEASE_TTL_SECONDS
   const adoptRun = options.adoptRun ?? adoptRecoverableTicketRun
+  const leaseOwner = options.leaseOwner ?? (() => currentLeaseOwner())
   const store: TicketLeaseStore = options.store ?? {
     save: (lease) => saveLease(lease),
     update: (lease) => void saveLeaseIfHeld(lease),
@@ -1136,6 +1139,8 @@ export function makeTicketLeaseProvider(secrets: Secrets, options: TicketLeasePr
       expires_at: remote.expires_at,
       acquired_at: at,
       updated_at: at,
+      // CYAU-312: the process doing the work, so the beat can tell a lease left behind by a dead run.
+      ...leaseOwner(),
     }
     try {
       store.save(record)

@@ -3,6 +3,7 @@ import * as path from 'node:path'
 import {type AutomatorClient, type LeaseReleaseRequest, type LeaseRenewRequest, type LeaseRequest, makeClient} from './client'
 import {hasOperationalHostIdentity, type Secrets} from './config'
 import {type FetchFn} from './heartbeat'
+import {lockProcessIdentity, type ProcessIdentity} from './directory-lock'
 import {leasesDir} from './paths'
 import {type AtomicFileOptions, isRecord, isSafeRunId, mutateJsonFileAtomically} from './state'
 import {AutomatorError, ErrorCodes} from '../errors/error-codes'
@@ -102,6 +103,10 @@ export interface LeaseRecord {
   expires_at: string | null // expiry from the SERVER (null if not exposed at acquisition time)
   acquired_at: string // ISO 8601 of the acquisition
   updated_at: string // ISO 8601 of the last renewal/acquisition
+  // CYAU-312: the process holding the work (pid + start identity, as the directory locks do). Absent on leases
+  // taken by hand from the CLI and on records written by earlier versions: those are renewed as before.
+  owner_pid?: number
+  owner_identity?: string
 }
 
 /** Path of a lease file: `<leasesDir>/<ticket>.json`. Validates the ticket as a segment (never path traversal). */
@@ -127,7 +132,70 @@ function coerceLease(value: unknown): LeaseRecord | null {
     expires_at: typeof value.expires_at === 'string' ? value.expires_at : null,
     acquired_at: typeof value.acquired_at === 'string' ? value.acquired_at : '',
     updated_at: typeof value.updated_at === 'string' ? value.updated_at : '',
+    ...coerceOwner(value.owner_pid, value.owner_identity),
   }
+}
+
+/** The owner is kept only when both fields are valid: half an owner cannot prove anything. */
+function coerceOwner(pid: unknown, identity: unknown): Pick<LeaseRecord, 'owner_pid' | 'owner_identity'> {
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return {}
+  if (typeof identity !== 'string' || identity === '') return {}
+  return {owner_pid: pid, owner_identity: identity}
+}
+
+// ── Owner of a lease (CYAU-312) ───────────────────────────────────────────────────────────────────────────────
+// A lease whose holding process died (daemon killed mid-run, host rebooted) used to be renewed forever by the next
+// daemon's beat and counted as an occupied slot. The record now names its owner; a dead owner means the work is gone.
+
+/** Owner fields for a lease held by the CURRENT process; `{}` when its start identity is not readable. */
+export function currentLeaseOwner(identify: ProcessIdentity = lockProcessIdentity): Pick<LeaseRecord, 'owner_pid' | 'owner_identity'> {
+  const identity = identify(process.pid)
+  return identity ? {owner_pid: process.pid, owner_identity: identity} : {}
+}
+
+/**
+ * State of a lease's owner: `none` (no owner recorded: manual lease or older record), `alive`, `dead` (pid gone, or
+ * reused by a process with a different start), `unknown` (the probe could not read it). Only `dead` is proof.
+ */
+export type LeaseOwnerState = 'none' | 'alive' | 'dead' | 'unknown'
+
+/** `true` = the pid exists, `false` = it does not, `null` = cannot tell. */
+export type PidExists = (pid: number) => boolean | null
+
+function defaultPidExists(pid: number): boolean | null {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return false
+    return code === 'EPERM' ? true : null
+  }
+}
+
+export interface LeaseOwnerProbe {
+  exists?: PidExists
+  identify?: ProcessIdentity
+}
+
+export function leaseOwnerState(lease: LeaseRecord, probe: LeaseOwnerProbe = {}): LeaseOwnerState {
+  if (lease.owner_pid === undefined || lease.owner_identity === undefined) return 'none'
+  try {
+    const exists = (probe.exists ?? defaultPidExists)(lease.owner_pid)
+    if (exists === false) return 'dead'
+    if (exists === null) return 'unknown'
+    const current = (probe.identify ?? lockProcessIdentity)(lease.owner_pid)
+    // Identity not readable while the pid exists: no proof of reuse → keep treating it as alive (R-1).
+    if (current === null) return 'unknown'
+    return current === lease.owner_identity ? 'alive' : 'dead'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** `true` ONLY with proof that the owner is gone: a missing owner or an unreadable probe never count as dead. */
+export function isLeaseOwnerDead(lease: LeaseRecord, probe: LeaseOwnerProbe = {}): boolean {
+  return leaseOwnerState(lease, probe) === 'dead'
 }
 
 /** Reads a lease file from the given path; missing/corrupt/malformed → null (never crashes). */
@@ -225,8 +293,9 @@ export function removeLeaseIfHeld(
 
 // ── Renewal of the active leases in the host beat (CYAU-14) ─────────────────────────────────────────────
 // While the host is alive, at every beat it renews the leases it holds → they stay its own. If the host dies the beats
-// stop, nobody renews and the server expires the lease (→ ticket "recovery required", server-side). On a
-// lost/expired lease the worktree is NOT touched nor the unpushed work reassigned: we only stop
+// stop, nobody renews and the server expires the lease (→ ticket "recovery required", server-side). When only the
+// daemon dies, systemd restarts it and the beats resume: a lease whose owner process is gone (CYAU-312) is then
+// released to the server and its file removed, instead of being renewed forever. On a lost/expired lease the worktree is NOT touched nor the unpushed work reassigned: we only stop
 // renewing it, the recovery is a server/human decision.
 
 // Store of the active leases used by the renewal round, which works on a potentially stale snapshot (`list`):
@@ -249,10 +318,11 @@ export function fileLeaseStore(dir: string = leasesDir()): LeaseStore {
   }
 }
 
-/** Outcome of a renewal round: tickets renewed, lost/expired (removed), in transient error (kept). */
+/** Outcome of a renewal round: tickets renewed, lost/expired (removed), released (dead owner), in transient error (kept). */
 export interface RenewLeasesResult {
   renewed: string[]
   lost: string[]
+  released: string[]
   errored: string[]
 }
 
@@ -262,21 +332,37 @@ export interface RenewLeasesResult {
  * - renewed → updates expires_at (owner unchanged) and updated_at, ONLY if still ours (compare-and-set);
  * - held/expired → removes the local file (no longer ours / expired), ONLY if still ours: stops renewing it;
  * - error (network) → KEEPS the file: a network blip must not lose the lease, retry at the next beat.
+ * Before renewing, a lease whose owner process is provably dead is released to the server and its file removed
+ * (CYAU-312); if the release does not go through, the file is kept and the release retried at the next beat.
+ * Leases without an owner (manual, older records) and owners that cannot be read are renewed as before.
  * The writes are compare-and-set by run_id: `list` is a snapshot and in the meantime the ticket may have been
  * released or re-acquired (new run_id) → never overwrite/delete the new run's lease.
  */
 export async function renewActiveLeases(
-  client: Pick<AutomatorClient, 'renewLease'>,
+  client: Pick<AutomatorClient, 'renewLease' | 'releaseLease'>,
   store: LeaseStore,
   hostId: string,
   now: () => Date,
+  ownerDead: (lease: LeaseRecord) => boolean = (lease) => isLeaseOwnerDead(lease),
 ): Promise<RenewLeasesResult> {
-  const result: RenewLeasesResult = {renewed: [], lost: [], errored: []}
+  const result: RenewLeasesResult = {renewed: [], lost: [], released: [], errored: []}
   for (const lease of store.list()) {
     try {
       // Renews only the leases of THIS host identity: a stale file of another identity (after a
       // re-registration) must be left to expire server-side, not renewed with the current identity.
       if (lease.host_id !== hostId) continue
+      if (ownerDead(lease)) {
+        const released = await client.releaseLease(buildReleaseRequest({ticket: lease.ticket, hostId, runId: lease.run_id}))
+        if (released) {
+          store.remove(lease)
+          result.released.push(lease.ticket)
+        } else {
+          result.errored.push(lease.ticket)
+        }
+
+        continue
+      }
+
       const req = buildRenewRequest({ticket: lease.ticket, hostId, runId: lease.run_id, ttlSeconds: lease.ttl_seconds})
       const res = await client.renewLease(req)
       if (res.outcome === 'renewed') {

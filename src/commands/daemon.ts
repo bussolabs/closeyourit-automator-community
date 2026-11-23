@@ -92,7 +92,9 @@ export default class Daemon extends BaseCommand {
       label: 'automator',
       secrets: secretCapabilities(secrets),
       // Host beat: monitor heartbeat + renewal of the active leases (while the host is alive its leases
-      // stay its own; if it dies, the beats stop and the server expires them → recovery) + reconciliation of the
+      // stay its own; if it dies, the beats stop and the server expires them → recovery; if only the daemon dies,
+      // systemd restarts it and the beats go on, so a lease whose owner process is gone is released instead of
+      // renewed, CYAU-312) + reconciliation of the
       // skill bundle with the server pin (CYAU-129: without it, the bundle only arrived by hand and never updated).
       heartbeat: combineBeats(
         // CYAU-305: the beat writes the engines the server declares, the claim below reads the same list.

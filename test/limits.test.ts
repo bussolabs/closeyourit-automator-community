@@ -774,6 +774,20 @@ describe('countRunningLeases (slot occupati)', () => {
     const leases = [lease({host_id: 'h1'}), lease({ticket: 'X', host_id: 'h2'})]
     expect(countRunningLeases(leases, null, NOW)).toBe(2)
   })
+
+  it('CYAU-312: a lease whose owner process is dead frees its slot (limit 1 → room for a new ticket)', () => {
+    const leases = [lease({ticket: 'DEAD', owner_pid: 4242, owner_identity: 'linux:1'})]
+    const dead = (l: LeaseRecord): boolean => l.ticket === 'DEAD'
+    expect(countRunningLeases(leases, 'h1', NOW, dead)).toBe(0)
+  })
+
+  it('CYAU-312: by default only a provably dead owner frees the slot (no owner / live owner still count)', () => {
+    const leases = [
+      lease({ticket: 'MANUAL'}), // no owner: manual lease or older record → counts as before
+      lease({ticket: 'GONE', owner_pid: 2_147_483_000, owner_identity: 'linux:1'}), // pid that does not exist
+    ]
+    expect(countRunningLeases(leases, 'h1', NOW)).toBe(1)
+  })
 })
 
 describe('resolveLimitsPolicy (server → cache → none, updates the cache)', () => {
