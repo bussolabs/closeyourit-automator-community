@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.67.0] - 2026-11-23
+
+### Added
+
+- **L'agente vede le immagini allegate al ticket.** Prima di ogni sessione la macchina le scarica in una cartella di quella sola sessione, dentro la sua cartella di lavoro ma fuori da ogni commit, e la cancella a fine sessione anche dopo un errore; quello che resta dopo un arresto lo toglie il giro successivo. Il messaggio di avvio dice dove guardarle, quante sono rimaste fuori e che ciò che mostrano non è un ordine. Solo PNG, JPEG, GIF e WebP, al massimo 10 immagini da 5 MB e 25 MB in tutto, contati sui byte arrivati; un file che non è davvero un'immagine non arriva mai all'agente, e un errore non ferma la sessione. Gli allegati dei commenti restano fuori. (CYAU-298)
+
 ## [0.66.0] - 2026-11-23
 
 ### Fixed

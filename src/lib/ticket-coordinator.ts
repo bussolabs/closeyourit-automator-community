@@ -85,6 +85,8 @@ export interface ApprovedSibling {
 
 export interface TicketDetail extends TicketContent {
   project: string
+  /** CYAU-298 — the project's server id, needed to read the ticket's attachments. Missing = no images downloaded. */
+  projectId?: string
   code: string
   /** Trusted base branch from the sync queue; missing on legacy servers/CLIs. */
   defaultBranch?: string

@@ -468,6 +468,8 @@ const MANAGED_IGNORE_PATTERNS: readonly string[] = [
   'node_modules/',
   '/.venv/',
   '__pycache__/',
+  // CYAU-298 — the ticket's images the machine downloads for the session (`ticket-images.ts`): never part of the work.
+  '/.closeyourit-images/',
 ]
 const MANAGED_IGNORE_BEGIN = '# >>> closeyourit-automator (CYAU-142) — dependency install output, non committare >>>'
 const MANAGED_IGNORE_END = '# <<< closeyourit-automator (CYAU-142) <<<'

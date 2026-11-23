@@ -418,6 +418,16 @@ insufficiente interrompe la preparazione con un errore, senza avviare l'agente.
   Un conteggio illeggibile ferma il ticket con un solo commento sul ticket: lo sblocca «Riprova», che mette il
   file da parte (`<file>.corrupt-<stamp>`) e fa ripartire il conteggio da uno; la spesa già registrata resta
   solo nel file messo da parte. `automator activity` lo mostra come «conteggio illeggibile».
+- Le **immagini allegate** al ticket arrivano all'agente (CYAU-298); quelle dei commenti restano fuori. Prima di
+  ogni sessione la macchina le scarica con la chiave del service account in una cartella di quella sola sessione,
+  `.closeyourit-images/<ticket>.<pid>.<casuale>/` nella cartella di lavoro (il worktree per chi scrive, la copia
+  del progetto per chi legge). Il nome è nell'elenco gestito dei file ignorati, la revisione lo salta, e la
+  cartella si cancella a fine azione in ogni caso; quello che resta dopo un arresto lo toglie la preparazione
+  successiva (stesso ticket, o processo che non c'è più). Ogni file passa prima da una cartella privata fuori
+  dallo spazio dell'agente: tipo dichiarato dall'elenco e dallo scaricamento, primi byte e peso reale si
+  controllano lì, e solo un'immagine vera viene spostata. Solo PNG, JPEG, GIF e WebP (SVG escluso), al massimo 10
+  immagini da 5 MB e 25 MB in tutto, contati sui byte arrivati. Il messaggio di avvio elenca i file, dice quante
+  immagini sono rimaste fuori e perché, e dichiara non fidato ciò che mostrano. Un errore non ferma la sessione.
 - Un **limite di quota** di Claude o Codex è una pausa, non un fallimento (CYAU-275). L'ora di ripresa si legge
   esclusivamente dallo stesso errore strutturato del motore (30 minuti se manca o non è utilizzabile), mai
   dal testo del ticket, dai risultati degli strumenti o dai log mescolati (CYAU-317). Sono riconosciuti

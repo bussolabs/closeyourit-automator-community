@@ -469,7 +469,7 @@ export async function resolveReviewDiff(
     // and a copy of the tree kept there (a conflict round does it) carries the repository's own .gitignore files.
     const untrackedIgnoreFiles = await snapshotGit([
       'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.gitignore', ':(glob)**/.gitignore',
-      ':(exclude).closeyourit/session', ':(exclude).pnpm-store',
+      ':(exclude).closeyourit/session', ':(exclude).pnpm-store', ':(exclude).closeyourit-images',
     ])
     // A .gitignore inside a folder the repository already ignores hides nothing more: Git never reads it while
     // walking the tree. That is what python -m venv, pytest and ruff write in .venv/, .pytest_cache/, .ruff_cache/.
@@ -487,8 +487,10 @@ export async function resolveReviewDiff(
     // which no target repository ignores: it is never part of the work, so it stays out of the check (CYRA-877).
     // CYRA-1197 — the same for .pnpm-store, the package cache pnpm writes in the project when the sandbox cannot
     // write the global one: a cache, never part of the work.
+    // CYAU-298 — the same for .closeyourit-images, the ticket's images the machine downloads for the session: the
+    // review runs before the session's folder is removed, and this temporary gitdir does not read the managed ignore.
     const statusArgs = ['status', '--porcelain=v2', '-z', '--untracked-files=normal', '--ignore-submodules=none',
-      '--', '.', ':(exclude).closeyourit/session', ':(exclude).pnpm-store']
+      '--', '.', ':(exclude).closeyourit/session', ':(exclude).pnpm-store', ':(exclude).closeyourit-images']
     const statusBefore = (await snapshotGit(statusArgs)).toString('latin1')
     const statusEntriesBefore = statusBefore.split('\0')
     if (hasDirtyIgnoreEntries(statusEntriesBefore)) {

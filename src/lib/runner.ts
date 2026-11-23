@@ -142,6 +142,11 @@ export interface ActionPreflightDecision {
   workflowDelivery?: WorkflowDelivery
   /** Per-ticket counter already incremented by the preflight (CYAU-155): the real session spend arrives here. */
   ticketAttempt?: TicketAttemptSink
+  /**
+   * CYAU-298 — removes the files the preflight prepared for the session (the ticket's images). The runner calls it
+   * once the action is over, on every way out — success, failure, stop or exception. Never throws.
+   */
+  disposeSessionFiles?: () => void
 }
 
 /**
@@ -737,7 +742,22 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
     // extracted from the body of the serial `for` so the dispatch can compose it both in series (prompt mode,
     // UNCHANGED) and inside `runFlowPool` (skill-mode). Returns 'continue' (move to the next) or 'stop' (stop
     // the dispatch: shutdown or lost lease) — the former `continue`/`break` of the loop. Closes over `executed`/`preflightStopped`/`state`.
-    const dispatchDueEntry = async ({name, action, queueClaim}: DueEntry): Promise<'continue' | 'stop'> => {
+    // CYAU-298 — what the preflight prepared for the session is removed once the action is over, on every way out.
+    const dispatchDueEntry = async (entry: DueEntry): Promise<'continue' | 'stop'> => {
+      const sessionEnd: Array<() => void> = []
+      try {
+        return await dispatchDueEntryOnce(entry, sessionEnd)
+      } finally {
+        for (const dispose of sessionEnd) {
+          try {
+            dispose()
+          } catch {
+            // A folder left behind is removed by the next preparation in the same workspace.
+          }
+        }
+      }
+    }
+    const dispatchDueEntryOnce = async ({name, action, queueClaim}: DueEntry, sessionEnd: Array<() => void>): Promise<'continue' | 'stop'> => {
       // Cancellation (shutdown): skip the actions not yet started. The running action has already been killed
       // by the signal in the executor; here we only avoid starting the next ones. CYAU-169: if the dispatch
       // had already claimed a ticket, it must be given back — nobody will work on it in this round.
@@ -784,6 +804,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             audit: [{phase: 'preflight', state: 'failed', reason: 'preflight non completabile (fail-closed)'}],
           }
         }
+        if (decision.disposeSessionFiles) sessionEnd.push(decision.disposeSessionFiles)
         if (decision.outcome === 'stop') {
           // CYAU-169: the ticket claimed by the dispatch goes back to the queue if it is not worked on. The release belongs
           // to WHOEVER TOOK IT — here — and not to the gate: a gate that did not cooperate (or a path that stops

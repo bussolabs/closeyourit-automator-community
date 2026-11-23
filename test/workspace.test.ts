@@ -258,7 +258,8 @@ describe('composeManagedIgnore (CYAU-142)', () => {
   const END = '# <<< closeyourit-automator (CYAU-142) <<<'
   // Only unambiguous patterns: never names a project could version as source (no /gems/,
   // /cache/, /specifications/, /extensions/ — they would hide new legitimate files in same-named dirs).
-  const patterns = ['/.bundle/', '/vendor/bundle/', 'node_modules/', '__pycache__/', '*.gem']
+  // CYAU-298 — plus the folder of the ticket's images the machine downloads for the session.
+  const patterns = ['/.bundle/', '/vendor/bundle/', 'node_modules/', '__pycache__/', '*.gem', '/.closeyourit-images/']
 
   it('on missing file composes the managed block with the unambiguous dependency-install patterns', () => {
     const {content, changed} = composeManagedIgnore(null)

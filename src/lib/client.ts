@@ -584,7 +584,119 @@ function httpFailure(status: number): HostCallResult<never> {
   return {outcome: 'unavailable'}
 }
 
-export function makeClient(cfg: SyncConfig, fetchFn: FetchFn = globalThis.fetch, hostToken?: string, registrationToken?: string): RecoverableAutomatorClient {
+/**
+ * CYAU-298 — a file attached to the ticket itself (the files of its comments stay out). Only what the server declares
+ * about it is kept: the original name is written by whoever uploaded the file, and it never reaches the session.
+ */
+export interface TicketFileEntry {
+  id: string
+  contentType: string
+  byteSize: number
+}
+
+export interface TicketFileList {
+  files: TicketFileEntry[]
+  /** Rows that break the list contract (no id, no type, no valid size): never downloaded, but counted. */
+  malformed: number
+}
+
+export interface TicketFileDownload {
+  stream: ReadableStream<Uint8Array>
+  /** The type the download declares, lower case and without parameters; `null` when it declares none. */
+  contentType: string | null
+  /** The size the download declares; `null` when it declares none or an unreadable one. */
+  contentLength: number | null
+}
+
+export interface TicketFilesClient {
+  /** The ticket's own attachments. `null` = the list could not be read, or does not have the expected shape. */
+  listTicketFiles(projectId: string, ticket: string): Promise<TicketFileList | null>
+  /** The file's bytes, one chunk at a time. `null` = no usable response. */
+  openTicketFile(projectId: string, ticket: string, fileId: string, signal: AbortSignal): Promise<TicketFileDownload | null>
+}
+
+/** Attachment pages read at most (100 each): past that the list is cut, the images found so far are enough. */
+const MAX_ATTACHMENT_PAGES = 5
+
+function ticketFileEntry(value: unknown): TicketFileEntry | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Record<string, unknown>
+  const id = typeof row.id === 'number' ? String(row.id) : row.id
+  if (!nonEmpty(id) || typeof row.content_type !== 'string') return null
+  if (typeof row.byte_size !== 'number' || !Number.isSafeInteger(row.byte_size) || row.byte_size < 0) return null
+  const contentType = row.content_type.split(';')[0].trim().toLowerCase()
+  return {id, contentType, byteSize: row.byte_size}
+}
+
+/**
+ * CYAU-298 — the ticket's attachments, read with the machine's service account key (`cyi_u_`): the host key
+ * (`cyi_ah_`) has no route to them, while reading and downloading a ticket's files is open to whoever can see it.
+ * The routes and the shape are the ones `cyi tickets attachments` and `cyi tickets attachment-download` use
+ * (`/cli/v1`): a `data` list of `{id, filename, content_type, byte_size}` paged by `meta.total_pages`, and a binary
+ * download that may redirect to the storage — where `fetch` drops the key, because the host changes. Without a
+ * valid key every call answers "not readable".
+ */
+export function makeTicketFilesClient(apiUrl: string | undefined, userToken: string | undefined, fetchFn: FetchFn = globalThis.fetch): TicketFilesClient {
+  const base = apiUrl ?? DEFAULT_API
+  const headers = isUserToken(userToken) ? {Authorization: `Bearer ${userToken}`, Accept: 'application/json'} : null
+  const ticketPath = (projectId: string, ticket: string) =>
+    `${base}/cli/v1/projects/${encodeURIComponent(projectId)}/tickets/${encodeURIComponent(ticket)}`
+
+  return {
+    async listTicketFiles(projectId, ticket) {
+      if (!headers) return null
+      try {
+        const list: TicketFileList = {files: [], malformed: 0}
+        let page = 1
+        let totalPages = 1
+        do {
+          const res = await fetchFn(`${ticketPath(projectId, ticket)}/attachments?page=${page}&per=100`, {
+            method: 'GET', headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          })
+          if (!res.ok) return null
+          const body = await res.json().catch(() => null) as {data?: unknown; meta?: {total_pages?: unknown}} | null
+          if (!body || typeof body !== 'object' || !Array.isArray(body.data)) return null
+          for (const row of body.data) {
+            const entry = ticketFileEntry(row)
+            if (entry) list.files.push(entry)
+            else list.malformed += 1
+          }
+          const pages = body.meta?.total_pages ?? 1
+          totalPages = typeof pages === 'number' && Number.isSafeInteger(pages) ? Math.min(pages, MAX_ATTACHMENT_PAGES) : 1
+          page += 1
+        } while (page <= totalPages)
+        return list
+      } catch {
+        return null
+      }
+    },
+
+    async openTicketFile(projectId, ticket, fileId, signal) {
+      if (!headers) return null
+      try {
+        const res = await fetchFn(`${ticketPath(projectId, ticket)}/attachments/${encodeURIComponent(fileId)}/download`, {
+          method: 'GET', headers: {Authorization: headers.Authorization, Accept: '*/*'}, redirect: 'follow', signal,
+        })
+        if (res.status !== 200 || !res.body) {
+          await res.body?.cancel().catch(() => undefined)
+          return null
+        }
+        const declaredType = res.headers.get('content-type')
+        const declaredLength = res.headers.get('content-length')
+        const length = declaredLength !== null && /^\d+$/u.test(declaredLength.trim()) ? Number(declaredLength.trim()) : null
+        return {
+          stream: res.body,
+          contentType: declaredType ? declaredType.split(';')[0].trim().toLowerCase() : null,
+          contentLength: length !== null && Number.isSafeInteger(length) ? length : null,
+        }
+      } catch {
+        return null
+      }
+    },
+  }
+}
+
+export function makeClient(cfg: SyncConfig,fetchFn: FetchFn = globalThis.fetch, hostToken?: string, registrationToken?: string): RecoverableAutomatorClient {
   const base = cfg.apiUrl ?? DEFAULT_API
   const json = 'application/json'
   // registerHost creates the host: the machine presents itself with the token of ITS service account (cyi_u_, the identity

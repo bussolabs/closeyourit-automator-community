@@ -380,6 +380,66 @@ describe('runOnce', () => {
     expect(result.executed.map((entry) => [entry.name, entry.status])).toContainEqual(['fast', 'success'])
   })
 
+  // CYAU-298 — the files the preflight prepared for the session (the ticket's images) go when the action is over.
+  describe('session files', () => {
+    it('are removed once, after the session has run', async () => {
+      const p = paths()
+      saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
+      const steps: string[] = []
+      const runtime: AgentRuntime = {
+        id: 'fake',
+        healthCheck: async () => ({available: true}),
+        execute: () => {
+          steps.push('session')
+          return {
+            result: Promise.resolve({status: 'success' as const, exitCode: 0, errorCode: null, durationMs: 1, logPath: '/x', stdout: ''}),
+            cancel: () => undefined,
+          }
+        },
+      }
+      await runOnce({
+        playbook, playbookDir: dir, now, ...p, runtime,
+        preflight: async (_name, action) => ({
+          outcome: 'admit', state: 'ready', reason: 'ok', audit: [], action: {...action, run: 'work'},
+          disposeSessionFiles: () => steps.push('dispose'),
+        }),
+      })
+      expect(steps).toEqual(['session', 'dispose'])
+    })
+
+    it('are removed too when the action stops before the session', async () => {
+      const p = paths()
+      saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
+      const dispose = vi.fn()
+      const block = vi.fn(async () => undefined)
+      const result = await runOnce({
+        playbook, playbookDir: dir, now, ...p, spawn: spawnWith(0),
+        // A ticket run without a lease is refused before the runtime.
+        preflight: async () => ({
+          outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+          ticketRun: {runId: 'r', branch: 'ticket/CYAU-298', authorizedCwd: dir, beforeRuntime: vi.fn(), afterRuntime: vi.fn(), block},
+          disposeSessionFiles: dispose,
+        }),
+      })
+      expect(result.preflightStopped.map((entry) => entry.reason)).toContain('ciclo ticket privo di lease valido (fail-closed)')
+      expect(block).toHaveBeenCalled()
+      expect(dispose).toHaveBeenCalledTimes(1)
+    })
+
+    it('a removal that throws does not change the outcome of the run', async () => {
+      const p = paths()
+      saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
+      const result = await runOnce({
+        playbook, playbookDir: dir, now, ...p, spawn: spawnWith(0),
+        preflight: async () => ({
+          outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+          disposeSessionFiles: () => { throw new Error('disco pieno') },
+        }),
+      })
+      expect(result.executed.map((entry) => [entry.name, entry.status])).toContainEqual(['fast', 'success'])
+    })
+  })
+
   it('throwing preflight → stops fail-closed without exposing the error', async () => {
     const p = paths()
     saveState(p.stateFile, updateAction(emptyState(), 'fast', {last_run: '2026-07-07T09:00:00.000Z'}))
