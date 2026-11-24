@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.69.2] - 2026-11-24
+
+### Fixed
+
+- **Una fascia notturna con giorni scelti vale per il giorno in cui inizia.** Con la fascia dal lunedì al venerdì dalle 20 alle 6, la macchina lavora anche il sabato alle 2, perché è ancora la notte di venerdì, e non lavora il lunedì alle 2, perché è la notte di domenica. Le fasce dentro la stessa giornata restano come prima. Chi aveva aggiunto giorni per compensare il vecchio comportamento vedrà la macchina lavorare una notte in più: conviene ricontrollare i giorni delle fasce notturne. (CYAU-319)
+
 ## [0.69.1] - 2026-11-23
 
 ### Fixed

@@ -76,6 +76,17 @@ describe('isWithinSchedule', () => {
     expect(isWithinSchedule([{days: [2], start: '08:00', end: '18:00'}], NOW)).toBe(false)
   })
 
+  it('CYAU-319: a window crossing midnight belongs to the day it starts (Mon–Fri 20:00–06:00)', () => {
+    const weeknights = [{days: [1, 2, 3, 4, 5], start: '20:00', end: '06:00'}]
+    // After midnight the previous day counts: Saturday 02:00 is still Friday night, Monday 02:00 is Sunday night.
+    expect(isWithinSchedule(weeknights, new Date('2026-07-18T02:00:00.000Z'))).toBe(true) // Saturday
+    expect(isWithinSchedule(weeknights, new Date('2026-07-13T02:00:00.000Z'))).toBe(false) // Monday
+    expect(isWithinSchedule(weeknights, new Date('2026-07-19T02:00:00.000Z'))).toBe(false) // Sunday
+    // Before midnight the current day counts.
+    expect(isWithinSchedule(weeknights, new Date('2026-07-17T23:00:00.000Z'))).toBe(true) // Friday
+    expect(isWithinSchedule(weeknights, new Date('2026-07-18T23:00:00.000Z'))).toBe(false) // Saturday
+  })
+
   it('multiple windows: it is enough that one contains now', () => {
     const windows = [
       {start: '00:00', end: '06:00'},

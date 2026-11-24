@@ -37,6 +37,7 @@ const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
 const ScheduleWindowSchema = z
   .object({
     // Allowed days of the week, 0=Sunday..6=Saturday (UTC). Missing/empty = every day.
+    // A window crossing midnight belongs to the day it starts.
     days: z.array(z.number().int().min(0).max(6)).optional(),
     start: z.string().regex(HHMM), // "HH:MM" UTC (inclusive)
     end: z.string().regex(HHMM), // "HH:MM" UTC (exclusive); start > end crosses midnight
@@ -79,15 +80,20 @@ function minutesFromHm(hm: string): number | null {
   return h * 60 + min
 }
 
-/** true if `now` (UTC) falls in a single window: allowed day AND time in [start, end) (with midnight wrap). */
+/**
+ * true if `now` (UTC) falls in a single window: allowed day AND time in [start, end) (with midnight wrap).
+ * A window crossing midnight belongs to the day it starts: after midnight the day checked is the previous one.
+ */
 function isWithinWindow(window: ScheduleWindow, now: Date): boolean {
-  if (window.days && window.days.length > 0 && !window.days.includes(now.getUTCDay())) return false
   const start = minutesFromHm(window.start)
   const end = minutesFromHm(window.end)
   if (start === null || end === null) return false
   const t = now.getUTCHours() * 60 + now.getUTCMinutes()
   // start <= end: window within the same day; start > end: window crossing midnight.
-  return start <= end ? t >= start && t < end : t >= start || t < end
+  const crossing = start > end
+  const day = crossing && t < end ? (now.getUTCDay() + 6) % 7 : now.getUTCDay()
+  if (window.days && window.days.length > 0 && !window.days.includes(day)) return false
+  return crossing ? t >= start || t < end : t >= start && t < end
 }
 
 /** true if `now` is inside at least one window. Missing/empty → no time restriction (always allowed). */
