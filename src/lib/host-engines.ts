@@ -58,7 +58,10 @@ export function enginesInUse(engines: HostEngines | null): Map<RuntimeId, Engine
 
 /** The last list the server sent, shared by the beat that writes it and the claim that reads it. */
 export interface HostEnginesStore {
-  /** Replaces the list: `null` clears it, so a bad or failed beat never leaves an older list alive. */
+  /**
+   * Replaces the list: `null` clears it, so a rejected, bad or broken beat never leaves an older list alive. A beat
+   * lost to a network error does not call it (CYAU-348): the older list then lives only until the TTL from `at`.
+   */
   replace(engines: HostEngines | null, at?: Date): void
   /** The list, or `null` when there is none or it is older than the TTL. */
   current(now?: Date): HostEngines | null

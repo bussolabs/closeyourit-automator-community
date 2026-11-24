@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.69.1] - 2026-11-23
+
+### Fixed
+
+- **Un battito perso per la rete non cancella più i motori in uso.** Prima un solo errore di rete faceva dimenticare alla macchina quali motori usa, e allora controllava la quota di entrambi: un motore esaurito che non usa poteva fermarla. Ora l'ultimo elenco ricevuto resta valido fino a 5 minuti dall'ultimo battito accettato. Un rifiuto del server, una risposta senza elenco o con nomi sconosciuti e un guasto prima dell'invio lo cancellano ancora. (CYAU-348)
+
 ## [0.68.1] - 2026-11-23
 
 ### Fixed

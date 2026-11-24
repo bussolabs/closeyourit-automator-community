@@ -189,10 +189,12 @@ const ERROR_CODE = /^[A-Z][A-Z0-9-]{2,39}$/
 /**
  * `rejection` is `null` when the server accepted the beat, otherwise a short reason without secrets (CYAU-247).
  * `body` is the accepted response, `null` when unreadable: untrusted input, each reader validates its own field.
+ * `networkError` is `true` only when the request got no answer at all (CYAU-348): the server said nothing new.
  */
 interface BeatOutcome {
   rejection: string | null
   body: unknown
+  networkError: boolean
 }
 
 async function postHeartbeat(
@@ -202,7 +204,7 @@ async function postHeartbeat(
   capabilities: BeatPayload | ReducedHangPayload | undefined,
   fetchFn: FetchFn,
 ): Promise<BeatOutcome> {
-  if (!isHostToken(hostToken)) return {rejection: 'no valid host token', body: null}
+  if (!isHostToken(hostToken)) return {rejection: 'no valid host token', body: null, networkError: false}
   const url = `${cfg.apiUrl ?? DEFAULT_API}/api/v1/projects/${cfg.projectId}/crons/${cfg.slug}/check_in`
   let res: Response
   try {
@@ -220,12 +222,12 @@ async function postHeartbeat(
       }),
     })
   } catch {
-    return {rejection: 'network error', body: null}
+    return {rejection: 'network error', body: null, networkError: true}
   }
   const body = (await Promise.resolve().then(() => res.json()).catch(() => null)) as unknown
-  if (res.ok) return {rejection: null, body}
+  if (res.ok) return {rejection: null, body, networkError: false}
   const code = (body as {error?: {code?: unknown}} | null)?.error?.code
-  return {rejection: typeof code === 'string' && ERROR_CODE.test(code) ? `HTTP ${res.status} ${code}` : `HTTP ${res.status}`, body: null}
+  return {rejection: typeof code === 'string' && ERROR_CODE.test(code) ? `HTTP ${res.status} ${code}` : `HTTP ${res.status}`, body: null, networkError: false}
 }
 
 interface ReducedHangPayload {
@@ -271,7 +273,9 @@ export interface HeartbeatOptions {
   agentQuota?: () => AgentQuotaReport[]
   /**
    * CYAU-305: where the engines the server declares in the response are kept, for the claim to read. Every beat
-   * replaces the list; a rejected, failed or unreadable beat clears it. Default: the process-wide list.
+   * replaces the list; a rejected, failed or unreadable beat clears it. A beat lost to a network error leaves it as
+   * it is, with its original time, so it still expires 5 minutes after the last accepted beat (CYAU-348).
+   * Default: the process-wide list.
    */
   engines?: HostEnginesStore
   /** CYAU-304: the current machine name, read at every beat. Default `os.hostname()`; injectable in tests. */
@@ -329,7 +333,7 @@ export function makeHeartbeat(secrets: Secrets, opts: HeartbeatOptions = {}): ((
     else opts.log?.('heartbeat accepted again by CloseYourIt')
     lastRejection = rejection
   }
-  const beat = async (ok: boolean, stops: PreflightStop[] | undefined): Promise<HostEngines | null> => {
+  const beat = async (ok: boolean, stops: PreflightStop[] | undefined): Promise<{engines: HostEngines | null; networkError: boolean}> => {
     // `stops` undefined = the caller does not wire it (or no round completed yet) → field omitted (backward compat).
     // An array (even empty) is instead an observed fact: `[]` explicitly says "no recent block", so
     // the panel can clear a no longer current reason instead of showing a stale one.
@@ -352,15 +356,20 @@ export function makeHeartbeat(secrets: Secrets, opts: HeartbeatOptions = {}): ((
     const hostname = readHostname(opts.hostname)
     const outcome = await postHeartbeat(cfg, secrets.host.token, ok, {...capabilities, ...(hostname ? {hostname} : {}), runtimes, ...activity(), ...lastStops, ...quota, ...(hang ? {hang} : {})}, opts.fetchFn ?? globalThis.fetch)
     report(outcome.rejection)
-    return outcome.rejection === null ? parseHostEngines(outcome.body) : null
+    return {engines: outcome.rejection === null ? parseHostEngines(outcome.body) : null, networkError: outcome.networkError}
   }
   return async (ok, stops) => {
     // CYAU-305: whatever happens in the beat, it decides the list — a throw clears it like a rejection.
+    // CYAU-348: except a beat that never reached the server — it brings no news about the engines, so the last list
+    // stays, and its TTL keeps counting from the last accepted beat.
     let declared: HostEngines | null = null
+    let networkError = false
     try {
-      declared = await beat(ok, stops)
+      const outcome = await beat(ok, stops)
+      declared = outcome.engines
+      networkError = outcome.networkError
     } finally {
-      engines.replace(declared)
+      if (!networkError) engines.replace(declared)
     }
   }
 }

@@ -2894,12 +2894,13 @@ describe('makeQueueClaimer — CYAU-169', () => {
       await expect(withServer(() => m.claimer(target))).resolves.toMatchObject({outcome: 'unready'})
     })
 
-    it('scenario 7: a valid beat all on Codex, then a failed one → both checked', async () => {
+    it('scenario 7: a valid beat all on Codex, then one lost to the network → the list holds, Codex only (CYAU-348)', async () => {
       const m = machine({paused: ['claude']})
       await m.beatWith({data: {engines: allCodex}})
       await expect(withServer(() => m.claimer(target))).resolves.toEqual({outcome: 'empty'})
       await m.beatWith('network-error')
-      await expect(withServer(() => m.claimer(target))).resolves.toMatchObject({outcome: 'unready'})
+      await expect(withServer(() => m.claimer(target))).resolves.toEqual({outcome: 'empty'})
+      expect(m.checkRuntimes).toHaveBeenLastCalledWith(['codex'])
     })
 
     it('scenario 8: a list older than five minutes no longer narrows the check', async () => {

@@ -532,12 +532,22 @@ describe('makeHeartbeat — engines in use', () => {
     expect(engines.current()).toBeNull()
   })
 
-  it('a valid beat followed by a failed one clears the list', async () => {
+  // CYAU-348: a network error brings no news about the engines → the last list stays until its TTL.
+  it('a valid beat followed by a network error keeps the list', async () => {
     const {hb, engines} = beatWith([{ok: true, status: 202, body: {data: {engines: allCodex}}}, 'network-error'])
     await hb(true)
     expect(engines.current()).toEqual(allCodex)
     await hb(true)
-    expect(engines.current()).toBeNull()
+    expect(engines.current()).toEqual(allCodex)
+  })
+
+  it('a list kept through network errors expires 5 minutes after the last accepted beat', async () => {
+    const {hb, engines} = beatWith([{ok: true, status: 202, body: {data: {engines: allCodex}}}, 'network-error', 'network-error'])
+    await hb(true)
+    await hb(true)
+    await hb(true)
+    expect(engines.current()).toEqual(allCodex)
+    expect(engines.current(new Date(Date.now() + 5 * 60_000))).toBeNull()
   })
 
   it('a valid beat followed by a rejected one clears the list, even if the rejection carries engines', async () => {

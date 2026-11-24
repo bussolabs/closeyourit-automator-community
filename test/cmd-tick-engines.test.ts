@@ -109,11 +109,19 @@ describe('tick — engines in use before the claim', () => {
   })
 
   it('the beat at the end of the round is the same one and replaces the list again', async () => {
-    replies = [{engines: allCodex}, 'network-error']
+    replies = [{engines: allCodex}, {engines: null}]
     await run(Tick, [])
     expect(seenAtIteration).toEqual(allCodex)
     await iteration!.heartbeat!(true, [])
     expect(events).toEqual(['beat', 'iteration', 'beat'])
     expect(hostEngines.current()).toBeNull()
+  })
+
+  it('a beat at the end of the round lost to the network keeps the list (CYAU-348)', async () => {
+    replies = [{engines: allCodex}, 'network-error']
+    await run(Tick, [])
+    await iteration!.heartbeat!(true, [])
+    expect(events).toEqual(['beat', 'iteration', 'beat'])
+    expect(hostEngines.current()).toEqual(allCodex)
   })
 })
