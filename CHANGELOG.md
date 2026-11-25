@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.69.3] - 2026-11-25
+
+### Changed
+
+- **Nel giro dei conflitti l'agente può sistemare anche un file vicino.** Se per tenere insieme le due modifiche serve un file fuori dal conflitto, la macchina gli dice di fare il cambio minimo e di dichiararlo. Prima il messaggio lo vietava e il lavoro si fermava.
+
 ## [0.69.2] - 2026-11-24
 
 ### Fixed

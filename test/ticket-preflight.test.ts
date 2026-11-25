@@ -679,6 +679,10 @@ describe('buildTicketPreflight — wiring operativo daemon/tick', () => {
     expect(result.outcome).toBe('admit')
     const run = result.action?.run ?? ''
     expect(run).toContain('# Risoluzione di un conflitto con main')
+    // CYAU-350 — the round may change a file outside the conflict when both intents need it, and declares it.
+    expect(run).not.toContain('cambia soltanto i file in conflitto')
+    expect(run).toContain('fuori dai file in conflitto fai solo il cambio minimo')
+    expect(run).toContain('dichiara ogni file in più')
     expect(run).toContain('sync-main.sh --resolve')
     expect(run).toContain('# Piano approvato dal CTO')
   })

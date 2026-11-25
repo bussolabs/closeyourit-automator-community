@@ -755,10 +755,11 @@ function siblingsMaterial(siblings: ApprovedSibling[] | undefined): string[] {
 /**
  * CYAU-300 — the server marks the round that resolves a code conflict with main the previous round stopped on. The
  * order is trusted (it comes from the server, not from the ticket) and travels with the approved plan.
+ * CYAU-350 — the round may make the smallest change outside the conflicted files, declared in the report.
  */
 const CONFLICT_RESOLUTION_SECTION = [
   '# Risoluzione di un conflitto con main',
-  'Il giro precedente si è fermato su un conflitto di codice con main. Questo giro serve solo a risolverlo: porta dentro main con `sync-main.sh --resolve`, cambia soltanto i file in conflitto tenendo l\'intento di entrambe le parti, poi gate, commit e consegna.',
+  'Il giro precedente si è fermato su un conflitto di codice con main. Questo giro serve solo a risolverlo: porta dentro main con `sync-main.sh --resolve`, risolvi i file in conflitto tenendo l\'intento di entrambe le parti, poi gate, commit e consegna. Se per tenerle insieme serve altro (codice che chiama o è chiamato da quello unito, test rotti dall\'unione), fuori dai file in conflitto fai solo il cambio minimo e dichiara ogni file in più con il motivo nel resoconto e nella proposta.',
   'Non rifare il lavoro del ticket. Se le due parti non possono stare insieme, fermati come `blocked` con `merge_conflict` e spiega cosa chiede ciascuna: decide una persona.',
 ].join('\n\n')
 
