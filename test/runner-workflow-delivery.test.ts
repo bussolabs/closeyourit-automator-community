@@ -557,7 +557,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
           contract_version: 2, code: 'CYAU-192', state: 'blocked', security_findings: [],
           failure: {
             category: 'unknown', retryable: true,
-            summary: expect.stringMatching(/^Risultato non interpretabile: review\.verdict: .*'git_auth'/u),
+            summary: expect.stringMatching(/^Risultato non interpretabile: review\.verdict: .*received "git_auth"/u),
             human_action: 'Se si ripete, rileggere le istruzioni della skill: il modello non ha rispettato il formato del risultato',
           },
         },
@@ -586,7 +586,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
       expect(log).toContain('# delivery: ok')
       expect(log).toContain('# error_code: C422-WORKFLOW-001')
       expect(log).toContain('# synthetic_result: blocked')
-      expect(log).toMatch(/# issues: review\.verdict: .*'git_auth'/u)
+      expect(log).toMatch(/# issues: review\.verdict: .*received "git_auth"/u)
       expect(log).toContain('# ---- risultato non interpretabile (fase autopilot) ----')
       expect(log).not.toContain(token)
     })
@@ -623,7 +623,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
       })
       expect(deliver.mock.calls[0][0].result).toMatchObject({
         code: 'CYRA-199', state: 'escalated', causa: 'unreachable', requires_human_approval: true,
-        reasons: [expect.stringMatching(/^Risultato non interpretabile: category: .*'frontend'/u)],
+        reasons: [expect.stringMatching(/^Risultato non interpretabile: category: .*received "frontend"/u)],
       })
     })
 

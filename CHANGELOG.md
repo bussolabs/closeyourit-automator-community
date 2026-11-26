@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.69.4] - 2026-11-26
+
+### Security
+
+- **Corretta una vulnerabilità nella libreria che controlla la forma dei dati.** La libreria passa alla versione 4, che chiude il difetto segnalato; configurazioni e risultati delle fasi sono accettati come prima, e un risultato rifiutato mostra ancora il campo e il valore sbagliato. (CYAU-269)
+
 ## [0.69.3] - 2026-11-25
 
 ### Changed

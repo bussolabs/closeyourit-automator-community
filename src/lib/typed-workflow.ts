@@ -622,11 +622,30 @@ function schemaFor(candidate: Record<string, unknown>, phase: ExecutionPhase): z
   return null
 }
 
-// Zod 4 no longer names the received value in an enum issue: the rejection reason must keep it
-// (it tells the agent which invented value was refused), so it is added from `reportInput`.
-const formatIssue = (issue: z.ZodIssue): string => {
-  const received = issue.code === 'invalid_value' && typeof issue.input === 'string' ? `, received '${issue.input}'` : ''
-  return `${issue.path.length === 0 ? '(root)' : issue.path.join('.')}: ${issue.message}${received}`
+/** Value found at `path` inside the candidate; `undefined` when the path leaves the object. */
+function valueAt(input: unknown, path: readonly PropertyKey[]): unknown {
+  let current = input
+  for (const key of path) {
+    if (typeof current !== 'object' || current === null || !Object.hasOwn(current, key)) return undefined
+    current = (current as Record<PropertyKey, unknown>)[key]
+  }
+  return current
+}
+
+/**
+ * CYAU-269: zod 4 no longer writes the received value of an enum/literal mismatch ("Invalid option: expected one
+ * of …"), and that value is what tells the server WHY a result was rejected (`git_auth` instead of a category).
+ * It is taken back from the candidate itself, only when the message does not already carry it.
+ */
+function formatIssue(issue: z.ZodIssue, input: unknown): string {
+  const where = issue.path.length === 0 ? '(root)' : issue.path.join('.')
+  if (issue.code !== 'invalid_value') return `${where}: ${issue.message}`
+  const value = valueAt(input, issue.path)
+  // Only scalars: an object in place of an enum is already explained by the path, and could be the whole output.
+  const scalar = value === null || ['string', 'number', 'boolean'].includes(typeof value)
+  const received = scalar ? JSON.stringify(value) : undefined
+  if (received === undefined || issue.message.includes(received)) return `${where}: ${issue.message}`
+  return `${where}: ${issue.message}, received ${received}`
 }
 
 /** What the host measured in the worktree after the session: git knows it, the report may forget it. */
@@ -679,7 +698,7 @@ export function parseWorkflowResultDetailed(stdout: string, phase: ExecutionPhas
     if (schema) {
       const parsed = schema.safeParse(object, {reportInput: true})
       if (parsed.success) return {value: parsed.data as Record<string, unknown>, issues: []}
-      issues = [...new Set(parsed.error.issues.map(formatIssue))]
+      issues = [...new Set(parsed.error.issues.map((issue) => formatIssue(issue, object)))]
     } else {
       issues = [`contract_version: ${JSON.stringify(object.contract_version)} non ammessa per la fase ${phase}`]
     }

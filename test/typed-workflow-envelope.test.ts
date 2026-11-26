@@ -267,7 +267,7 @@ describe('parseWorkflowResultDetailed — the rejection reason, not only the rej
     }
     const detailed = parseWorkflowResultDetailed(`\`\`\`json\n${JSON.stringify(delivered, null, 2)}\n\`\`\``, 'autopilot')
     expect(detailed.value).toBeNull()
-    expect(detailed.issues).toEqual([expect.stringMatching(/^work_report\.acceptance_evidence\.0\.status: .*'pending'/u)])
+    expect(detailed.issues).toEqual([expect.stringMatching(/^work_report\.acceptance_evidence\.0\.status: .*received "pending"/u)])
   })
 
   it('hybrid keys (ticket/branch/pr_url): the missing contract fields, not a generic "invalid"', () => {

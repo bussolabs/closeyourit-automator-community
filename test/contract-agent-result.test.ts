@@ -161,7 +161,7 @@ describe('contract agent-result/v1 — the host synthetic blocked (CYAU-192) val
 
   it.each(cases)('$phase → $definition', ({phase, definition, expected}) => {
     const synthetic = syntheticBlockedResult({
-      phase, code: 'CYRA-199', issues: ['state: Invalid enum value, received \'done\''], stdout: 'Done.',
+      phase, code: 'CYRA-199', issues: ['state: Invalid option: expected one of "blocked"|"escalated", received "done"'], stdout: 'Done.',
     })
     const validate = validatorFor(definition)
     expect(validate(synthetic), JSON.stringify(validate.errors)).toBe(true)

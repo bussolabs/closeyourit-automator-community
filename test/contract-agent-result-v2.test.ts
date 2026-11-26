@@ -161,7 +161,7 @@ describe('contract agent-result/v2', () => {
   ] as Array<[ExecutionPhase, string]>)('the host synthetic blocked for %s validates against %s', (phase, definition) => {
     const synthetic = syntheticBlockedResult({
       phase, code: 'CYRA-660',
-      issues: ['failure.category: Invalid enum value. Expected \'authentication\' | \'unknown\', received \'git_auth\''],
+      issues: ['failure.category: Invalid option: expected one of "authentication"|"unknown", received "git_auth"'],
       stdout: 'prosa e poi {"failure":{"category":"git_auth"}}',
     })
     const validate = ajv.getSchema(`${schema.$id}#/$defs/${definition}`)!
