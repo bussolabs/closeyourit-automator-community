@@ -1571,6 +1571,31 @@ describe('runOnce — the Tester in a delivery (CYAU-329)', () => {
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({tester: block('unavailable')}))
   })
 
+  // CYAU-352 — no local database is a limit of the machine: the reason travels, the work is not sent back.
+  it('does not send the work back for a database proof the machine could not run, and the reason travels', async () => {
+    const summary = 'Il Tester non ha potuto eseguire: DOD-1 (nessun database PostgreSQL locale in /run/postgresql).'
+    const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'unavailable', summary, block: {...block('unavailable'), summary}}))
+    const afterVerificationFailure = vi.fn(async () => ({outcome: 'complete' as const, runStatus: 'failure' as const, errorCode: 'C409-CYCLE-002'}))
+    const deliver = ok()
+
+    await dispatch({stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', verify: passedCi(), tester, afterVerificationFailure, deliver})
+
+    expect(afterVerificationFailure).not.toHaveBeenCalled()
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({tester: expect.objectContaining({status: 'unavailable', summary})}))
+  })
+
+  it('sends the work back when a database proof fails on a machine that has the database', async () => {
+    const summary = 'Il Tester ha visto fallire: DOD-1. Comando: bin/rails test test/models/plan_test.rb → exit 1.'
+    const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'failed', summary, block: block('failed')}))
+    const afterVerificationFailure = vi.fn(async () => ({outcome: 'complete' as const, runStatus: 'failure' as const, errorCode: 'C409-CYCLE-002'}))
+    const deliver = ok()
+
+    await dispatch({stdout: JSON.stringify(AUTOPILOT_RESULT), executionPhase: 'autopilot', verify: passedCi(), tester, afterVerificationFailure, deliver})
+
+    expect(afterVerificationFailure).toHaveBeenCalledWith(summary)
+    expect(deliver).not.toHaveBeenCalled()
+  })
+
   it('delivers without a block when the machine could not run the Tester at all', async () => {
     const tester = vi.fn(async (): Promise<TesterReport> => ({status: 'unavailable', summary: 'bubblewrap non disponibile', block: null}))
     const deliver = ok()

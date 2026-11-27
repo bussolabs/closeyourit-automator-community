@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it} from 'vitest'
-import {evaluateAction, evaluateCommand, productionHosts} from '../src/lib/command-policy'
+import {evaluateAction, evaluateCommand, evaluateDataCommand, productionHosts} from '../src/lib/command-policy'
 import {type Action, PlaybookSchema} from '../src/lib/schema'
 
 const RETIRED_PROVIDER = ['dop', 'pler'].join('')
@@ -206,6 +206,23 @@ describe('evaluateCommand · DB distruttivo', () => {
   it('permette truncate --size', () => expect(evaluateCommand('truncate --size=0 tmp/x.log').allowed).toBe(true))
   it('allows Ruby String#truncate', () =>
     expect(evaluateCommand('bin/rails runner "puts msg.truncate(200)"').allowed).toBe(true))
+})
+
+// CYAU-352 — the Tester's proofs reach the local database: the data rules apply, the Git gate does not.
+describe('evaluateDataCommand', () => {
+  it('refuses what wipes a database or names production, also when quoted', () => {
+    for (const command of ['bin/rails db:drop', 'bin/rails db:schema:load', 'psql -c "DROP DATABASE app"', "psql -c 'TRUNCATE users'",
+      'RAILS_ENV=production bin/rails test', 'kamal app exec bin/rails test', 'bin/rails "db:re""set"']) {
+      expect(evaluateDataCommand(command), command).toMatchObject({allowed: false})
+    }
+  })
+
+  it('lets a proof run the test setup and ask git what changed with three dots', () => {
+    for (const command of ['bin/rails db:test:prepare && bin/rails test test/models', 'git diff --name-only origin/main...HEAD',
+      'bundle exec rspec spec/models/plan_spec.rb', '']) {
+      expect(evaluateDataCommand(command), command).toEqual({allowed: true})
+    }
+  })
 })
 
 describe('evaluateCommand · force-push', () => {

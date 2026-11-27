@@ -226,6 +226,22 @@ function evaluateCloseYourItCli(segment: string): PolicyDecision {
 }
 
 /**
+ * CYAU-352 — production and destructive DB only, the part of `evaluateCommand` that guards data. The Tester runs a
+ * proof command on a machine whose local database answers through its Unix socket: a command that drops, resets or
+ * purges a database, or that names production, is never run there. The Git rules stay out on purpose: a proof may
+ * ask git what changed with `<base>...HEAD`, which the session gate refuses as an expansion.
+ */
+export function evaluateDataCommand(command: string): PolicyDecision {
+  if (command.trim() === '') return {allowed: true}
+  const normalized = normalizeShell(command)
+  const forms = normalized === command ? [command] : [command, normalized]
+  for (const rule of [...PRODUCTION_RULES, ...productionHostRules(productionHosts()), ...DESTRUCTIVE_DB_RULES]) {
+    if (forms.some((form) => rule.re.test(form))) return deny(rule.violation, rule.why)
+  }
+  return {allowed: true}
+}
+
+/**
  * Evaluates a shell COMMAND against the critical protections. Order: production → destructive DB → force-push →
  * protected branch (the first violation wins; force-push takes precedence over protected branch). Fail-open on an
  * empty/whitespace-only string (no command to evaluate). Pure: no I/O, no dependency on the runtime.

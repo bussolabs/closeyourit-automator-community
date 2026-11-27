@@ -3,18 +3,22 @@ import * as path from 'node:path'
 
 import Ajv2020 from 'ajv/dist/2020'
 import {spawnSync} from 'node:child_process'
+import * as net from 'node:net'
 import * as os from 'node:os'
 
 import {describe, expect, it, vi} from 'vitest'
 
-import type {EmulatorIo} from '../src/lib/emulator-test'
+import {BWRAP, composeBuildArgs, defaultEmulatorIo, type EmulatorIo} from '../src/lib/emulator-test'
 
 import {
   buildTesterPrompt,
   defaultTesterIo,
   parseTesterCommands,
+  probeLocalDatabase,
   runTester,
   testerCriteria,
+  testerDatabaseEnvironment,
+  type LocalDatabase,
   type TesterIo,
   type TesterRunOutcome,
 } from '../src/lib/tester'
@@ -32,9 +36,13 @@ function outcome(code: number | null, extra: Partial<TesterRunOutcome> = {}): Te
   return {code, timedOut: false, stderr: '', ...extra}
 }
 
+const NO_DATABASE: LocalDatabase = {available: false, socketDir: null, port: null, detail: 'nessun database PostgreSQL locale in /run/postgresql'}
+const DATABASE: LocalDatabase = {available: true, socketDir: '/run/postgresql', port: 5432, detail: 'il server risponde sul socket /run/postgresql/.s.PGSQL.5432'}
+
 function fakeIo(overrides: Partial<TesterIo> = {}): TesterIo {
   return {
     available: async () => ({available: true}),
+    database: async () => NO_DATABASE,
     headCommit: () => HEAD,
     changedFiles: () => [],
     context: () => 'Base branch: origin/main',
@@ -137,11 +145,12 @@ describe('runTester', () => {
     const passed = await runTester({...base, askCommands: async () => bothCommands}, fakeIo())
     const failed = await runTester({...base, askCommands: async () => bothCommands}, fakeIo({run: vi.fn(async () => outcome(1, {stderr: 'boom'}))}))
     const notRun = await runTester({...base, askCommands: async () => answer([])}, fakeIo())
+    const notStarted = await runTester({...base, askCommands: async () => bothCommands}, fakeIo({available: async () => ({available: false, detail: 'x'})}))
 
     for (const version of ['v1', 'v2']) {
       const schema = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, 'contracts', 'agent-result', version, 'schema.json'), 'utf8'))
       const validate = new Ajv2020({allErrors: true, strict: false}).compile({$ref: '#/$defs/tester_envelope', $defs: schema.$defs})
-      for (const report of [passed, failed, notRun]) {
+      for (const report of [passed, failed, notRun, notStarted]) {
         expect(validate(report.block), JSON.stringify(validate.errors)).toBe(true)
       }
     }
@@ -190,12 +199,19 @@ describe('runTester', () => {
     expect(io.run).not.toHaveBeenCalledWith(expect.stringContaining('[REDACTED]'), expect.anything())
   })
 
-  it('is unavailable, with no outcome to deliver, when the machine cannot confine a command', async () => {
+  // CYAU-352 — a Tester that did not start used to deliver no block: the reason stayed in the daemon's log.
+  it('is unavailable when the machine cannot confine a command, and delivers the reason for every proof', async () => {
     const io = fakeIo({available: async () => ({available: false, detail: 'bubblewrap missing'})})
 
     const report = await runTester({...base, askCommands: async () => bothCommands}, io)
 
-    expect(report).toMatchObject({status: 'unavailable', block: null})
+    expect(report.status).toBe('unavailable')
+    expect(report.summary).toContain('bubblewrap missing')
+    expect(report.block).toMatchObject({status: 'unavailable', commit: HEAD, summary: report.summary})
+    expect(report.block?.results).toEqual([
+      expect.objectContaining({criterion_id: 'DOD-1', status: 'not_run', evidence: expect.stringContaining('bubblewrap missing')}),
+      expect.objectContaining({criterion_id: 'DOD-2', status: 'not_run', evidence: expect.stringContaining('bubblewrap missing')}),
+    ])
     expect(io.run).not.toHaveBeenCalled()
   })
 
@@ -204,13 +220,22 @@ describe('runTester', () => {
 
     const report = await runTester({...base, askCommands: async () => bothCommands}, io)
 
-    expect(report).toMatchObject({status: 'unavailable', block: null})
+    expect(report).toMatchObject({status: 'unavailable', block: {status: 'unavailable'}})
+    expect(report.summary).toContain('modifiche non consegnate')
     expect(io.run).not.toHaveBeenCalled()
   })
 
-  it('is unavailable when the mapping session gives nothing usable', async () => {
-    expect(await runTester({...base, askCommands: async () => null}, fakeIo())).toMatchObject({status: 'unavailable', block: null})
-    expect(await runTester({...base, askCommands: async () => 'no json here'}, fakeIo())).toMatchObject({status: 'unavailable', block: null})
+  it('is unavailable when the mapping session gives nothing usable, and says so', async () => {
+    for (const reply of [null, 'no json here']) {
+      const report = await runTester({...base, askCommands: async () => reply}, fakeIo())
+      expect(report).toMatchObject({status: 'unavailable', block: {status: 'unavailable'}})
+      expect(report.summary).toContain('non ha indicato i comandi')
+    }
+  })
+
+  it('delivers nothing when the commit cannot be read: there is no commit to name', async () => {
+    expect(await runTester({...base, askCommands: async () => bothCommands}, fakeIo({headCommit: () => null})))
+      .toMatchObject({status: 'unavailable', block: null})
   })
 
   it('restores the worktree when a command changed tracked files, and still reports what it saw', async () => {
@@ -238,6 +263,137 @@ describe('runTester', () => {
     const report = await runTester({...base, askCommands: async () => bothCommands}, io)
 
     expect(JSON.stringify(report.block)).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+  })
+})
+
+// CYAU-352 — the Tester was told to give up on every proof that needs a database, even on a machine whose local
+// PostgreSQL the coding session already uses for its tests: database proofs never ran, and a broken one never showed.
+describe('runTester — the local database', () => {
+  const dbCriteria = () => testerCriteria([
+    {id: 'AC-1', text: 'The model is saved', verification: {kind: 'test', how: 'Run the model test, it uses the database'}},
+  ] as never)
+  const base = {criteria: dbCriteria(), cwd: '/work/ticket', ticket: 'CYRA-1', engine: 'codex' as const, timeoutSeconds: 60}
+  const dbCommand = answer([{criterion_id: 'AC-1', command: 'bin/rails test test/models/plan_test.rb'}])
+
+  it('with the database present, the prompt lets the proof run and the proof passes (AC-1)', async () => {
+    const io = fakeIo({database: async () => DATABASE})
+    const prompts: string[] = []
+
+    const report = await runTester({...base, askCommands: async (prompt) => { prompts.push(prompt); return dbCommand }}, io)
+
+    expect(prompts[0]).toContain('This machine has a local PostgreSQL')
+    expect(prompts[0]).toContain('A test that needs a database CAN run here')
+    expect(prompts[0]).not.toContain('it needs a database,')
+    expect(io.run).toHaveBeenCalledWith('bin/rails test test/models/plan_test.rb', expect.objectContaining({database: DATABASE}))
+    expect(report.status).toBe('passed')
+    expect(report.block?.results[0]).toMatchObject({criterion_id: 'AC-1', status: 'passed'})
+  })
+
+  it('without a database, the reason is in the summary and the outcome is unavailable, not failed (AC-2)', async () => {
+    const prompts: string[] = []
+    const noCommand = answer([{criterion_id: 'AC-1', command: null, note: 'Serve un database PostgreSQL, assente su questa macchina'}])
+
+    const report = await runTester({...base, askCommands: async (prompt) => { prompts.push(prompt); return noCommand }}, fakeIo())
+
+    expect(prompts[0]).toContain('This machine has no local database (nessun database PostgreSQL locale in /run/postgresql)')
+    expect(report.status).toBe('unavailable')
+    expect(report.summary).toContain('AC-1 (Nessun comando per questa prova. Serve un database PostgreSQL, assente su questa macchina)')
+    expect(report.block?.summary).toBe(report.summary)
+  })
+
+  it('without a database, a proof that could not connect is not run for the machine, with the reason', async () => {
+    const io = fakeIo({run: vi.fn(async () => outcome(1, {stderr: 'PG::ConnectionBad: connection to server on socket "/run/postgresql/.s.PGSQL.5432" failed'}))})
+
+    const report = await runTester({...base, askCommands: async () => dbCommand}, io)
+
+    expect(report.status).toBe('unavailable')
+    expect(report.block?.results[0]?.evidence).toContain('chiede un database e qui nessun database PostgreSQL locale')
+  })
+
+  it('with the database present, a proof that fails is a failure, even when it cannot connect (AC-3)', async () => {
+    for (const stderr of ['1 runs, 1 failures', 'PG::ConnectionBad: connection to server on socket "/run/postgresql/.s.PGSQL.5432" failed']) {
+      const io = fakeIo({database: async () => DATABASE, run: vi.fn(async () => outcome(1, {stderr}))})
+
+      const report = await runTester({...base, askCommands: async () => dbCommand}, io)
+
+      expect(report.status).toBe('failed')
+      expect(report.summary).toContain('AC-1')
+    }
+  })
+
+  it('never runs a command that would wipe a database or touch production', async () => {
+    for (const command of ['bin/rails db:drop db:create', 'psql -c "DROP DATABASE app_test"', 'RAILS_ENV=production bin/rails test']) {
+      const io = fakeIo({database: async () => DATABASE})
+
+      const report = await runTester({...base, askCommands: async () => answer([{criterion_id: 'AC-1', command}])}, io)
+
+      expect(io.run).not.toHaveBeenCalled()
+      expect(report.block?.results[0]).toMatchObject({status: 'not_run', evidence: expect.stringContaining('cancellerebbe dati')})
+    }
+  })
+
+  it('delivers blocks with ticket items that follow the v3 contract', async () => {
+    const schema = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, 'contracts', 'agent-result', 'v3', 'schema.json'), 'utf8'))
+    const validate = new Ajv2020({allErrors: true, strict: false}).compile({$ref: '#/$defs/tester_envelope', $defs: schema.$defs})
+    const reports = [
+      await runTester({...base, askCommands: async () => dbCommand}, fakeIo({database: async () => DATABASE})),
+      await runTester({...base, askCommands: async () => answer([{criterion_id: 'AC-1', command: null, note: 'no db'}])}, fakeIo()),
+      await runTester({...base, askCommands: async () => dbCommand}, fakeIo({available: async () => ({available: false})})),
+    ]
+    for (const report of reports) expect(validate(report.block), JSON.stringify(validate.errors)).toBe(true)
+  })
+})
+
+describe('probeLocalDatabase', () => {
+  it('finds the server that accepts a connection, and its port', async () => {
+    const accepts = vi.fn(async (socket: string) => socket === '/run/postgresql/.s.PGSQL.5433')
+    const probe = await probeLocalDatabase({}, {
+      sockets: (dir) => (dir === '/run/postgresql' ? ['/run/postgresql/.s.PGSQL.5433'] : []),
+      accepts,
+    })
+
+    expect(probe).toMatchObject({available: true, socketDir: '/run/postgresql', port: 5433})
+  })
+
+  it('does not count a socket nobody answers on', async () => {
+    const probe = await probeLocalDatabase({}, {sockets: (dir) => (dir === '/tmp' ? ['/tmp/.s.PGSQL.5432'] : []), accepts: async () => false})
+
+    expect(probe).toMatchObject({available: false, socketDir: null})
+    expect(probe.detail).toContain('/tmp/.s.PGSQL.5432 esiste ma nessun server risponde')
+  })
+
+  it('says where it looked when there is no socket at all', async () => {
+    const probe = await probeLocalDatabase({}, {sockets: () => [], accepts: async () => true})
+
+    expect(probe.available).toBe(false)
+    expect(probe.detail).toContain('nessun database PostgreSQL locale')
+  })
+
+  it('connects to a real Unix socket, looking first where PGHOST says', async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tester-pg-')))
+    const server = net.createServer((socket) => socket.end())
+    await new Promise<void>((resolve) => server.listen(path.join(dir, '.s.PGSQL.6543'), resolve))
+    try {
+      expect(await probeLocalDatabase({PGHOST: dir})).toMatchObject({available: true, socketDir: dir, port: 6543})
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+      fs.rmSync(dir, {recursive: true, force: true})
+    }
+  })
+})
+
+describe('testerDatabaseEnvironment', () => {
+  it('points the proof at the local socket in the test environment, with no other database and no password', () => {
+    const env = testerDatabaseEnvironment({
+      PATH: '/usr/bin', DATABASE_URL: 'postgres://prod', QUEUE_DATABASE_URL: 'postgres://q', PGPASSWORD: 'x', PGPASSFILE: '/p',
+      PGHOST: 'db.example', PGSERVICE: 's', PGUSER: 'admin', RAILS_ENV: 'development',
+    }, DATABASE)
+
+    expect(env).toEqual({PATH: '/usr/bin', RAILS_ENV: 'test', RACK_ENV: 'test', PGHOST: '/run/postgresql', PGPORT: '5432'})
+  })
+
+  it('without a database it still drops what would point elsewhere', () => {
+    expect(testerDatabaseEnvironment({DATABASE_URL: 'postgres://x', PGHOST: 'h'}, NO_DATABASE)).toEqual({RAILS_ENV: 'test', RACK_ENV: 'test'})
   })
 })
 
@@ -448,8 +604,81 @@ describe('defaultTesterIo (the machine side, on a real repository and a fake cag
     expect(machine.removeScratch).toHaveBeenCalledWith('/scratch')
   })
 
+  it('shows the database socket folder read-only in the cage and points the proof at it, network still off', async () => {
+    const runContained = vi.fn(async () => ({code: 0, stdout: Buffer.from(''), stderr: '', timedOut: false}))
+    const machine = cage({runContained, hiddenPaths: () => ({dirs: ['/run/user'], files: ['/run/docker.sock']})} as Partial<EmulatorIo>)
+
+    await defaultTesterIo(machine, () => []).run('bin/rails test', {cwd: '/work', ticket: 'T-1', timeoutSeconds: 5, database: DATABASE})
+
+    const [, args, options] = runContained.mock.calls[0] as unknown as [string, string[], {env: NodeJS.ProcessEnv}]
+    const shown = args.indexOf('/run/postgresql')
+    expect(args.slice(shown - 1, shown + 2)).toEqual(['--ro-bind', '/run/postgresql', '/run/postgresql'])
+    expect(shown).toBeGreaterThan(args.lastIndexOf('--tmpfs'))
+    expect(args).toContain('--unshare-net')
+    expect(options.env).toMatchObject({PGHOST: '/run/postgresql', PGPORT: '5432', RAILS_ENV: 'test'})
+  })
+
+  it('does not show a socket folder that would show a hidden path again', async () => {
+    const runContained = vi.fn(async () => ({code: 0, stdout: Buffer.from(''), stderr: '', timedOut: false}))
+    const machine = cage({runContained, hiddenPaths: () => ({dirs: ['/run/user'], files: []})} as Partial<EmulatorIo>)
+
+    await defaultTesterIo(machine, () => []).run('bin/rails test', {cwd: '/work', ticket: 'T-1', timeoutSeconds: 5, database: {...DATABASE, socketDir: '/run'}})
+
+    const args = (runContained.mock.calls[0] as unknown as [string, string[]])[1]
+    expect(args).not.toContain('/run')
+    expect(args).toEqual(expect.arrayContaining(['--tmpfs', '/run/user']))
+  })
+
   it('is not available without the cage', async () => {
     expect(await defaultTesterIo(cage({bwrapAvailable: () => false})).available()).toMatchObject({available: false})
     expect(await defaultTesterIo(cage()).available()).toEqual({available: true})
+  })
+})
+
+// CYAU-352 — the real cage on a Linux machine with bubblewrap: the proof reaches the database socket with the network
+// off, and every hidden path stays empty. The machine's own PostgreSQL when it answers, a stand-in socket otherwise.
+describe('the real cage on this Linux machine', () => {
+  const bwrapRuns = process.platform === 'linux' && fs.existsSync(BWRAP) &&
+    spawnSync(BWRAP, ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-net', '--', 'true']).status === 0
+
+  it.runIf(bwrapRuns)('reaches the local database through its socket and sees none of the hidden paths (AC-4)', async () => {
+    const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tester-cage-')))
+    const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tester-cage-scratch-')))
+    let standIn: net.Server | null = null
+    try {
+      let database = await probeLocalDatabase()
+      if (!database.available) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tester-cage-db-'))
+        const server = net.createServer((socket) => socket.end())
+        standIn = server
+        await new Promise<void>((resolve) => server.listen(path.join(dir, '.s.PGSQL.6544'), resolve))
+        database = await probeLocalDatabase({PGHOST: dir})
+      }
+      const hidden = defaultEmulatorIo().hiddenPaths()
+      fs.writeFileSync(path.join(work, 'check.cjs'), [
+        "const fs = require('node:fs'); const net = require('node:net')",
+        'const [socket, hiddenJson] = process.argv.slice(2); const hidden = JSON.parse(hiddenJson)',
+        // A hidden socket is masked by a device node on a nodev mount: it cannot even be opened, which hides it too.
+        'const readable = (file) => { try { return fs.readFileSync(file).length > 0 } catch { return false } }',
+        'const seen = [...hidden.dirs.filter((dir) => fs.readdirSync(dir).length > 0), ...hidden.files.filter(readable)]',
+        'const client = net.createConnection({path: socket})',
+        "client.once('connect', () => { client.destroy(); console.log(JSON.stringify({connected: true, seen})); process.exit(seen.length ? 3 : 0) })",
+        "client.once('error', (error) => { console.log(JSON.stringify({connected: false, error: error.message, seen})); process.exit(2) })",
+      ].join('\n'))
+      const socket = path.join(database.socketDir!, `.s.PGSQL.${database.port}`)
+      const quote = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`
+      const script = [process.execPath, 'check.cjs', socket, JSON.stringify(hidden)].map(quote).join(' ')
+      const args = composeBuildArgs({worktree: work, scratch, script, hidden, network: false, sockets: [database.socketDir!]})
+      expect(args).toContain('--unshare-net')
+
+      const ran = spawnSync(BWRAP, args, {encoding: 'utf8', timeout: 30_000})
+
+      expect(ran.status, `${ran.stdout}\n${ran.stderr}`).toBe(0)
+      expect(JSON.parse(ran.stdout.trim())).toEqual({connected: true, seen: []})
+    } finally {
+      if (standIn) await new Promise((resolve) => standIn!.close(resolve))
+      fs.rmSync(work, {recursive: true, force: true})
+      fs.rmSync(scratch, {recursive: true, force: true})
+    }
   })
 })

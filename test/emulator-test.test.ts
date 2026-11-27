@@ -20,6 +20,7 @@ import {
   hiddenPathCandidates,
   isPng,
   publishEmulatorEvidence,
+  reopensHidden,
   resolveAndroidTools,
   runEmulatorTest,
   screenshotName,
@@ -421,13 +422,31 @@ describe('pure helpers', () => {
     expect(() => composeBuildArgs({...confinement, hidden: {dirs: [], files: ['.netrc']}})).toThrow()
   })
 
+  // CYAU-352 — the Tester's proofs reach the local database through its socket folder: shown read-only after the
+  // masks, never a folder that would show a hidden path again.
+  it('shows a database socket folder read-only after the masks, and never one that holds a hidden path', () => {
+    const confinement = {worktree: '/data/w', scratch: '/state/b', script: 'bin/rails test', hidden: {dirs: ['/run/user', '/data'], files: ['/run/docker.sock']}, network: false}
+    const args = composeBuildArgs({...confinement, sockets: ['/run/postgresql']})
+    const shown = args.indexOf('/run/postgresql')
+    expect(args.slice(shown - 1, shown + 2)).toEqual(['--ro-bind', '/run/postgresql', '/run/postgresql'])
+    expect(shown).toBeGreaterThan(args.lastIndexOf('/run/docker.sock'))
+    expect(args).toContain('--unshare-net')
+    for (const reopening of ['/run', '/', '/run/user', '/data', 'relative']) {
+      expect(() => composeBuildArgs({...confinement, sockets: [reopening]})).toThrow()
+    }
+    expect(reopensHidden('/run/postgresql', confinement.hidden)).toBe(false)
+    expect(reopensHidden('/run/', confinement.hidden)).toBe(true)
+    // Inside a hidden folder only that folder comes back: its siblings stay masked.
+    expect(reopensHidden('/run/user/1000/pg', confinement.hidden)).toBe(false)
+  })
+
   it('hides the sessions\' denied paths plus the operator keys and the automator\'s own folders', () => {
     vi.stubEnv('AUTOMATOR_STATE_DIR', '/st')
     vi.stubEnv('AUTOMATOR_CONFIG_DIR', '/cf')
     vi.stubEnv('AUTOMATOR_DATA_DIR', '/dt')
     const candidates = hiddenPathCandidates('/home/a')
     for (const expected of ['/home/a/.config/gh', '/home/a/.claude', '/home/a/.codex', '/run/user', '/var/run/docker.sock',
-      '/home/a/.ssh', '/home/a/.netrc', '/home/a/.git-credentials', '/st', '/cf', '/dt']) {
+      '/home/a/.ssh', '/home/a/.netrc', '/home/a/.git-credentials', '/home/a/.pgpass', '/home/a/.pg_service.conf', '/st', '/cf', '/dt']) {
       expect(candidates).toContain(expected)
     }
   })
@@ -442,6 +461,13 @@ describe('pure helpers', () => {
       (target) => kinds[target] ?? null,
     )
     expect(hidden).toEqual({dirs: ['/home/a/.config', '/home/a/.ssh'], files: ['/home/a/.netrc', '/run/docker.sock']})
+  })
+
+  it('hides a path where it really lives, once, so the cage never mounts behind a link (CYAU-352)', () => {
+    const kinds: Record<string, 'dir' | 'file'> = {'/run/docker.sock': 'file', '/run/user': 'dir'}
+    const real = (target: string): string => target.replace(/^\/var\/run(?=\/|$)/u, '/run')
+    const hidden = selectHiddenPaths(['/var/run/docker.sock', '/run/docker.sock', '/run/user'], (target) => kinds[target] ?? null, real)
+    expect(hidden).toEqual({dirs: ['/run/user'], files: ['/run/docker.sock']})
   })
 
   it('the build gets half of the machine, never less than one CPU', () => {

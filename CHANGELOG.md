@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.69.5-beta.1] - 2026-11-27
+
+### Changed
+
+- **Il collaudo della consegna esegue anche le prove che usano il database locale.** Se la prova fallisce, il lavoro torna all'agente. Se la macchina non può eseguirla, il motivo è scritto sul ticket e la consegna prosegue.
+
 ## [0.69.4] - 2026-11-26
 
 ### Security

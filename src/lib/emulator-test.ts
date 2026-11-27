@@ -167,6 +167,19 @@ export interface BuildConfinement {
   network: boolean
   /** Paths shown again read-only inside a hidden parent: the git data of the worktree's repository. */
   readOnly?: string[]
+  /**
+   * CYAU-352 — the folder of a local database's Unix socket, shown read-only after the hiding mounts. A socket is
+   * reached through the filesystem, not the network, so `--unshare-net` leaves it working. Never a folder that is
+   * or holds a hidden path: reopening `/run` would give back the escape sockets.
+   */
+  sockets?: string[]
+}
+
+/** true when showing `dir` again would show a hidden path too: the root, a hidden folder, or one of their parents. */
+export function reopensHidden(dir: string, hidden: HiddenPaths): boolean {
+  const folder = path.resolve(dir)
+  const inside = (target: string): boolean => target === folder || target.startsWith(`${folder}${path.sep}`)
+  return folder === path.parse(folder).root || [...hidden.dirs, ...hidden.files].some(inside)
 }
 
 /**
@@ -177,10 +190,11 @@ export interface BuildConfinement {
  * ancestor of the worktree (the managed data folder) is masked and the worktree alone is reopened inside it.
  */
 export function composeBuildArgs(confinement: BuildConfinement): string[] {
-  const {worktree, scratch, script, hidden, network, readOnly = []} = confinement
-  for (const target of [worktree, scratch, ...hidden.dirs, ...hidden.files, ...readOnly]) {
+  const {worktree, scratch, script, hidden, network, readOnly = [], sockets = []} = confinement
+  for (const target of [worktree, scratch, ...hidden.dirs, ...hidden.files, ...readOnly, ...sockets]) {
     if (!path.isAbsolute(target)) throw new Error('build confinement: non-absolute path')
   }
+  if (sockets.some((dir) => reopensHidden(dir, hidden))) throw new Error('build confinement: a socket folder would reopen a hidden path')
   return [
     '--ro-bind', '/', '/',
     // A fresh /dev: the device nodes of the read-only root cannot be opened from inside the cage (CYAU-329), so
@@ -193,6 +207,7 @@ export function composeBuildArgs(confinement: BuildConfinement): string[] {
     ...hidden.dirs.flatMap((dir) => ['--tmpfs', dir]),
     ...hidden.files.flatMap((file) => ['--ro-bind', '/dev/null', file]),
     ...readOnly.flatMap((target) => ['--ro-bind', target, target]),
+    ...sockets.flatMap((dir) => ['--ro-bind', dir, dir]),
     '--bind', worktree, worktree,
     '--bind', scratch, scratch,
     '--chdir', worktree,
@@ -203,10 +218,16 @@ export function composeBuildArgs(confinement: BuildConfinement): string[] {
 /**
  * The paths the build must not read, among `candidates` that exist: the sessions' denied list (credentials, agent
  * homes, escape sockets) plus the operator's keys and the automator's own state, config and managed checkouts. A path
- * inside another hidden directory is already masked and is dropped.
+ * inside another hidden directory is already masked and is dropped. Each path is taken where it really lives
+ * (`real`): bubblewrap cannot mount on a path behind an absolute link, so `/var/run/docker.sock` on a host where
+ * `/var/run` points to `/run` stops the whole cage unless it is hidden as `/run/docker.sock` (CYAU-352).
  */
-export function selectHiddenPaths(candidates: string[], kind: (target: string) => 'dir' | 'file' | null): HiddenPaths {
-  const present = [...new Set(candidates.map((candidate) => path.resolve(candidate)))]
+export function selectHiddenPaths(
+  candidates: string[],
+  kind: (target: string) => 'dir' | 'file' | null,
+  real: (target: string) => string = (target) => target,
+): HiddenPaths {
+  const present = [...new Set(candidates.map((candidate) => path.resolve(real(path.resolve(candidate)))))]
     .map((target) => ({target, type: kind(target)}))
     .filter((entry): entry is {target: string; type: 'dir' | 'file'} => entry.type !== null)
   const dirs = present.filter((entry) => entry.type === 'dir').map((entry) => entry.target)
@@ -222,7 +243,10 @@ export function hiddenPathCandidates(home: string): string[] {
   const expand = (entry: string): string => (entry.startsWith('~/') ? path.join(home, entry.slice(2)) : entry)
   return [
     ...SANDBOX_DENIED_READ_PATHS.map(expand),
-    ...['.ssh', '.gnupg', '.config', '.aws', '.docker', '.kube', '.netrc', '.git-credentials', '.npmrc', '.pypirc']
+    // `.pgpass` and `.pg_service.conf` hold database passwords: a proof reaches the local database as the machine
+    // user through its socket, never with a stored password (CYAU-352).
+    ...['.ssh', '.gnupg', '.config', '.aws', '.docker', '.kube', '.netrc', '.git-credentials', '.npmrc', '.pypirc',
+      '.pgpass', '.pg_service.conf']
       .map((entry) => path.join(home, entry)),
     stateDir(),
     configDir(),
@@ -603,6 +627,15 @@ function pathKind(target: string): 'dir' | 'file' | null {
   }
 }
 
+/** The real path of `target` when it exists, `target` itself otherwise. */
+function realPath(target: string): string {
+  try {
+    return fs.realpathSync(target)
+  } catch {
+    return target
+  }
+}
+
 export interface DefaultEmulatorIoOptions {
   killGraceMs?: number
   spawn?: SpawnProcess
@@ -665,7 +698,7 @@ export function defaultEmulatorIo(options: DefaultEmulatorIoOptions = {}): Emula
     },
     resolveTools: (env) => resolveAndroidTools(env),
     bwrapAvailable: () => executable(BWRAP),
-    hiddenPaths: () => selectHiddenPaths(hiddenPathCandidates(os.homedir()), pathKind),
+    hiddenPaths: () => selectHiddenPaths(hiddenPathCandidates(os.homedir()), pathKind, realPath),
     fileInside(root, relative) {
       try {
         const canonicalRoot = fs.realpathSync(root)

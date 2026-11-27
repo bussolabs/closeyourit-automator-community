@@ -2122,6 +2122,43 @@ describe('emulator test in the delivery path (CYAU-295)', () => {
 
       await expect(lifecycle.testerWorkflowDelivery!('codex', ask)).resolves.toEqual({...report, advisory: true})
     })
+
+    // CYAU-352 — a proof the machine could not run: the reason is written on the ticket, the delivery goes on.
+    it('writes on the ticket why the proofs did not run, block or not, and returns the outcome unchanged', async () => {
+      vi.stubEnv('AUTOMATOR_TESTER', '1')
+      for (const report of [
+        {status: 'unavailable' as const, summary: 'Il Tester non ha potuto eseguire: DOD-1 (nessun database PostgreSQL locale).', block: null},
+        {status: 'unavailable' as const, summary: 'Il Tester non è partito: bubblewrap non disponibile.', block: null},
+      ]) {
+        const publishEmulatorEvidence = vi.fn()
+        const lifecycle = await provider(temporaryDirectory(), {loadGateAtRef: vi.fn(() => baseGate(null)), runTester: vi.fn(async () => report), publishEmulatorEvidence})
+          .prepare({...skillMode, testerCriteria})
+
+        await expect(lifecycle.testerWorkflowDelivery!('codex', ask)).resolves.toBe(report)
+
+        expect(publishEmulatorEvidence).toHaveBeenCalledWith(expect.objectContaining({
+          project: 'CYAU', ticket: input.ticket, screenshot: null,
+          comment: `${report.summary} La consegna prosegue verso la rilettura.`,
+        }))
+      }
+    })
+
+    it('does not write on the ticket when the proofs ran, and a refused comment does not stop the delivery', async () => {
+      vi.stubEnv('AUTOMATOR_TESTER', '1')
+      const publishEmulatorEvidence = vi.fn()
+      const passed = {status: 'passed' as const, summary: 'Tutte superate.', block: null}
+      const lifecycle = await provider(temporaryDirectory(), {loadGateAtRef: vi.fn(() => baseGate(null)), runTester: vi.fn(async () => passed), publishEmulatorEvidence})
+        .prepare({...skillMode, testerCriteria})
+      await lifecycle.testerWorkflowDelivery!('codex', ask)
+      expect(publishEmulatorEvidence).not.toHaveBeenCalled()
+
+      const unavailable = {status: 'unavailable' as const, summary: 'Non eseguite.', block: null}
+      const refusing = await provider(temporaryDirectory(), {
+        loadGateAtRef: vi.fn(() => baseGate(null)), runTester: vi.fn(async () => unavailable),
+        publishEmulatorEvidence: vi.fn(() => { throw new Error('commento sul ticket non riuscito') }),
+      }).prepare({...skillMode, testerCriteria})
+      await expect(refusing.testerWorkflowDelivery!('codex', ask)).resolves.toBe(unavailable)
+    })
   })
 
   it('a refused screenshot stops the delivery until the next round', async () => {

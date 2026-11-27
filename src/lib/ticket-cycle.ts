@@ -1328,6 +1328,15 @@ export function makeTicketCycleProvider(options: TicketCycleOptions = {}): Ticke
               criteria: input.testerCriteria!, cwd: prepared.worktreePath, ticket: input.ticket, engine,
               timeoutSeconds: TESTER_COMMAND_TIMEOUT_S, askCommands: ask, signal: signal ?? input.signal,
             })
+            // CYAU-352 — a proof the machine could not run is not the work's fault: the delivery goes on to the review,
+            // and the reason is written on the ticket, where the person deciding reads it. Best effort: a ticket that
+            // refuses the comment does not stop the delivery.
+            if (report.status === 'unavailable') {
+              const comment = `${report.summary} La consegna prosegue verso la rilettura.`
+              await Promise.resolve()
+                .then(() => publishEvidence({project: input.project, ticket: input.ticket, headSha: git.headCommit(prepared.worktreePath) ?? 'head', comment, screenshot: null}))
+                .catch(() => undefined)
+            }
             return input.testerDryRun ? {...report, advisory: true} : report
           },
         } : {}),
