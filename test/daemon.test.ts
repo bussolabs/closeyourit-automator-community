@@ -1,6 +1,7 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import {spawnSync} from 'node:child_process'
 import {afterAll, describe, expect, it, vi} from 'vitest'
 import {defaultSleep, formatIterationLines, runDaemon, runHeartbeatKeepalive} from '../src/lib/daemon'
 import {holdIdleHost} from '../src/lib/host-idle'
@@ -9,6 +10,8 @@ import {type SpawnFn} from '../src/lib/executor'
 import {type DeliveryRecord, type ExecutedAction, type RunOnceResult} from '../src/lib/runner'
 import {PlaybookSchema} from '../src/lib/schema'
 import {emptyState, saveState, updateAction} from '../src/lib/state'
+import {updateDrainPath} from '../src/lib/paths'
+import {clearUpdateDrain, markUpdateDrain} from '../src/lib/update-drain'
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'automator-daemon-'))
 let counter = 0
@@ -289,6 +292,73 @@ describe('runDaemon — hang watchdog (CYAU-289)', () => {
       onIteration: () => (iterations += 1),
     })
     expect(iterations).toBe(2)
+  })
+})
+
+// CYAU-356: an update waits for the free machine. The daemon takes no new work — no supporter, no council, no round —
+// and does not even take the cycle lock, so the updater gets it as soon as the last round has ended.
+describe('runDaemon — update waiting for the free machine (CYAU-356)', () => {
+  const base = {
+    spawn: noopSpawn,
+    sleep: async () => undefined,
+    registerSignals: false,
+    now: () => new Date('2026-07-07T09:00:00.000Z'),
+  }
+
+  it('signal of a live update → supporter, council and round skipped, the lock never taken', async () => {
+    const s = scenario(VALID)
+    markUpdateDrain(updateDrainPath(s.lockFile), {toVersion: '9.9.9'})
+    const supporter = vi.fn(async () => undefined)
+    const council = vi.fn(async () => undefined)
+    const logs: string[] = []
+    const lockSeen: boolean[] = []
+    let iterations = 0
+    await runDaemon({
+      ...s,
+      ...base,
+      maxIterations: 2,
+      supporter,
+      council,
+      sleep: async () => void lockSeen.push(fs.existsSync(s.lockFile)),
+      log: (m) => logs.push(m),
+      onIteration: () => (iterations += 1),
+    })
+    expect(supporter).not.toHaveBeenCalled()
+    expect(council).not.toHaveBeenCalled()
+    expect(iterations).toBe(0)
+    expect(lockSeen).toEqual([false])
+    expect(logs).toContain('aggiornamento in attesa della macchina libera: nessun lavoro nuovo in questo giro')
+  })
+
+  it('signal left by an update that no longer exists → the daemon works as always', async () => {
+    const s = scenario(VALID)
+    markUpdateDrain(updateDrainPath(s.lockFile), {pid: spawnSync('true').pid, identify: () => null})
+    const supporter = vi.fn(async () => undefined)
+    const council = vi.fn(async () => undefined)
+    let iterations = 0
+    await runDaemon({...s, ...base, maxIterations: 1, supporter, council, onIteration: () => (iterations += 1)})
+    expect(supporter).toHaveBeenCalledTimes(1)
+    expect(council).toHaveBeenCalledTimes(1)
+    expect(iterations).toBe(1)
+  })
+
+  it('the signal goes away → the next round takes work again', async () => {
+    const s = scenario(VALID)
+    const file = updateDrainPath(s.lockFile)
+    markUpdateDrain(file)
+    const supporter = vi.fn(async () => undefined)
+    let iterations = 0
+    await runDaemon({
+      ...s,
+      ...base,
+      maxIterations: 2,
+      supporter,
+      // The update got the lock and cleared the signal between the two rounds.
+      sleep: async () => void clearUpdateDrain(file),
+      onIteration: () => (iterations += 1),
+    })
+    expect(supporter).toHaveBeenCalledTimes(1)
+    expect(iterations).toBe(1)
   })
 })
 

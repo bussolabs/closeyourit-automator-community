@@ -10,6 +10,8 @@ import TickCommand from '../src/commands/tick'
 import Logs from '../src/commands/logs'
 import {run, runCaptured, runExpectingExit} from './helpers/command'
 import {loadState, saveState, updateAction} from '../src/lib/state'
+import {updateDrainPath} from '../src/lib/paths'
+import {markUpdateDrain} from '../src/lib/update-drain'
 
 let dir: string
 let playbook: string
@@ -177,6 +179,16 @@ describe('tick', () => {
     const result = (await run(Tick, [])) as {executed: unknown[]; seeded: string[]}
     expect(result.executed).toHaveLength(0)
     expect(result.seeded).toHaveLength(2)
+  })
+
+  // CYAU-356: a tick launched by hand respects the update waiting for the free machine, as the daemon does.
+  it('update waiting for the free machine → the tick takes no work and says why', async () => {
+    markUpdateDrain(updateDrainPath(), {toVersion: '9.9.9'})
+
+    const {stdout} = await runCaptured(Tick, [])
+
+    expect(stdout).toContain('aggiornamento in attesa della macchina libera')
+    expect(fs.existsSync(path.join(dir, 'state', 'state.json'))).toBe(false)
   })
 })
 

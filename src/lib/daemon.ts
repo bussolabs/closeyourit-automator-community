@@ -10,6 +10,8 @@ import {AutomatorError} from '../errors/error-codes'
 import {type SecretCapabilities} from './env-capabilities'
 import {type PreflightStop} from './heartbeat'
 import {type HangWatchdogHandle, TICK_INTERVAL_MS} from './hang-watchdog'
+import {updateDrainPath} from './paths'
+import {updateDrainPending} from './update-drain'
 
 // Self-scheduling, cross-OS loop: reloads the playbook at every iteration (changes apply
 // without restart), runs runOnce, then sleeps `intervalMs`. A playbook that became invalid does NOT kill
@@ -111,6 +113,8 @@ export interface DaemonOptions {
   council?: (signal: AbortSignal) => Promise<void>
   /** CYAU-289 — hang watchdog fed from this loop's event loop; stopped on shutdown. */
   watchdog?: HangWatchdogHandle
+  /** CYAU-356 — an update waits for the free machine; default: the drain signal beside `lockFile`. */
+  updatePending?: () => boolean
   // Injectable for tests / control:
   now?: () => Date
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
@@ -282,14 +286,19 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
           playbook = loadPlaybook(opts.playbookFile)
         }
 
+        // CYAU-356: an update is waiting for the free machine. Nothing new starts — no supporter, no council, no
+        // round — and the cycle lock is not even taken, so the updater gets it as soon as the last round ends.
+        const updatePending = (opts.updatePending ?? (() => updateDrainPending(updateDrainPath(opts.lockFile), {isAlive: opts.isAlive})))()
+        if (updatePending) log('aggiornamento in attesa della macchina libera: nessun lavoro nuovo in questo giro')
+
         // A supporter pass never stops the round: it only proposes answers and plan verdicts the server judges.
         // CYAU-318: it holds the cycle lock like the council, so the update waits for its sessions.
-        if (opts.supporter) await runLockedPass('supporter', opts.supporter, controller.signal, opts, log)
+        if (opts.supporter && !updatePending) await runLockedPass('supporter', opts.supporter, controller.signal, opts, log)
 
         // A council pass never stops the round: it only proposes and votes; the server decides.
-        if (opts.council) await runLockedPass('council', opts.council, controller.signal, opts, log)
+        if (opts.council && !updatePending) await runLockedPass('council', opts.council, controller.signal, opts, log)
 
-        if (playbook) {
+        if (playbook && !updatePending) {
           const result = await runOnce({
             playbook,
             playbookDir: path.dirname(opts.playbookFile),

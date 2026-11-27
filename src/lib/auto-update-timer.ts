@@ -1,6 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import {AutomatorError, ErrorCodes} from '../errors/error-codes'
+import {IDLE_WAIT_MAX_MS} from './host-idle'
 import {defaultExec, type ExecFn, quoteSystemdWord, renderSystemdCommand} from './service'
 
 // CYAU-202 — who launches the update.
@@ -24,6 +25,9 @@ export const AUTO_UPDATE_TIMER_UNIT = 'closeyourit-automator-update.timer'
  */
 const ON_CALENDAR = 'hourly'
 const RANDOMIZED_DELAY_SEC = 900
+
+/** CYAU-356 — the longest wait for the free machine plus a quarter of an hour for the update itself. */
+export const TIMEOUT_START_SEC = IDLE_WAIT_MAX_MS / 1000 + 900
 
 export interface AutoUpdateFields {
   nodePath: string
@@ -51,6 +55,10 @@ export function renderAutoUpdateService(f: AutoUpdateFields): string {
   }
   // No `Restart=`: the command deliberately refuses when the machine is working, and restarting it right away
   // would fight the timer instead of waiting for the next round.
+  //
+  // CYAU-356: with a new version the command waits up to six hours for the free machine. `TimeoutStartSec=` is the
+  // limit a oneshot respects (`RuntimeMaxSec=` does not apply to it): a little above the wait, so the command gives
+  // up by itself and records it, and systemd stops it (SIGTERM, the signal cleared) only if it hangs.
   return `[Unit]
 Description=CloseYourIt automator self-update
 Wants=network-online.target
@@ -60,6 +68,7 @@ After=network-online.target
 Type=oneshot
 ExecStart=${renderSystemdCommand([f.nodePath, f.entrypoint, 'update'])}
 Environment=${environment}
+TimeoutStartSec=${TIMEOUT_START_SEC}
 `
 }
 

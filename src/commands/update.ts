@@ -3,7 +3,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {Flags} from '@oclif/core'
 import {BaseCommand} from '../base'
-import {installRoot as defaultInstallRoot, guardrailsSettingsPath} from '../lib/paths'
+import {installRoot as defaultInstallRoot, guardrailsSettingsPath, updateDrainPath} from '../lib/paths'
 import {
   describeRuntimeDivergences,
   detectPlatform,
@@ -21,11 +21,13 @@ import {
 import {activeManagedGuardrailPaths, loadManagedServiceConfig, saveManagedServiceConfig, type ManagedServiceConfig} from '../lib/managed-service'
 import {ServiceMigration, type ServiceMigrationJournal} from '../lib/service-migration'
 import type {GuardrailPaths} from '../lib/guardrails'
-import {holdIdleHost, type IdleHold} from '../lib/host-idle'
+import {holdIdleHost, type IdleHold, waitForIdleHost} from '../lib/host-idle'
+import {clearUpdateDrain, markUpdateDrain} from '../lib/update-drain'
 import {type AutoUpdateFields, installAutoUpdate} from '../lib/auto-update-timer'
 import {
   assertReleaseChannel,
   busyResult,
+  busyTimeoutResult,
   DEFAULT_CHANNEL,
   defaultUpdateProbe,
   RECOVERY_REPEAT_HINT,
@@ -532,25 +534,135 @@ export default class Update extends BaseCommand {
     // Two paths stay out of it, for the same reason: they restart nothing. `--dry-run` touches
     // nothing; `--skip-service-preflight` updates only the managed bytes without restarting the daemon — and it is the only
     // way to fix a host if one day THIS gate were the defective one (CYAU-156).
-    const idle = flags['dry-run'] || skipServicePreflight ? null : this.holdIdle()
-    if (idle !== null && !idle.held) {
-      return this.emit({
-        dryRun: false,
+    let idle = flags['dry-run'] || skipServicePreflight ? null : this.holdIdle()
+    try {
+      const probe = this.makeProbe(installRoot, manifestBaseUrl, flags['migrate-service'], skipServicePreflight)
+      // CYAU-356 — with the queue full the lock was never free at the hourly check, and the machine stayed behind for
+      // days. A busy machine with a NEW version now waits for its round to end: the drain signal stops new work, the
+      // sessions in progress finish, the lock frees up. Without a new version — or without a readable manifest — it
+      // postpones as before and the machine keeps working.
+      if (idle !== null && !idle.held) {
+        const waited = idle.busy === true
+          ? await this.waitForNewRelease(probe, {channel, serverVersion, targetVersion, allowDowngrade: flags['allow-downgrade']})
+          : null
+        if (waited === null || !('held' in waited)) {
+          return this.emit({
+            dryRun: false,
+            channel,
+            installRoot,
+            skipServicePreflight,
+            result: waited ?? busyResult(channel, null, idle.reason),
+          })
+        }
+        idle = waited
+      }
+
+      return await this.updateWhileHeld(probe, {
+        dryRun: flags['dry-run'],
         channel,
         installRoot,
+        serverVersion,
+        targetVersion,
+        allowDowngrade: flags['allow-downgrade'],
         skipServicePreflight,
-        result: busyResult(channel, null, idle.reason),
       })
+    } finally {
+      // Even on failure: a hold not given back would stop the daemon until the first restart.
+      if (idle?.held) idle.release()
+    }
+  }
+
+  /** Test seam: in production it waits for the host cycle lock up to the longest wait (CYAU-356). */
+  protected waitIdle(signal: AbortSignal): Promise<IdleHold> {
+    return waitForIdleHost({signal})
+  }
+
+  /** Test seam: the drain signal file, beside the cycle lock (CYAU-356). */
+  protected drainFile(): string {
+    return updateDrainPath()
+  }
+
+  /**
+   * The release the update would install, or `null` when there is none to wait for: already on the latest, no
+   * compatible one, or a manifest that does not answer. Read-only, like the dry-run: no lock, no service gate.
+   */
+  private newRelease(
+    probe: UpdateProbe,
+    input: {channel: ReleaseChannel; serverVersion: string | null; targetVersion: string | null; allowDowngrade: boolean},
+  ): {fromVersion: string | null; toVersion: string} | null {
+    try {
+      const currentVersion = probe.currentVersion()
+      const manifest = probe.fetchManifest(input.channel)
+      const selection = input.targetVersion === null
+        ? selectTargetRelease(manifest, {channel: input.channel, currentVersion, serverVersion: input.serverVersion, allowDowngrade: input.allowDowngrade})
+        : selectPinnedRelease(manifest, {channel: input.channel, currentVersion, targetVersion: input.targetVersion, serverVersion: input.serverVersion})
+      if (selection.decision !== 'update' || selection.target === null) return null
+      return {fromVersion: currentVersion, toVersion: selection.target.version}
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * CYAU-356 — a new version and a busy machine: write the drain signal, wait for the lock, and ALWAYS clear the
+   * signal on the way out — hold, longest wait, stop or error. SIGTERM (systemd past its limit) and SIGINT (Ctrl-C)
+   * end the wait right away instead of killing the process with the signal still written. Returns the hold, the
+   * outcome to emit, or `null` when there is nothing to wait for.
+   */
+  private async waitForNewRelease(
+    probe: UpdateProbe,
+    input: {channel: ReleaseChannel; serverVersion: string | null; targetVersion: string | null; allowDowngrade: boolean},
+  ): Promise<Extract<IdleHold, {held: true}> | UpdateResult | null> {
+    const release = this.newRelease(probe, input)
+    if (release === null) return null
+    const file = this.drainFile()
+    const drain = markUpdateDrain(file, {toVersion: release.toVersion})
+    // Without the signal the machine keeps taking work and the wait would only last six hours: postpone as before.
+    if (drain === null) return null
+    if (!this.jsonEnabled()) {
+      this.log(`versione ${release.toVersion} disponibile: la macchina non prende lavoro nuovo e l'aggiornamento attende che si liberi`)
     }
 
-    const probe = this.makeProbe(installRoot, manifestBaseUrl, flags['migrate-service'], skipServicePreflight)
+    const controller = new AbortController()
+    const stop = (): void => controller.abort()
+    process.on('SIGTERM', stop)
+    process.on('SIGINT', stop)
+    try {
+      const waited = await this.waitIdle(controller.signal)
+      if (waited.held) return waited
+      if (waited.expired === true) return busyTimeoutResult(input.channel, release.fromVersion, release.toVersion, waited.reason)
+      return busyResult(input.channel, release.fromVersion, waited.reason)
+    } finally {
+      process.off('SIGTERM', stop)
+      process.off('SIGINT', stop)
+      clearUpdateDrain(file, drain)
+    }
+  }
+
+  /**
+   * The update proper, with the hold already taken (or not needed: dry-run and recovery restart nothing). The
+   * caller gives the hold back in its `finally`, so a throw here — the CLI alignment included — never keeps it.
+   */
+  private async updateWhileHeld(
+    probe: UpdateProbe,
+    input: {
+      dryRun: boolean
+      channel: ReleaseChannel
+      installRoot: string
+      serverVersion: string | null
+      targetVersion: string | null
+      allowDowngrade: boolean
+      skipServicePreflight: boolean
+    },
+  ): Promise<unknown> {
+    const {channel, installRoot, serverVersion, targetVersion, allowDowngrade, skipServicePreflight} = input
 
     // The service gate (serviceInstalled/preflightService) THROWS before runUpdate returns an UpdateResult:
     // without this catch the AutomatorError escaped emit() and `--json` stayed empty (CYAU-102). Here the gate
     // error still produces a structured JSON payload (code, message and divergences) before rethrowing.
-    if (flags['dry-run']) {
+    if (input.dryRun) {
       try {
-        return this.runDryRun({channel, installRoot, serverVersion, targetVersion, allowDowngrade: flags['allow-downgrade']}, probe)
+        return this.runDryRun({channel, installRoot, serverVersion, targetVersion, allowDowngrade}, probe)
       } catch (error) {
         throw this.reportGateException(error, {dryRun: true, channel, installRoot})
       }
@@ -566,14 +678,11 @@ export default class Update extends BaseCommand {
     let result: UpdateResult
     try {
       result = runUpdate(
-        {installRoot, channel, serverVersion, allowDowngrade: flags['allow-downgrade'], targetVersion, skipServicePreflight},
+        {installRoot, channel, serverVersion, allowDowngrade, targetVersion, skipServicePreflight},
         probe,
       )
     } catch (error) {
       throw this.reportGateException(error, {dryRun: false, channel, installRoot})
-    } finally {
-      // Even on failure: a hold not given back would stop the daemon until the first restart.
-      if (idle?.held) idle.release()
     }
     const emitted = this.emit({dryRun: false, channel, installRoot, skipServicePreflight, result})
     // After emit, which clears the warning on a healthy update: CLIs left behind must be seen anyway.
@@ -692,8 +801,11 @@ export default class Update extends BaseCommand {
     }
 
     // updated / up-to-date → success (exit 0). `busy` exits 0 too: postponing is the expected behaviour,
-    // and a timer marking itself failed at every long run would be an alarm without a fault.
-    if (result.outcome === 'updated' || result.outcome === 'up-to-date' || result.outcome === 'busy') return payload
+    // and a timer marking itself failed at every long run would be an alarm without a fault. The same for
+    // `busy-timeout` (CYAU-356): it is still a postponement, and the panel already carries it.
+    if (result.outcome === 'updated' || result.outcome === 'up-to-date' || result.outcome === 'busy' || result.outcome === 'busy-timeout') {
+      return payload
+    }
 
     // "Gate" outcomes: not a success, but not all operational errors. Distinct codes and exits for the audit.
     const error =

@@ -9,6 +9,8 @@ import {type AgentRuntime} from '../src/lib/runtime'
 import {emptyState, loadState, saveState, updateAction} from '../src/lib/state'
 import {PlaybookSchema, type Playbook} from '../src/lib/schema'
 import {readPulse, type SessionPulse} from '../src/lib/session-pulse'
+import {updateDrainPath} from '../src/lib/paths'
+import {markUpdateDrain} from '../src/lib/update-drain'
 
 // CYAU-69: the dispatch of the due actions uses `runFlowPool` (PER-STEP concurrency) ONLY in skill-mode; in
 // prompt-mode it stays SERIAL and unchanged. Here we verify both paths with a "gated" runtime: every
@@ -407,6 +409,63 @@ describe('runOnce — atomic queue take-over (CYAU-169)', () => {
     expect(claimQueue).toHaveBeenCalledTimes(3)
     expect(result.executed).toHaveLength(3)
     expect(seen).toEqual(['CYAU-1', 'CYAU-2', 'CYAU-3'])
+  })
+
+  // CYAU-356 — an update waits for the free machine: the queue gives no more tickets, the ones in progress finish
+  // and the round ends, freeing the lock the updater is waiting for.
+  it('update waiting: no ticket after the signal, the sessions in progress finish', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const {runtime, gates} = queueRuntime()
+    const {claimQueue, handed} = claimSource(['CYAU-1', 'CYAU-2', 'CYAU-3', 'CYAU-4'])
+    const seen: Array<string | undefined> = []
+
+    const run = runOnce({
+      playbook: playbookWith(['q']), playbookDir: dir, now, ...p,
+      runtime, skillsMode: true, flowMaxParallel: 2,
+      ticketQueues: {q: target}, claimQueue, preflight: claimAwarePreflight(seen),
+    })
+
+    await flush()
+    expect(handed).toEqual(['CYAU-1', 'CYAU-2'])
+    // A new version: the updater writes the signal while both sessions are running.
+    expect(markUpdateDrain(updateDrainPath(p.lockFile), {toVersion: '9.9.9'})).not.toBeNull()
+
+    gates[0].resolve(ok())
+    await flush()
+    // A slot is free, but the queue is not asked again.
+    expect(handed).toEqual(['CYAU-1', 'CYAU-2'])
+    expect(claimQueue).toHaveBeenCalledTimes(2)
+
+    gates[1].resolve(ok())
+    const result = await run
+
+    expect(result.executed.map((entry) => entry.status)).toEqual(['success', 'success'])
+    expect(claimQueue).toHaveBeenCalledTimes(2)
+    // The round is over: the lock is free for the updater.
+    expect(fs.existsSync(p.lockFile)).toBe(false)
+  })
+
+  it('signal left by an update that no longer exists → ignored, the queue gives tickets as always', async () => {
+    const p = paths()
+    seedDue(p.stateFile, ['q'])
+    const {runtime, gates} = queueRuntime()
+    const {claimQueue, handed} = claimSource(['CYAU-1', 'CYAU-2', 'CYAU-3'])
+    // The pid of a process already ended: an updater killed without cleaning up.
+    const deadPid = spawnSync('true').pid
+    expect(markUpdateDrain(updateDrainPath(p.lockFile), {pid: deadPid, identify: () => null})).not.toBeNull()
+
+    const run = runOnce({
+      playbook: playbookWith(['q']), playbookDir: dir, now, ...p,
+      runtime, skillsMode: true, flowMaxParallel: 3,
+      ticketQueues: {q: target}, claimQueue, preflight: claimAwarePreflight([]),
+    })
+
+    await flush()
+    expect(handed).toEqual(['CYAU-1', 'CYAU-2', 'CYAU-3'])
+    for (const gate of gates) gate.resolve(ok())
+    const result = await run
+    expect(result.executed).toHaveLength(3)
   })
 
   // Seen on AAC-13: a machine took the ticket and gave it back at once, three times, and the ticket never said why.
@@ -974,5 +1033,46 @@ describe('runOnce — atomic queue take-over (CYAU-169)', () => {
 
     expect(contexts[0].onStreamEvent).toBeUndefined()
     expect(fs.existsSync(p.logDir) ? fs.readdirSync(p.logDir).filter((file) => file.endsWith('.live.jsonl')) : []).toEqual([])
+  })
+})
+
+// CYAU-356 — the serial path (prompt mode) respects the update waiting for the free machine too: the action in
+// progress finishes, the next ones do not start.
+describe('runOnce — serial path with an update waiting (CYAU-356)', () => {
+  it('signal written during the first action → the others do not start, the round ends', async () => {
+    const p = paths()
+    const names = ['a1', 'a2', 'a3']
+    seedDue(p.stateFile, names)
+    const {runtime, gates, started} = gatedRuntime()
+
+    const run = runOnce({
+      playbook: playbookWith(names), playbookDir: dir, now, ...p,
+      runtime, skillsMode: false,
+    })
+
+    await flush()
+    expect(started).toEqual(['a1'])
+    markUpdateDrain(updateDrainPath(p.lockFile))
+    gates.get('a1')!.resolve(ok())
+    const result = await run
+
+    expect(started).toEqual(['a1'])
+    expect(result.executed.map((entry) => entry.name)).toEqual(['a1'])
+    expect(fs.existsSync(p.lockFile)).toBe(false)
+  })
+
+  it('no signal → the serial path runs every action as before', async () => {
+    const p = paths()
+    const names = ['a1', 'a2']
+    seedDue(p.stateFile, names)
+    const runtime: AgentRuntime = {
+      id: 'fake',
+      healthCheck: async () => ({available: true}),
+      execute: () => ({result: Promise.resolve(ok()), cancel: () => undefined}),
+    }
+
+    const result = await runOnce({playbook: playbookWith(names), playbookDir: dir, now, ...p, runtime, skillsMode: false})
+
+    expect(result.executed.map((entry) => entry.name)).toEqual(['a1', 'a2'])
   })
 })

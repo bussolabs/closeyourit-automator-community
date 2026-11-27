@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.69.10-beta.1] - 2026-11-28
+
+### Changed
+
+- **La macchina dice perché non rilegge un lavoro fermo.** Nel registro resta la risposta del server, così si distingue «nessuno da rileggere» da una richiesta rifiutata. (CYAU-358)
+
+## [0.69.9] - 2026-11-28
+
+### Changed
+
+- **Una macchina sempre al lavoro si aggiorna lo stesso.** Quando esce una versione nuova, la macchina non prende lavoro nuovo e finisce quello in corso, senza interrompere nessuna sessione. Appena è libera si aggiorna e riparte. Senza versione nuova lavora come prima. Dopo 6 ore di attesa l'aggiornamento rinuncia e il pannello lo mostra. (CYAU-356)
+
 ## [0.69.8-beta.1] - 2026-11-27
 
 ### Fixed

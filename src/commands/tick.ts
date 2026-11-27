@@ -13,7 +13,8 @@ import {makeOrgClaudeCredentialReconciler} from '../lib/org-claude-credential'
 import {makeOrgOpenrouterKeyReconciler} from '../lib/org-openrouter-credential'
 import {makeSkillsReconciler} from '../lib/skills-manifest'
 import {makeSync} from '../lib/sync'
-import {agentConversationsDir, logsDir, lockPath, playbookPath, skillsModeEnabled, statePath} from '../lib/paths'
+import {agentConversationsDir, logsDir, lockPath, playbookPath, skillsModeEnabled, statePath, updateDrainPath} from '../lib/paths'
+import {updateDrainPending} from '../lib/update-drain'
 import {localConversationStore} from '../lib/agent-conversation'
 import {agentCodexHome} from '../lib/executor'
 import {type Playbook} from '../lib/schema'
@@ -40,6 +41,11 @@ export default class Tick extends BaseCommand {
   /** Test seam: the monitor beat, which writes the engines the server declares into the shared list. */
   protected hostBeat(secrets: Secrets): ReturnType<typeof makeHeartbeat> {
     return makeHeartbeat(secrets, {version: this.config.version, engines: hostEngines})
+  }
+
+  /** Test seam: the drain signal of an update waiting for the free machine (CYAU-356). */
+  protected updatePending(): boolean {
+    return updateDrainPending(updateDrainPath(lockPath()))
   }
 
   /** Test seam: the iteration itself. */
@@ -92,6 +98,13 @@ export default class Tick extends BaseCommand {
       ticketQueues = synced.ticketQueues
     } else {
       playbook = loadPlaybook(file)
+    }
+
+    // CYAU-356: a tick launched by hand respects the update waiting for the free machine, as the daemon does —
+    // otherwise it would take a ticket and keep the machine busy for the whole wait.
+    if (this.updatePending()) {
+      if (!this.jsonEnabled()) this.log('skip: aggiornamento in attesa della macchina libera, nessun lavoro nuovo')
+      return {skipped: true, executed: [], seeded: [], scheduleErrors: [], pruned: 0}
     }
 
     // CYAU-220: a tick launched by hand says the same thing the daemon says when the machine cannot beat.

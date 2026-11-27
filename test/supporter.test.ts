@@ -601,6 +601,16 @@ describe('makeSupporterPass on stopped workflows', () => {
     expect(run).toHaveBeenCalledTimes(1)
   })
 
+  // CYAU-358 — a pass that reads no stop said nothing, so nobody could tell "none to read" from "refused".
+  it('says why it read no stop, with the status the server answered', async () => {
+    for (const status of [204, 403]) {
+      const {fetchFn} = consultServer(null, status)
+      const lines: string[] = []
+      await makeSupporterPass(secrets, {fetchFn, run: vi.fn<SupporterRun>(), log: (line) => lines.push(line)})?.()
+      expect(lines).toContain(`supporter: no stop offered (status ${status})`)
+    }
+  })
+
   it('does nothing when no workflow is stopped, including a server that does not know the route', async () => {
     for (const status of [204, 404]) {
       const {fetchFn} = consultServer(null, status)

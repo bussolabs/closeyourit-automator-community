@@ -203,6 +203,14 @@ export function lockPath(): string {
   return path.join(stateDir(), 'tick.lock')
 }
 
+/**
+ * CYAU-356 — "an update is waiting for the free machine" (`update-drain.ts`). It lives BESIDE the cycle lock: the
+ * daemon, the tick and the update already agree on that folder, so whoever reads the lock finds the signal too.
+ */
+export function updateDrainPath(lockFile: string = lockPath()): string {
+  return path.join(path.dirname(lockFile), 'update-drain.json')
+}
+
 export function daemonLogPath(): string {
   return path.join(stateDir(), 'daemon.log')
 }

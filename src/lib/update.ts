@@ -419,10 +419,11 @@ export const UpdateResultSchema = z
     /**
      * updated: new version active and healthy · up-to-date: already on the latest · rolled-back: update failed and
      * previous one restored (healthy system, not updated) · incompatible: no compatible version ·
-     * busy: the machine was working, nothing touched (CYAU-202) · failed: unrecoverable failure /
+     * busy: the machine was working, nothing touched (CYAU-202) · busy-timeout: a new version waited for the free
+     * machine for the whole longest wait, nothing touched (CYAU-356) · failed: unrecoverable failure /
      * integrity violated (checksum) / empty manifest.
      */
-    outcome: z.enum(['updated', 'up-to-date', 'rolled-back', 'incompatible', 'busy', 'failed']),
+    outcome: z.enum(['updated', 'up-to-date', 'rolled-back', 'incompatible', 'busy', 'busy-timeout', 'failed']),
     channel: z.enum(['stable', 'beta']),
     fromVersion: z.string().nullable(),
     toVersion: z.string().nullable(),
@@ -590,6 +591,20 @@ function makeResult(draft: ResultDraft): UpdateResult {
  */
 export function busyResult(channel: ReleaseChannel, fromVersion: string | null, reason: string): UpdateResult {
   return makeResult({outcome: 'busy', channel, fromVersion, toVersion: null, reason, reasons: [reason]})
+}
+
+/**
+ * "Deferred after the longest wait" outcome (CYAU-356): a new version existed, the machine stopped taking work and
+ * waited, but a session never ended. Nothing was touched either; unlike `busy` it is recorded for the panel,
+ * because a machine that cannot free itself for six hours is something to look at.
+ */
+export function busyTimeoutResult(
+  channel: ReleaseChannel,
+  fromVersion: string | null,
+  toVersion: string | null,
+  reason: string,
+): UpdateResult {
+  return makeResult({outcome: 'busy-timeout', channel, fromVersion, toVersion, reason, reasons: [reason]})
 }
 
 /**

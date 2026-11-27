@@ -538,7 +538,10 @@ export function makeSupporterPass(
     try {
       if (signal?.aborted) return false
       const res = await fetchFn(`${api}/supporter_consult`, {method: 'GET', headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)})
-      if (res.status !== 200) return false
+      if (res.status !== 200) {
+        log(`supporter: no stop offered (status ${res.status})`)
+        return false
+      }
       const round = ((await res.json().catch(() => null)) as {data?: SupporterConsultRound} | null)?.data
       if (!round?.workflow_id || !round.digest || !round.stop) return false
       const cwd = secrets.hosts?.[round.project_key]?.cwd

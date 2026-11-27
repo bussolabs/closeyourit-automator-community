@@ -64,6 +64,33 @@ describe('esito dell aggiornamento automatico', () => {
     expect(readUpdateFailure()?.reason).toContain('rete assente')
   })
 
+  it('CYAU-356: deferred after the longest wait → notice with the waiting version, cleared by the next update', () => {
+    recordUpdateOutcome({
+      outcome: 'busy-timeout',
+      reason: "la macchina ha lavorato per tutta l'attesa massima (6 ore): aggiornamento rimandato dopo l'attesa massima",
+      fromVersion: '0.32.3',
+      toVersion: '0.33.0',
+    })
+
+    const stop = readUpdateFailure()
+    expect(stop?.action).toBe('update')
+    expect(stop?.reason).toContain('0.33.0')
+    expect(stop?.reason).toContain('rimandato dopo l')
+
+    // A plain `busy` afterwards does not switch it off: the machine is still behind.
+    recordUpdateOutcome({outcome: 'busy', reason: 'la macchina sta lavorando', fromVersion: null, toVersion: null})
+    expect(readUpdateFailure()?.reason).toContain('0.33.0')
+
+    recordUpdateOutcome({outcome: 'updated', reason: 'aggiornata', fromVersion: '0.32.3', toVersion: '0.33.0'})
+    expect(readUpdateFailure()).toBeNull()
+  })
+
+  it('CYAU-356: the plain busy stays unrecorded', () => {
+    recordUpdateOutcome({outcome: 'busy', reason: 'la macchina sta lavorando', fromVersion: null, toVersion: null})
+
+    expect(fs.existsSync(updateOutcomePath())).toBe(false)
+  })
+
   it('no failed update → no notice', () => {
     expect(readUpdateFailure()).toBeNull()
   })

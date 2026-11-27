@@ -44,7 +44,8 @@ import {
 import {type ExecutionPhase} from './phase-profile'
 import {resolveFlowConcurrency, runFlowPool} from './flow-engine'
 import {type PreflightStop} from './heartbeat'
-import {skillsModeEnabled} from './paths'
+import {skillsModeEnabled, updateDrainPath} from './paths'
+import {updateDrainPending} from './update-drain'
 import {describeRuntimeFailure, isRuntimeCredentialFailure} from './runtime-failure'
 import {agentRuntimeReadiness} from './runtime-probe'
 import {noteQuotaFailure} from './agent-quota'
@@ -383,6 +384,11 @@ export interface RunOnceOptions {
    * (serial, fail-closed: never unlimited). Ignored when `skillsMode` is false.
    */
   flowMaxParallel?: number | (() => number | undefined | Promise<number | undefined>)
+  /**
+   * CYAU-356 — true while an update waits for the free machine: no new action starts and no queue gives a ticket,
+   * the ones already running finish. Default: the drain signal beside `lockFile` (an orphan one counts as missing).
+   */
+  updatePending?: () => boolean
 }
 
 export interface ExecutedAction {
@@ -739,6 +745,7 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
   const label = opts.label ?? 'automator'
   const persistState = opts.persistState ?? saveState
   const sleep = opts.sleep ?? waitFor
+  const updatePending = opts.updatePending ?? (() => updateDrainPending(updateDrainPath(opts.lockFile), {isAlive: opts.isAlive}))
   if (!acquire(opts.lockFile, label, opts.isAlive)) {
     return {skipped: true, executed: [], seeded: [], scheduleErrors: [], pruned: 0, stateQuarantined: null, preflightStopped: [], flowFailures: []}
   }
@@ -2012,6 +2019,9 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
         maxParallel: cap,
         claimNext: async () => {
           while (!stopDispatch && !opts.signal?.aborted && nextIndex < attempts.length) {
+            // CYAU-356: an update waiting for the free machine closes the admission BEFORE the claim, so no ticket
+            // is taken; the steps in flight drain and the round ends, freeing the lock.
+            if (updatePending()) return null
             const entry = attempts[nextIndex++]
             const target = claimQueue ? opts.ticketQueues?.[entry.name] : undefined
             if (!target) return entry
@@ -2053,6 +2063,8 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       }
     } else {
       for (const entry of admittedDue) {
+        // CYAU-356: same check as the pool, before every action of the serial path.
+        if (updatePending()) break
         if ((await dispatchDueEntry(entry)) === 'stop') break
       }
     }

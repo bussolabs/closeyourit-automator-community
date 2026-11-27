@@ -31,8 +31,11 @@ export function updateOutcomePath(): string {
   return path.join(stateDir(), OUTCOME_FILE)
 }
 
-/** Outcomes that leave the machine NOT updated and that someone must look at. */
-const FAILURE_OUTCOMES = new Set(['failed', 'rolled-back', 'incompatible'])
+/**
+ * Outcomes that leave the machine NOT updated and that someone must look at. CYAU-356: `busy-timeout` too — a
+ * machine that waited six hours without freeing itself is not a failure, but nobody would know otherwise.
+ */
+const FAILURE_OUTCOMES = new Set(['failed', 'rolled-back', 'incompatible', 'busy-timeout'])
 
 /** Outcomes that say "the machine is on the right version": any previous warning is no longer needed. */
 const HEALTHY_OUTCOMES = new Set(['updated', 'up-to-date'])
@@ -44,12 +47,13 @@ function describe(outcome: string, reason: string, fromVersion: string | null, t
     return `aggiornamento a ${target} non riuscito: la macchina è tornata a ${previous} (${reason})`
   }
   if (outcome === 'incompatible') return `aggiornamento non applicabile: ${reason}`
+  if (outcome === 'busy-timeout') return `aggiornamento a ${target} rimandato: ${reason}`
   return `aggiornamento a ${target} non riuscito: ${reason}`
 }
 
 /**
  * Records the outcome of the last update. A healthy outcome clears the warning; `busy` touches nothing — it is not
- * a failed attempt, and clearing there would switch off a still valid warning.
+ * a failed attempt, and clearing there would switch off a still valid warning (a `busy-timeout` among them).
  */
 export function recordUpdateOutcome(result: {
   outcome: string

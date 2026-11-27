@@ -10,6 +10,7 @@ import {
   removeAutoUpdate,
   renderAutoUpdateService,
   renderAutoUpdateTimer,
+  TIMEOUT_START_SEC,
 } from '../src/lib/auto-update-timer'
 
 // CYAU-202 — the machine stayed three weeks behind because the update was launched only by hand.
@@ -54,6 +55,15 @@ describe('unit dell aggiornamento automatico', () => {
     expect(unit).toContain('XDG_RUNTIME_DIR=/run/user/1001')
     // A oneshot that restarts by itself after a refusal would fight with the timer: it retries at the next round.
     expect(unit).not.toContain('Restart=')
+  })
+
+  it('CYAU-356: the oneshot may wait the six hours for the free machine, and systemd stops it a little after', () => {
+    const unit = renderAutoUpdateService(FIELDS)
+
+    // 6 h of wait + 15 min for the update itself; `RuntimeMaxSec=` would not apply to a oneshot.
+    expect(TIMEOUT_START_SEC).toBe(6 * 3600 + 900)
+    expect(unit).toContain(`TimeoutStartSec=${6 * 3600 + 900}`)
+    expect(unit).not.toContain('RuntimeMaxSec=')
   })
 
   it('the timer tries every hour, spread out, and catches up the chance missed while the machine was off', () => {

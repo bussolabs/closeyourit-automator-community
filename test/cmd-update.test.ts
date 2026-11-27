@@ -11,6 +11,8 @@ import {loadManagedServiceConfig, saveManagedServiceConfig} from '../src/lib/man
 import {AutomatorError, ErrorCodes} from '../src/errors/error-codes'
 import {run, runCaptured, runExpectingExit, testConfig} from './helpers/command'
 import {readUpdateFailure} from '../src/lib/update-outcome'
+import {updateDrainPath} from '../src/lib/paths'
+import {updateDrainPending} from '../src/lib/update-drain'
 import {type PinResult} from '../src/lib/runtime-pins'
 
 // The `update` command (CYAU-33) distributes/updates the Automator: downloads from the channel a VERIFIED and
@@ -110,6 +112,9 @@ function makeFakeProbe(): UpdateProbe {
 // touches the real host pidfile.
 let idleHold: IdleHold = {held: true, release: () => { idleReleases += 1 }}
 let idleReleases = 0
+// CYAU-356: the wait for the free machine, injected. By default the machine never frees itself.
+let idleWait: (signal: AbortSignal) => Promise<IdleHold> = async () => ({held: false, expired: true, reason: 'attesa massima'})
+let waitCalls = 0
 // CYAU-202: daemon unit as seen by the update and timers actually installed.
 let timerRuntime: ServiceRuntime | null = null
 let installedTimers: Array<{homeDir: string; fields: AutoUpdateFields}> = []
@@ -126,6 +131,11 @@ class TestUpdate extends Update {
 
   protected holdIdle(): IdleHold {
     return idleHold
+  }
+
+  protected waitIdle(signal: AbortSignal): Promise<IdleHold> {
+    waitCalls += 1
+    return idleWait(signal)
   }
 
   protected async reconcileRuntimes(): Promise<PinResult> {
@@ -284,6 +294,8 @@ beforeEach(() => {
   exposedStatusError = null
   idleReleases = 0
   idleHold = {held: true, release: () => { idleReleases += 1 }}
+  idleWait = async () => ({held: false, expired: true, reason: 'attesa massima'})
+  waitCalls = 0
   timerRuntime = null
   installedTimers = []
   pinResult = {outcome: 'aligned'}
@@ -968,6 +980,136 @@ describe('update — never interrupts a run in progress', () => {
 
     expect(payload.result?.outcome).toBe('updated')
     expect(calls.restart).toBe(0)
+  })
+})
+
+// CYAU-356 — with the queue full the machine was busy at every hourly check and never updated. With a NEW version
+// the update now waits for the free machine: it writes the drain signal (no new work), waits for the cycle lock
+// and restarts only once it holds it. Without a new version nothing changes; after six hours it gives up and says so.
+class FailingManifestUpdate extends TestUpdate {
+  protected makeProbe(installRoot?: string, manifestBaseUrl?: string, migrateService = false, skipServicePreflight = false): UpdateProbe {
+    const probe = super.makeProbe(installRoot, manifestBaseUrl, migrateService, skipServicePreflight)
+    return {
+      ...probe,
+      fetchManifest: () => {
+        throw new Error('manifest non raggiungibile')
+      },
+    }
+  }
+}
+
+describe('update — waits for the free machine when a new version exists', () => {
+  const manifest: ReleaseManifest = {channel: 'stable', releases: [entry('1.0.0'), entry('1.2.0')]}
+  const busy: IdleHold = {held: false, busy: true, reason: 'la macchina sta lavorando: aggiornamento rimandato'}
+
+  it('session in progress → signal up and no restart while it works; restart only once the machine is free', async () => {
+    fakeOpts = {current: '1.0.0', manifest, currentTarget: '/opt/a/releases/1.0.0'}
+    idleHold = busy
+    let pendingDuringWait = false
+    let restartsDuringWait = -1
+    idleWait = async () => {
+      pendingDuringWait = updateDrainPending(updateDrainPath())
+      restartsDuringWait = calls.restart
+      return {held: true, release: () => { idleReleases += 1 }}
+    }
+
+    const payload = (await run(TestUpdate, ['--install-root', '/opt/a', '--json'])) as UpdatePayload
+
+    expect(waitCalls).toBe(1)
+    expect(pendingDuringWait).toBe(true)
+    expect(restartsDuringWait).toBe(0)
+    expect(payload.result?.outcome).toBe('updated')
+    expect(payload.result?.toVersion).toBe('1.2.0')
+    expect(calls.restart).toBe(1)
+    expect(idleReleases).toBe(1)
+    expect(fs.existsSync(updateDrainPath())).toBe(false)
+  })
+
+  it('the machine works for six hours → gives up, clears the signal, exit 0 and the panel shows it', async () => {
+    fakeOpts = {current: '1.0.0', manifest, currentTarget: '/opt/a/releases/1.0.0'}
+    idleHold = busy
+    idleWait = async () => ({
+      held: false,
+      expired: true,
+      reason: "la macchina ha lavorato per tutta l'attesa massima (6 ore): aggiornamento rimandato dopo l'attesa massima",
+    })
+
+    const payload = (await run(TestUpdate, ['--install-root', '/opt/a', '--json'])) as UpdatePayload
+
+    expect(payload.result?.outcome).toBe('busy-timeout')
+    expect(payload.result?.toVersion).toBe('1.2.0')
+    expect(calls.download).toBe(0)
+    expect(calls.restart).toBe(0)
+    expect(fs.existsSync(updateDrainPath())).toBe(false)
+    expect(readUpdateFailure()?.reason).toContain('1.2.0')
+    expect(readUpdateFailure()?.reason).toContain('6 ore')
+  })
+
+  it('stopped during the wait (SIGTERM) → exits right away, clears the signal and gives its handlers back', async () => {
+    fakeOpts = {current: '1.0.0', manifest, currentTarget: '/opt/a/releases/1.0.0'}
+    idleHold = busy
+    const before = process.listenerCount('SIGTERM')
+    let abortedBySigterm = false
+    idleWait = async (signal) => {
+      // Only the listener the command added, not the test runner's own.
+      const listeners = process.listeners('SIGTERM')
+      ;(listeners.at(-1) as () => void)()
+      abortedBySigterm = signal.aborted
+      return {held: false, stopped: true, reason: 'attesa della macchina libera interrotta: aggiornamento rimandato'}
+    }
+
+    const payload = (await run(TestUpdate, ['--install-root', '/opt/a', '--json'])) as UpdatePayload
+
+    expect(abortedBySigterm).toBe(true)
+    expect(payload.result?.outcome).toBe('busy')
+    expect(calls.restart).toBe(0)
+    expect(fs.existsSync(updateDrainPath())).toBe(false)
+    expect(process.listenerCount('SIGTERM')).toBe(before)
+    expect(readUpdateFailure()).toBeNull()
+  })
+
+  it('already on the latest version → no signal, no wait: the machine keeps taking work as before', async () => {
+    fakeOpts = {current: '1.2.0', manifest, currentTarget: '/opt/a/releases/1.2.0'}
+    idleHold = busy
+
+    const payload = (await run(TestUpdate, ['--install-root', '/opt/a', '--json'])) as UpdatePayload
+
+    expect(payload.result?.outcome).toBe('busy')
+    expect(waitCalls).toBe(0)
+    expect(fs.existsSync(updateDrainPath())).toBe(false)
+  })
+
+  it('manifest that does not answer → no signal, no wait, busy as before', async () => {
+    fakeOpts = {current: '1.0.0', manifest, currentTarget: '/opt/a/releases/1.0.0'}
+    idleHold = busy
+
+    const payload = (await run(FailingManifestUpdate, ['--install-root', '/opt/a', '--json'])) as UpdatePayload
+
+    expect(payload.result?.outcome).toBe('busy')
+    expect(waitCalls).toBe(0)
+    expect(fs.existsSync(updateDrainPath())).toBe(false)
+  })
+
+  it('lock not verifiable → no wait: fail-closed as before', async () => {
+    fakeOpts = {current: '1.0.0', manifest, currentTarget: '/opt/a/releases/1.0.0'}
+    idleHold = {held: false, reason: 'stato della macchina non verificabile: EACCES'}
+
+    const payload = (await run(TestUpdate, ['--install-root', '/opt/a', '--json'])) as UpdatePayload
+
+    expect(payload.result?.outcome).toBe('busy')
+    expect(waitCalls).toBe(0)
+    expect(manifestFetches).toBe(0)
+  })
+
+  it('--dry-run and --skip-service-preflight stay out of the wait', async () => {
+    fakeOpts = {current: '1.0.0', manifest, currentTarget: '/opt/a/releases/1.0.0', serviceInstalled: false}
+    idleHold = busy
+
+    await run(TestUpdate, ['--install-root', '/opt/a', '--dry-run', '--json'])
+    await run(TestUpdate, ['--install-root', '/opt/a', '--skip-service-preflight', '--json'])
+
+    expect(waitCalls).toBe(0)
+    expect(fs.existsSync(updateDrainPath())).toBe(false)
   })
 })
 
