@@ -6,7 +6,8 @@ import * as path from 'node:path'
 import {spawnSync} from 'node:child_process'
 import {afterAll, describe, expect, it, vi} from 'vitest'
 import {runOnce} from '../src/lib/runner'
-import {type RunResult} from '../src/lib/executor'
+import {type RunContext, type RunResult} from '../src/lib/executor'
+import {type ConversationStore, conversationFingerprint, recordConversation} from '../src/lib/agent-conversation'
 import {type AgentRuntime} from '../src/lib/runtime'
 import {type AttemptDelivery, type AttemptDeliveryResult} from '../src/lib/client'
 import {emptyState, saveState, updateAction} from '../src/lib/state'
@@ -38,6 +39,10 @@ const TRIAGE_RESULT = {
   code: 'CYRA-199', category: 'backend', capabilities: ['backend'], risk: 'low',
   requires_human_approval: false, reasons: ['Area: backend'], state: 'workable',
 }
+// A phase that keeps its reviewer session: the tests of the review itself run on it (CYAU-354).
+const PLANNER_RESULT = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'contracts/agent-result/v1/fixtures/valid/planner.json'), 'utf8'),
+) as Record<string, unknown>
 const AUTOPILOT_RESULT = {
   // CYRA-674 — a delivery without security_findings is invalid: the empty list is the answer.
   code: 'CYAU-181', state: 'delivered', gate: {passed: true}, review: {verdict: 'unavailable'}, cycles: 1, security_findings: [],
@@ -814,16 +819,16 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
 
   it('successful delivery: the payload carries result and review, and the log records it', async () => {
     const deliver = vi.fn(async (): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
-    const {action, log} = await dispatch({
+    const {action, log} = await dispatch({executionPhase: 'planner', 
       // Real CLI envelope: the result arrives nested in `result` as a string.
-      stdout: JSON.stringify({type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(TRIAGE_RESULT)}),
+      stdout: JSON.stringify({type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(PLANNER_RESULT)}),
       deliver,
     })
 
     expect(deliver).toHaveBeenCalledWith({
       runtime: 'claude',
       reviewer_runtime: 'codex',
-      result: TRIAGE_RESULT,
+      result: PLANNER_RESULT,
       // CYAU-176 — the host declares `depth` on EVERY delivery: a report that does not say how it was
       // reviewed is a report missing the part that matters, and the server no longer accepts it.
       review: {status: 'accepted', summary: 'Conforme', depth: 'result'},
@@ -876,8 +881,8 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
       }),
     }
 
-    const {action, log} = await dispatch({
-      stdout: JSON.stringify(TRIAGE_RESULT), deliver, reviewer: brokenReviewer, reportFailure,
+    const {action, log} = await dispatch({executionPhase: 'planner', 
+      stdout: JSON.stringify(PLANNER_RESULT), deliver, reviewer: brokenReviewer, reportFailure,
       settleQuotaPause: (paused) => settled.push(paused),
       sleep: async (ms) => { waits.push(ms) },
     })
@@ -914,8 +919,8 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
       .mockResolvedValue({outcome: 'ok', status: 200})
     const waits: number[] = []
 
-    const {action} = await dispatch({
-      stdout: JSON.stringify(TRIAGE_RESULT), deliver, reviewer: revokedReviewer,
+    const {action} = await dispatch({executionPhase: 'planner', 
+      stdout: JSON.stringify(PLANNER_RESULT), deliver, reviewer: revokedReviewer,
       sleep: async (ms) => { waits.push(ms) },
     })
 
@@ -1024,7 +1029,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
 
     const invalidate = vi.spyOn(agentRuntimeReadiness, 'invalidate')
 
-    const {action} = await dispatch({stdout: JSON.stringify(TRIAGE_RESULT), deliver, reviewer: brokenReviewer})
+    const {action} = await dispatch({executionPhase: 'planner', stdout: JSON.stringify(PLANNER_RESULT), deliver, reviewer: brokenReviewer})
 
     // CYAU-335 — the reason stays on the record even though nothing was delivered: it is the only place the
     // operator reads why the review did not happen.
@@ -1043,7 +1048,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
       id: 'fake-claude', healthCheck: async () => ({available: true}),
       execute: (_name: string, action: {type: string; permission_mode?: string}) => {
         actions.push(action)
-        const stdout = actions.length === 1 ? JSON.stringify(TRIAGE_RESULT) : '{"status":"accepted","summary":"Conforme"}'
+        const stdout = actions.length === 1 ? JSON.stringify(PLANNER_RESULT) : '{"status":"accepted","summary":"Conforme"}'
         return {
           result: Promise.resolve<RunResult>({
             status: 'success', exitCode: 0, errorCode: null, durationMs: 1, logPath: s.logPath, stdout, stdoutTruncated: false,
@@ -1055,7 +1060,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     const codex = {...approvingReviewer(), execute: vi.fn(approvingReviewer().execute)}
     const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>().mockResolvedValue({outcome: 'ok', status: 200})
 
-    await dispatch({stdout: '', deliver, implementer, reviewer: codex, reviewMode: 'same'})
+    await dispatch({executionPhase: 'planner', stdout: '', deliver, implementer, reviewer: codex, reviewMode: 'same'})
 
     expect(codex.execute).not.toHaveBeenCalled()
     expect(actions).toHaveLength(2)
@@ -1076,7 +1081,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
       .mockResolvedValue({outcome: 'ok', status: 200})
 
-    await dispatch({stdout: JSON.stringify(TRIAGE_RESULT), deliver, cwd: dir, seenReviewer})
+    await dispatch({executionPhase: 'planner', stdout: JSON.stringify(PLANNER_RESULT), deliver, cwd: dir, seenReviewer})
 
     expect(seenReviewer.action?.cwd).toBe(dir)
     expect(deliver).toHaveBeenCalled()
@@ -1094,6 +1099,23 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     reviewed_base_commit: 'a'.repeat(40), reviewed_snapshot_tree: 'b'.repeat(40),
     reviewed_diff_sha256: 'c'.repeat(64),
   }
+
+  // CYAU-354 — the phases that write no code are checked by the server alone: no reviewer session starts, and
+  // the delivery says so in the review it declares.
+  it('a phase that writes no code is delivered without a reviewer session', async () => {
+    const seenReviewer: {action?: {cwd?: string}} = {}
+    const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
+      .mockResolvedValue({outcome: 'ok', status: 200})
+
+    const {action} = await dispatch({stdout: JSON.stringify(TRIAGE_RESULT), deliver, seenReviewer})
+
+    expect(seenReviewer.action).toBeUndefined()
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
+      result: TRIAGE_RESULT,
+      review: {status: 'accepted', depth: 'result', summary: 'No reviewer session for this phase: the server checks its result'},
+    }))
+    expect(action.delivery).toMatchObject({outcome: 'ok', reviewStatus: 'accepted'})
+  })
 
   it('where the diff is reviewed, the second session on the report alone NO longer starts', async () => {
     const seenReviewer: {action?: {cwd?: string}} = {}
@@ -1238,7 +1260,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
         cancel: () => undefined,
       }))
       try {
-        await dispatch({stdout: JSON.stringify(TRIAGE_RESULT), deliver: vi.fn(async () => ({outcome: 'ok', status: 200})),
+        await dispatch({executionPhase: 'planner', stdout: JSON.stringify(PLANNER_RESULT), deliver: vi.fn(async () => ({outcome: 'ok', status: 200})),
           reviewer: {id: 'fake-codex', healthCheck: async () => ({available: true}), execute}})
         expect(execute).toHaveBeenCalledTimes(authentic ? 1 : 2)
         const file = path.join(stateDir, 'quota-pause.json')
@@ -1325,7 +1347,7 @@ describe('runOnce — phase result delivery (CYAU-105)', () => {
     const deliver = vi.fn<[AttemptDelivery], Promise<AttemptDeliveryResult>>()
       .mockResolvedValue({outcome: 'ok', status: 200})
 
-    await dispatch({stdout: JSON.stringify(TRIAGE_RESULT), deliver, seenReviewer})
+    await dispatch({executionPhase: 'planner', stdout: JSON.stringify(PLANNER_RESULT), deliver, seenReviewer})
 
     expect(seenReviewer.action).toBeDefined()
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
@@ -1432,7 +1454,7 @@ describe('runOnce — cost and model at delivery (CYRA-872)', () => {
     const afterRuntime = vi.fn()
       .mockResolvedValueOnce({outcome: 'retry', retryPrompt: 'Try again'})
       .mockResolvedValue({outcome: 'complete', runStatus: 'success', errorCode: null})
-    await dispatch({engine: 'codex', stdout: JSON.stringify(TRIAGE_RESULT),
+    await dispatch({executionPhase: 'planner', engine: 'codex', stdout: JSON.stringify(PLANNER_RESULT),
       usageStdout: missingFirst ? ['', codexOut(true)] : [codexOut(true), ''],
       deliver, recordSessionCost, authorizedCwd: dir, afterRuntime})
     expect(deliver).toHaveBeenCalledTimes(1)
@@ -1514,6 +1536,209 @@ describe('runOnce — cost and model at delivery (CYRA-872)', () => {
     })
 
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({cost_usd: 0.3, model: 'claude-opus-5-5'}))
+  })
+})
+
+// CYAU-353 — before the synthetic block, the same conversation is asked once to rewrite its result.
+describe('runOnce — one correction of an unreadable result (CYAU-353)', () => {
+  const SEEDED = '6f1c2b7e-3d4a-4e5f-8a9b-0c1d2e3f4a5b'
+  const BLOCKED = {
+    contract_version: 2, code: 'CYAU-353', state: 'blocked', review: {verdict: 'unavailable'}, security_findings: [],
+    failure: {category: 'authentication', summary: 'Git non si autentica.', retryable: false, human_action: 'Ruotare la credenziale.'},
+  }
+  // `failure` is a closed shape: one key of the agent's own makes the whole result unreadable.
+  const WITH_EXTRA_KEY = {...BLOCKED, failure: {...BLOCKED.failure, chiave_inventata: 'x'}}
+  const STILL_WRONG = {...BLOCKED, review: {verdict: 'git_auth'}}
+  const out = (result: unknown, cost: number) => JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(result), total_cost_usd: cost,
+  })
+  const book = PlaybookSchema.parse({version: 1, actions: {work: {
+    schedule: 'every 1m', type: 'claude', run: 'phase prompt', containment: 'strong',
+    skill: {command: '/closeyourit-skills:autopilot', args: 'CYAU-353', plugin_dir: '/skills'},
+  }}})
+  const git = (cwd: string, ...args: string[]) =>
+    spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], {cwd})
+
+  type Step = {result?: unknown; cost?: number; status?: RunResult['status']; errorCode?: string; during?: (cwd: string) => void}
+
+  async function correction(opts: {
+    steps: Step[]
+    exists?: boolean
+    withoutRegistry?: boolean
+    seed?: boolean
+    attemptsDir?: string
+  }) {
+    const s = scenario()
+    const cwd = fs.mkdtempSync(path.join(dir, 'work-'))
+    git(cwd, 'init', '-q')
+    fs.writeFileSync(path.join(cwd, 'README.md'), 'base\n')
+    git(cwd, 'add', '.')
+    git(cwd, 'commit', '-q', '-m', 'base')
+    // The fallback block measures a conflict with `origin/HEAD`: without that ref, some git versions answer
+    // «conflict» and the block would say `merge_conflict`. The base commit is main here, so nothing conflicts.
+    git(cwd, 'update-ref', 'refs/remotes/origin/HEAD', 'HEAD')
+    const store: ConversationStore = {
+      dir: path.join(path.dirname(s.stateFile), 'conversations'),
+      sessionExists: () => opts.exists ?? true,
+    }
+    if (opts.seed) {
+      recordConversation(store.dir, {ticket: 'CYAU-353', phase: 'autopilot', engine: 'claude', cwd,
+        fingerprint: conversationFingerprint(book.actions.work)}, SEEDED, now)
+    }
+    const steps = [...opts.steps]
+    const seen: RunContext[] = []
+    const implementer: AgentRuntime = {
+      id: 'fake-claude', healthCheck: async () => ({available: true}),
+      execute: (_name, _action, ctx) => {
+        seen.push(ctx)
+        const step = steps.shift() ?? {}
+        step.during?.(cwd)
+        return {
+          result: Promise.resolve<RunResult>({
+            status: step.status ?? 'success', exitCode: step.status && step.status !== 'success' ? 1 : 0,
+            errorCode: step.errorCode ?? null, durationMs: 1, logPath: s.logPath,
+            stdout: step.result === undefined ? '' : out(step.result, step.cost ?? 0), stdoutTruncated: false,
+          }),
+          cancel: () => undefined,
+        }
+      },
+    }
+    const deliver = vi.fn(async (_payload: AttemptDelivery): Promise<AttemptDeliveryResult> => ({outcome: 'ok', status: 200}))
+    const beforeRuntime = vi.fn(async () => undefined)
+    let claims = 0
+    const result = await runOnce({
+      playbook: book, playbookDir: dir, now,
+      stateFile: s.stateFile, logDir: s.logDir, lockFile: s.lockFile,
+      ...(opts.withoutRegistry ? {} : {conversations: store}),
+      authorizedCwds: {work: cwd},
+      claudeRuntime: implementer, codexRuntime: approvingReviewer(),
+      preflight: async () => {
+        // What the preflight does at the claim: the only place an attempt is counted.
+        claims++
+        if (opts.attemptsDir) recordTicketAttempt({project: 'CYAU', ticket: 'CYAU-353', phase: 'autopilot', now}, opts.attemptsDir)
+        return {
+          outcome: 'admit', state: 'ready', reason: 'ok', audit: [],
+          executionLease: {renewEveryMs: 60_000, renew: async () => true, release: async () => undefined},
+          ticketRun: {
+            runId: 'run-1', authorizedCwd: cwd, branch: 'ticket/CYAU-353', beforeRuntime,
+            afterRuntime: async () => ({outcome: 'complete' as const, runStatus: 'success' as const, errorCode: null}),
+            block: async () => undefined,
+          },
+          workflowDelivery: {executionPhase: 'autopilot', attemptId: 'attempt-1', ticketCode: 'CYAU-353', deliver},
+        }
+      },
+    })
+    return {
+      result, seen, deliver, beforeRuntime, cwd, claims,
+      action: result.executed[0],
+      log: fs.readFileSync(s.logPath, 'utf8'),
+      payload: () => deliver.mock.calls[0]![0],
+    }
+  }
+
+  it('a result with a key too many is rewritten by the same conversation, and delivered as usual (AC-1, AC-6)', async () => {
+    const run = await correction({steps: [{result: WITH_EXTRA_KEY, cost: 0.4}, {result: BLOCKED, cost: 0.1}]})
+
+    expect(run.seen).toHaveLength(2)
+    const first = run.seen[0].conversation
+    expect(first?.mode).toBe('new')
+    expect(run.seen[1].conversation).toEqual({mode: 'resume', id: first?.id, prompt: expect.stringContaining('chiave_inventata')})
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    // The agent's own result, not the host's block.
+    expect(run.payload().result).toMatchObject({state: 'blocked', failure: {category: 'authentication', summary: 'Git non si autentica.'}})
+    expect(run.payload().review.summary).not.toBe('Generata dall\'host: nessun risultato da rileggere')
+    // Both sessions are paid on the ticket.
+    expect(run.payload().cost_usd).toBeCloseTo(0.5)
+    expect(run.log).toContain('# result_correction: requested, resuming the same conversation')
+    expect(run.log).toMatch(/# result_correction_issues: failure: .*chiave_inventata/u)
+    expect(run.log).toContain('# result_correction: delivered, the same conversation rewrote its result')
+  })
+
+  it('a second unreadable result keeps today\'s block, with both lists of errors in the log (AC-2)', async () => {
+    const run = await correction({steps: [{result: WITH_EXTRA_KEY, cost: 0.4}, {result: STILL_WRONG, cost: 0.1}]})
+
+    // One correction only: no third session.
+    expect(run.seen).toHaveLength(2)
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.payload()).toMatchObject({
+      review: {summary: 'Generata dall\'host: nessun risultato da rileggere'},
+      result: {state: 'blocked', failure: {category: 'unknown', retryable: true, summary: expect.stringMatching(/chiave_inventata/u)}},
+    })
+    expect(run.payload().cost_usd).toBeCloseTo(0.5)
+    expect(run.action.errorCode).toBe('C422-WORKFLOW-001')
+    expect(run.log).toContain('# result_correction: discarded, corrected result still unreadable')
+    expect(run.log).toMatch(/# result_correction_issues: failure: .*chiave_inventata/u)
+    expect(run.log).toMatch(/# result_correction_issues: review\.verdict: .*git_auth/u)
+    expect(run.log).toContain('# synthetic_result: blocked')
+  })
+
+  it('the correction uses no attempt of the ticket: it goes through no claim (AC-3)', async () => {
+    const attemptsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attempts-353-'))
+    try {
+      const run = await correction({attemptsDir, steps: [{result: WITH_EXTRA_KEY}, {result: BLOCKED}]})
+      expect(run.seen).toHaveLength(2)
+      expect(run.claims).toBe(1)
+      expect(run.beforeRuntime).toHaveBeenCalledTimes(1)
+      expect(readTicketAttempts('CYAU', 'CYAU-353', attemptsDir).record).toMatchObject({attempts: 1, phase: 'autopilot'})
+    } finally {
+      fs.rmSync(attemptsDir, {recursive: true, force: true})
+    }
+  })
+
+  it.each([
+    ['a file', (cwd: string) => fs.writeFileSync(path.join(cwd, 'nuovo.txt'), 'x'), 'uncommitted files changed'],
+    ['a commit', (cwd: string) => { git(cwd, 'commit', '-q', '--allow-empty', '-m', 'altro') }, 'last commit changed'],
+  ])('a correction that changes %s is discarded and today\'s block is delivered (AC-4)', async (_what, during, reason) => {
+    const run = await correction({steps: [{result: WITH_EXTRA_KEY, cost: 0.4}, {result: BLOCKED, cost: 0.1, during}]})
+
+    expect(run.seen).toHaveLength(2)
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.payload().result).toMatchObject({failure: {category: 'unknown', retryable: true}})
+    // Discarded, but paid.
+    expect(run.payload().cost_usd).toBeCloseTo(0.5)
+    expect(run.log).toContain(`# result_correction: discarded, correction changed the work: ${reason}`)
+  })
+
+  it('a correction session that times out is discarded, and its spend still counts', async () => {
+    const run = await correction({steps: [
+      {result: WITH_EXTRA_KEY, cost: 0.4},
+      {result: BLOCKED, cost: 0.1, status: 'timeout', errorCode: 'C504-EXEC-003'},
+    ]})
+
+    expect(run.seen).toHaveLength(2)
+    expect(run.payload().result).toMatchObject({failure: {category: 'unknown'}})
+    expect(run.payload().cost_usd).toBeCloseTo(0.5)
+    expect(run.log).toContain('# result_correction: discarded, correction session ended with timeout (C504-EXEC-003)')
+  })
+
+  it.each([
+    ['without a conversation name', {withoutRegistry: true}, 'no conversation to resume'],
+    ['when the conversation file is gone', {exists: false}, 'conversation file no longer on this machine'],
+  ])('%s there is no correction, and the log says why (AC-5)', async (_case, extra, reason) => {
+    const run = await correction({...extra, steps: [{result: WITH_EXTRA_KEY}]})
+
+    expect(run.seen).toHaveLength(1)
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.payload().result).toMatchObject({failure: {category: 'unknown'}})
+    expect(run.log).toContain(`# result_correction: not attempted, ${reason}`)
+  })
+
+  it('a conversation resumed after a restart is started over as before; only the new one is corrected, once', async () => {
+    const run = await correction({seed: true, steps: [{result: WITH_EXTRA_KEY}, {result: WITH_EXTRA_KEY}, {result: STILL_WRONG}]})
+
+    expect(run.seen).toHaveLength(3)
+    expect(run.seen[0].conversation).toEqual({mode: 'resume', id: SEEDED})
+    expect(run.seen[1].conversation?.mode).toBe('new')
+    expect(run.seen[2].conversation).toMatchObject({mode: 'resume', id: run.seen[1].conversation?.id})
+    expect(run.deliver).toHaveBeenCalledTimes(1)
+    expect(run.log).toContain('# conversation_resume: failed, starting a new conversation')
+    expect(run.log).toContain('# result_correction: discarded, corrected result still unreadable')
+  })
+
+  it('an output without any result object is not corrected', async () => {
+    const run = await correction({steps: [{result: 'solo prosa'}]})
+    expect(run.seen).toHaveLength(1)
+    expect(run.log).toContain('# result_correction: not attempted, no result object to correct')
   })
 })
 

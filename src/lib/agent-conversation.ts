@@ -20,10 +20,14 @@ import {isRecord, mutateJsonFileAtomically, writeAtomicJson} from './state'
 
 export type ConversationEngine = 'claude' | 'codex'
 
-/** What the session receives: start a conversation (with its name, when we choose it) or resume a named one. */
+/**
+ * What the session receives: start a conversation (with its name, when we choose it) or resume a named one.
+ * CYAU-353 — a resume can carry a text written by the automator (`prompt`), the request to rewrite an unreadable
+ * result; without it the conversation receives `CONVERSATION_RESUME_PROMPT`, as after a restart.
+ */
 export type AgentConversation =
   | {mode: 'new'; id?: string}
-  | {mode: 'resume'; id: string}
+  | {mode: 'resume'; id: string; prompt?: string}
 
 export interface ConversationEntry {
   version: 1
@@ -67,7 +71,12 @@ export const CONVERSATION_RESUME_PROMPT = [
   'and end with the final result the original instruction asks for, in the same format.',
 ].join(' ')
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+/** The text a resumed conversation receives: the automator's own when there is one, the restart one otherwise. */
+export function resumePrompt(conversation: {prompt?: string}): string {
+  return conversation.prompt?.trim() ? conversation.prompt : CONVERSATION_RESUME_PROMPT
+}
+
+const UUID =/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** Conversation ids go into paths and argv: only a UUID is accepted, from us or from the engine. */
 export function isConversationId(value: unknown): value is string {

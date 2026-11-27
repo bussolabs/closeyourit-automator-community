@@ -16,7 +16,7 @@ import {appendLogFooter, boundedExcerpt, prune} from './logger'
 import {type SecretCapabilities} from './env-capabilities'
 import {type GithubTokenFetcher} from './github-token'
 import {ErrorCodes} from '../errors/error-codes'
-import {changedFilesSinceBase, conflictsWithBase, observedHeadSha} from './ticket-delivery'
+import {changedFilesSinceBase, conflictsWithBase, observedHeadSha, uncommittedFiles} from './ticket-delivery'
 import {
   type TicketRunAfterResult,
   type TicketRunLifecycle,
@@ -32,10 +32,15 @@ import {
   type Lease,
   type QueueDeferralReason,
 } from './client'
-import {buildWorkflowReviewPrompt, parseWorkflowResultDetailed, parseWorkflowReview} from './typed-workflow'
+import {
+  buildResultCorrectionPrompt, buildWorkflowReviewPrompt, NO_JSON_OBJECT_ISSUE, parseWorkflowResultDetailed, parseWorkflowReview,
+} from './typed-workflow'
 import {runOpencodeResultReview} from './review-execution'
 import {type ReviewerId} from './route'
-import {cycleLimitBlockedResult, HOST_SYNTHETIC_REVIEW_SUMMARY, syntheticBlockedResult} from './unparsable-result'
+import {
+  cycleLimitBlockedResult, HOST_SYNTHETIC_REVIEW_SUMMARY, PHASES_WITHOUT_REVIEW_SESSION, SERVER_CHECKED_REVIEW_SUMMARY,
+  syntheticBlockedResult,
+} from './unparsable-result'
 import {type ExecutionPhase} from './phase-profile'
 import {resolveFlowConcurrency, runFlowPool} from './flow-engine'
 import {type PreflightStop} from './heartbeat'
@@ -534,6 +539,33 @@ function boundedLine(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)} … [${omitted} caratteri omessi]`
 }
 
+/**
+ * CYAU-353 — what the correction of an unreadable result must leave as it found: the last commit, the files the
+ * branch changed against its base and the files changed but not committed. Only names, not contents.
+ */
+interface WorkSnapshot {
+  headSha: string
+  committed: string[]
+  uncommitted: string[]
+}
+
+/** `undefined` when git cannot say: a work that cannot be measured cannot be proven unchanged. */
+function workSnapshot(cwd: string): WorkSnapshot | undefined {
+  const headSha = observedHeadSha(cwd)
+  const uncommitted = uncommittedFiles(cwd)
+  if (!headSha || !uncommitted) return undefined
+  return {headSha, committed: changedFilesSinceBase(cwd, 'origin/HEAD'), uncommitted}
+}
+
+/** Why the work after the correction is not the work before it; `undefined` when nothing changed. */
+function workChange(before: WorkSnapshot, after: WorkSnapshot | undefined): string | undefined {
+  if (!after) return 'work not measurable after the correction'
+  if (after.headSha !== before.headSha) return `last commit changed (${before.headSha.slice(0, 12)} -> ${after.headSha.slice(0, 12)})`
+  if (after.committed.join('\n') !== before.committed.join('\n')) return 'committed files changed'
+  if (after.uncommitted.join('\n') !== before.uncommitted.join('\n')) return 'uncommitted files changed'
+  return undefined
+}
+
 /** Re-attests the ownership (bounded) right before the spawn: an old claim does not authorize a new runtime. */
 async function attestExecutionLease(lease: ActionExecutionLease, signal?: AbortSignal): Promise<boolean> {
   if (signal?.aborted) return false
@@ -1027,7 +1059,10 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
       let attemptCostUsd: number | null = null
       let attemptTokens: TokenUsage | null = null
       let attemptCostComplete = true
-      const chargeSession = (stdout: string, codexModel?: string, workSession = false): void => {
+      // CYAU-353 — one correction of an unreadable result per run. The mark lives here, outside the session loop and
+      // its per-session state, so no restart of the loop (a failed resume, a review round) can ask for a second one.
+      let resultCorrectionUsed = false
+      const chargeSession =(stdout: string, codexModel?: string, workSession = false): void => {
         const cost = sessionCostUsd(stdout, codexModel)
         // Delivery describes the implementer's model; auxiliary engines are local spend only.
         if (workSession) {
@@ -1126,10 +1161,26 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           if (raw.status === 'failure') return !raw.quotaLimit
           return workflowDelivery !== undefined && !parseWorkflowResultDetailed(raw.stdout, workflowDelivery.executionPhase).value
         }
+        // CYAU-353 — the correction the next round of the loop runs instead of a new session: the same conversation is
+        // resumed with the list of format errors, and asked to rewrite only its result.
+        let pendingCorrection: {
+          id: string
+          prompt: string
+          issues: string[]
+          /** The session whose result could not be read: the fallback block is built from it, as before. */
+          original: RunResult
+          /** The work as it was before the correction: if the correction changes it, it is discarded. */
+          work: WorkSnapshot
+        } | undefined
         while (true) {
           const attemptAction = retryPrompt
             ? {...effectiveAction, run: addRetryFindings(retryPrompt, originalRun)}
             : effectiveAction
+          const correction = pendingCorrection
+          pendingCorrection = undefined
+          // How the correction went, for the run log: requested, delivered, discarded or not attempted (and why).
+          let correctionOutcome: string | undefined
+          let correctionIssues: string[] | undefined
           let lifecycleResult: Awaited<ReturnType<TicketRunLifecycle['afterRuntime']>> | undefined
           // CYAU-285 — resume the conversation a restart interrupted, or start one and record its name before the
           // work begins: Claude takes the name chosen here, Codex announces its own in its first event. Review
@@ -1139,7 +1190,12 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
           let conversationId: string | undefined
           let onConversationStarted: ((id: string) => void) | undefined
           let resumeFailed = false
-          if (conversationBase && conversationStore) {
+          if (correction) {
+            // CYAU-353 — the conversation is not chosen again: it is the one whose result could not be read, and its
+            // entry stays in the registry until the phase ends, as for every session.
+            conversation = {mode: 'resume', id: correction.id, prompt: correction.prompt}
+            conversationId = correction.id
+          } else if (conversationBase && conversationStore) {
             const target = {...conversationBase, fingerprint: conversationFingerprint(attemptAction)}
             try {
               const choice = chooseConversation(conversationStore, target, retryPrompt ? 'review corrections to apply' : freshReason, opts.now)
@@ -1183,15 +1239,45 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             ...(onStreamEvent ? {onStreamEvent} : {}),
             ...(conversation ? {conversation} : {}),
             ...(onConversationStarted ? {onConversationStarted} : {}),
-          }, executionLease, async (raw, lifecycleSignal, leaseLost) => {
+          }, executionLease, async (sessionRaw, lifecycleSignal, leaseLost) => {
             // The session is over: delivery and review that follow are not silence of a stuck agent.
             pulse?.close()
             // The app takes steps only while the attempt runs: the last ones leave before the delivery closes it.
             await liveSender?.drain()
+            let raw = sessionRaw
+            // CYAU-353 — the correction is kept only when it ended well, its result can be read and the work is the
+            // one it found. Otherwise the run goes on with the result it could not read, exactly as before: the
+            // fallback block is built from that one. Only the spend and the log are the correction's own.
+            if (correction && workflowDelivery && !leaseLost() && !(lifecycleSignal?.aborted ?? false)) {
+              let discarded: string | undefined
+              if (sessionRaw.status !== 'success') {
+                discarded = `correction session ended with ${sessionRaw.status} (${sessionRaw.errorCode ?? 'no error code'})`
+              } else {
+                // Read as the delivery below reads it, with the facts git knows.
+                const measured = workflowDelivery.executionPhase === 'autopilot' && ticketRun !== undefined
+                  ? {headSha: observedHeadSha(ticketRun.authorizedCwd), changedFiles: changedFilesSinceBase(ticketRun.authorizedCwd, 'origin/HEAD')}
+                  : undefined
+                const corrected = parseWorkflowResultDetailed(sessionRaw.stdout, workflowDelivery.executionPhase, measured)
+                if (!corrected.value) {
+                  discarded = 'corrected result still unreadable'
+                  correctionIssues = corrected.issues
+                } else {
+                  const changed = workChange(correction.work, sessionCwd ? workSnapshot(sessionCwd) : undefined)
+                  if (changed) discarded = `correction changed the work: ${changed}`
+                }
+              }
+              if (discarded) {
+                correctionOutcome = `discarded, ${discarded}`
+                raw = {...correction.original, logPath: sessionRaw.logPath, usageStdout: sessionRaw.usageStdout ?? sessionRaw.stdout}
+              } else {
+                correctionOutcome = 'delivered, the same conversation rewrote its result'
+              }
+            }
             result = raw
             // CYAU-285 — a resumed conversation that breaks is not this phase's outcome: nothing is delivered nor
-            // checked, and the same round starts the phase again in a new conversation.
-            if (conversation?.mode === 'resume' && !leaseLost() && !(lifecycleSignal?.aborted ?? false) && resumeBroke(raw)) {
+            // checked, and the same round starts the phase again in a new conversation. A correction is not a restart:
+            // its outcome is judged above.
+            if (conversation?.mode === 'resume' && !correction && !leaseLost() && !(lifecycleSignal?.aborted ?? false) && resumeBroke(raw)) {
               resumeFailed = true
               agentResult = normalizeAgentResult({runtime: runtime.id, action: name, result: raw})
               return
@@ -1230,6 +1316,47 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
                 ? effectiveAction.type
                 : effectiveAction.type === 'claude' ? 'codex' : 'claude')
               if (!structured) {
+                // CYAU-353 — before the block, the same conversation is asked once to rewrite its result, with the
+                // list of errors. It costs one short turn and keeps the work; the block below stays the fallback.
+                // The decision is taken here, with the session just ended: the conversation must still be resumable
+                // (its name known, its file on this machine) and the work measurable, otherwise no correction.
+                if (!correction) {
+                  const id = conversationId
+                  let refusal: string | undefined
+                  let work: WorkSnapshot | undefined
+                  if (resultCorrectionUsed) refusal = 'already used in this run'
+                  else if (leaseLost() || (lifecycleSignal?.aborted ?? false)) refusal = 'session stopped'
+                  else if (parsedResult.issues.length === 1 && parsedResult.issues[0] === NO_JSON_OBJECT_ISSUE) refusal = 'no result object to correct'
+                  // A conversation resumed after a restart keeps today's path: CYAU-285 starts it over when it breaks.
+                  else if (conversation?.mode === 'resume') refusal = 'conversation resumed after a restart'
+                  else if (!conversationStore || !id) refusal = 'no conversation to resume'
+                  else if (!sessionCwd) refusal = 'no working folder to measure'
+                  else {
+                    let exists = false
+                    try {
+                      exists = conversationStore.sessionExists(effectiveAction.type === 'codex' ? 'codex' : 'claude', id, sessionCwd)
+                    } catch {
+                      exists = false
+                    }
+                    if (!exists) refusal = 'conversation file no longer on this machine'
+                    else {
+                      work = workSnapshot(sessionCwd)
+                      if (!work) refusal = 'work not measurable'
+                    }
+                  }
+                  if (!refusal && work && id) {
+                    resultCorrectionUsed = true
+                    pendingCorrection = {
+                      id, prompt: buildResultCorrectionPrompt(parsedResult.issues), issues: parsedResult.issues, original: raw, work,
+                    }
+                    correctionOutcome = 'requested, resuming the same conversation'
+                    correctionIssues = parsedResult.issues
+                    // Nothing is delivered yet: if the loop cannot run the correction, the outcome stays this one.
+                    lifecycleResult = {outcome: 'complete', runStatus: 'failure', errorCode: ErrorCodes.Workflow.unparsable}
+                    return
+                  }
+                  correctionOutcome = `not attempted, ${refusal ?? 'work not measurable'}`
+                }
                 // The session ended without a result readable against the phase schema. The local
                 // outcome stays a failure with its cause (C422-WORKFLOW-001), and the output excerpt
                 // ends up in the action log with the parse issues (CYAU-105).
@@ -1427,7 +1554,10 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
               // wait: most of them pass the second time and the work loses nothing. The wait stays short on
               // purpose — the session holds the ticket's lease while it waits — and everything longer than this is
               // waited for BETWEEN rounds, with the phase back in the queue.
-              for (let reviewTry = 1; reviewTry <= REVIEW_MAX_ATTEMPTS; reviewTry += 1) {
+              // CYAU-354 — no reviewer session where no code is written: the server is the judge there.
+              const reviewSessionDue = !PHASES_WITHOUT_REVIEW_SESSION.includes(workflowDelivery.executionPhase)
+              if (!reviewSessionDue) payloadReview = {status: 'accepted', depth: 'result', summary: SERVER_CHECKED_REVIEW_SUMMARY}
+              for (let reviewTry = 1; reviewSessionDue && reviewTry <= REVIEW_MAX_ATTEMPTS; reviewTry += 1) {
                 if (reviewTry > 1) {
                   appendLogFooter(raw.logPath, {
                     review_retry: reviewTry,
@@ -1665,6 +1795,25 @@ export async function runOnce(opts: RunOnceOptions): Promise<RunOnceResult> {
             })
           } else if (conversationReason && execution.result.logPath) {
             appendLogFooter(execution.result.logPath, {conversation_reason: conversationReason})
+          }
+          // CYAU-353 — the run log says whether the unreadable result was corrected, how it ended, and with which errors.
+          if (correctionOutcome && execution.result.logPath) {
+            appendLogFooter(execution.result.logPath, {
+              result_correction: correctionOutcome,
+              ...(correctionIssues ? {result_correction_issues: boundedLine(correctionIssues.join(' | '), ISSUES_FOOTER_CHARS)} : {}),
+            })
+          }
+          if (pendingCorrection && !execution.leaseLost && !opts.signal?.aborted) {
+            // The correction runs in the same round, like a resume that failed: the claim is checked again, nothing
+            // else. It goes through no claim, so it uses no attempt of the ticket; its spend was summed above.
+            if (!executionLease || !(await attestExecutionLease(executionLease, opts.signal))) {
+              execution = {result: {...execution.result, status: 'failure', errorCode: ErrorCodes.Lease.lost}, leaseLost: true}
+              result = execution.result
+              agentResult = normalizeAgentResult({runtime: runtime.id, action: name, result, cancelled: true})
+              await ticketRun?.block().catch(() => undefined)
+              break
+            }
+            continue
           }
           if (resumeFailed && !execution.leaseLost && !opts.signal?.aborted) {
             // The broken entry goes with the next choice (forced), and the new conversation is recorded in its place.

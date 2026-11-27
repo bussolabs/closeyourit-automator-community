@@ -8,7 +8,7 @@ import {extractRetryFindings} from './claude'
 import {FLOW_STEPS, SKILL_PLUGIN} from './flow-engine'
 import {ESCAPE_SOCKET_PATHS, sandboxAllowedDomains} from './guardrails'
 import {guardrailsSettingsPath} from './paths'
-import {type AgentConversation, CONVERSATION_RESUME_PROMPT, isConversationId} from './agent-conversation'
+import {type AgentConversation, isConversationId, resumePrompt} from './agent-conversation'
 
 // Codex provider-specific logic (CYAU-4), twin of claude.ts: building the `codex exec` argv.
 // The execution ENGINE (spawn/timeout/log/on_failure) stays generic in executor.ts;
@@ -117,12 +117,12 @@ function buildCodexSkillArgv(
   const prompt = retryFindings ? `${invocation}\n\n${retryFindings}` : invocation
   const domains = sandboxAllowedDomains().map((domain) => `${JSON.stringify(domain)}="allow"`).join(', ')
   const conversation = options.lastMessageFile ? options.conversation : undefined
-  const resumeId = conversation?.mode === 'resume' && isConversationId(conversation.id) ? conversation.id : undefined
+  const resume = conversation?.mode === 'resume' && isConversationId(conversation.id) ? conversation : undefined
   return [
     '--ask-for-approval', 'never',
     '--dangerously-bypass-hook-trust',
     'exec',
-    ...(resumeId ? ['resume'] : []),
+    ...(resume ? ['resume'] : []),
     // CYAU-285 — the events on stdout carry the conversation name (`thread.started`), so the result moves to a file.
     '--json',
     ...(options.lastMessageFile ? ['--output-last-message', options.lastMessageFile] : []),
@@ -141,8 +141,9 @@ function buildCodexSkillArgv(
     // The executor already builds the session env (cyi credential, no managed secrets): the skill scripts need it.
     '-c', 'shell_environment_policy.inherit="all"',
     '--model', action.model ?? CODEX_MODEL,
-    // A resumed conversation already holds the original instruction: it is asked to carry on, not to start over.
-    ...(resumeId ? ['--', resumeId, CONVERSATION_RESUME_PROMPT] : ['--', prompt]),
+    // A resumed conversation already holds the original instruction: it is asked to carry on, not to start over,
+    // or to rewrite its result (CYAU-353).
+    ...(resume ? ['--', resume.id, resumePrompt(resume)] : ['--', prompt]),
   ]
 }
 

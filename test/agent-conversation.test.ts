@@ -10,6 +10,8 @@ import {
   conversationEntryPath,
   conversationFingerprint,
   CONVERSATION_MAX_AGE_MS,
+  CONVERSATION_RESUME_PROMPT,
+  resumePrompt,
   type ConversationStore,
   type ConversationTarget,
   isConversationId,
@@ -255,5 +257,20 @@ describe('conversation files on this machine', () => {
     expect(local.sessionExists('codex', ID, cwd)).toBe(true)
     const defaults = localConversationStore('/registry', () => home, {CLAUDE_CONFIG_DIR: 'relative'})
     expect(defaults.sessionExists('claude', ID, '/nowhere-' + String(counter))).toBe(false)
+  })
+})
+
+// CYAU-353 — a resume carries the automator's correction request when there is one, the restart text otherwise.
+describe('resumePrompt', () => {
+  it('a resume after a restart receives the fixed text', () => {
+    expect(resumePrompt({})).toBe(CONVERSATION_RESUME_PROMPT)
+  })
+
+  it('a correction receives the text the automator wrote', () => {
+    expect(resumePrompt({prompt: 'Rewrite only the result.'})).toBe('Rewrite only the result.')
+  })
+
+  it('an empty text never reaches the engine: the fixed text stays', () => {
+    expect(resumePrompt({prompt: '   '})).toBe(CONVERSATION_RESUME_PROMPT)
   })
 })

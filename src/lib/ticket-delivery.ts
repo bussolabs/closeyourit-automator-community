@@ -317,6 +317,23 @@ export function changedFilesSinceBase(
   }
 }
 
+/**
+ * CYAU-353 — the files changed in the working copy and not yet committed, as `git status` lists them (untracked
+ * included). `undefined` when git cannot say: whoever compares two of these must not read silence as «nothing changed».
+ */
+export function uncommittedFiles(
+  cwd: string,
+  run: TicketDeliveryCommandRunner = defaultGitRun,
+): string[] | undefined {
+  try {
+    const result = run(['status', '--porcelain', '--untracked-files=all'], cwd)
+    if (result.status !== 0) return undefined
+    return result.stdout.split('\n').map(line => line.trimEnd()).filter(Boolean).sort()
+  } catch {
+    return undefined
+  }
+}
+
 export function conflictsWithBase(
   cwd: string,
   base: string,

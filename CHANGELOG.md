@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.69.7-beta.1] - 2026-11-27
+
+### Changed
+
+- **Lettura e rilasci senza seconda rilettura.** Su questi tre passi non c'è codice da rileggere e il server controlla già il risultato. Una sessione in meno per passo, e un punto in meno dove un lavoro può fermarsi. Piano e scrittura restano riletti.
+
+## [0.69.6] - 2026-11-27
+
+### Changed
+
+- **Un risultato con un errore di forma si corregge senza rifare il lavoro.** La macchina chiede una volta alla stessa conversazione di riscrivere solo il risultato. Se il lavoro cambia o il risultato resta sbagliato, il ticket si ferma come prima e il motivo è nel registro. (CYAU-353)
+
 ## [0.69.5-beta.1] - 2026-11-27
 
 ### Changed

@@ -29,6 +29,15 @@ export const UNPARSABLE_HUMAN_ACTION =
   'Se si ripete, rileggere le istruzioni della skill: il modello non ha rispettato il formato del risultato'
 /** The review did not happen: there is no result to review, and the report says so. */
 export const HOST_SYNTHETIC_REVIEW_SUMMARY = 'Generata dall\'host: nessun risultato da rileggere'
+
+/**
+ * CYAU-354 — the phases that write no code get no reviewer session: the server already checks their result
+ * against the contract, the release number it assigned, the trial deploy and the release itself. A second
+ * session reading a few lines of report was one more place to stop, and it rejected sound work.
+ */
+export const PHASES_WITHOUT_REVIEW_SESSION: readonly string[] = ['triage', 'closer_staging', 'closer_production']
+export const SERVER_CHECKED_REVIEW_SUMMARY = 'No reviewer session for this phase: the server checks its result'
+
 /** How many characters of findings go into the reason: it is a line on the ticket card, not a dump. */
 export const UNPARSABLE_REASON_CHARS = 700
 /** How much output ends up in `technical_detail`: enough to recognise its shape, redacted and delimited. */

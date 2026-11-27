@@ -156,6 +156,13 @@ describe('buildClaudeArgv skill mode', () => {
     expect(args.slice(-4)).toEqual(['--settings', JSON.stringify(baseSettings), '--setting-sources', ''])
   })
 
+  it('a resumed conversation can receive the correction the automator wrote, under the same guardrails (CYAU-353)', () => {
+    const args = buildClaudeArgv(claudeAction({run: 'x', skill: triage}), guardrails, undefined,
+      {conversation: {mode: 'resume', id: conversationId, prompt: 'Rewrite only the result.'}})
+    expect(args.slice(0, 4)).toEqual(['-p', 'Rewrite only the result.', '--resume', conversationId])
+    expect(args.slice(-4)).toEqual(['--settings', JSON.stringify(baseSettings), '--setting-sources', ''])
+  })
+
   it('a prompt-mode session takes the same flags', () => {
     expect(buildClaudeArgv(claudeAction({run: '/audit'}), guardrails, undefined, {conversation: {mode: 'new', id: conversationId}})
       .slice(0, 4)).toEqual(['-p', '/audit', '--session-id', conversationId])

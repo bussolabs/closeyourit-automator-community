@@ -2,7 +2,7 @@ import {sessionSettings} from './session-settings'
 import {type ClaudeActionT} from './schema'
 import {guardrailsSettingsPath} from './paths'
 import {CLAUDE_MODEL} from './models'
-import {type AgentConversation, CONVERSATION_RESUME_PROMPT, isConversationId} from './agent-conversation'
+import {type AgentConversation, isConversationId, resumePrompt} from './agent-conversation'
 
 // Claude provider-specific logic, extracted from executor.ts (CYAU-3): building the `claude` argv
 // and interpreting the JSON output. The execution ENGINE (spawn/timeout/log/on_failure) stays
@@ -73,7 +73,7 @@ export interface ClaudeArgvOptions {
   /**
    * CYAU-285 — the conversation the session belongs to. `new` with an id names it (`--session-id`), so the
    * automator knows the name before the work starts; `resume` continues it (`--resume`) with a prompt that asks to
-   * carry on instead of repeating the original instruction.
+   * carry on instead of repeating the original instruction, or with the automator's correction request (CYAU-353).
    */
   conversation?: AgentConversation
 }
@@ -81,7 +81,7 @@ export interface ClaudeArgvOptions {
 /** The prompt and the conversation flags: a resumed conversation already holds the original instruction. */
 function conversationArgs(prompt: string, conversation: AgentConversation | undefined): string[] {
   if (conversation?.mode === 'resume' && isConversationId(conversation.id)) {
-    return ['-p', CONVERSATION_RESUME_PROMPT, '--resume', conversation.id]
+    return ['-p', resumePrompt(conversation), '--resume', conversation.id]
   }
   if (conversation?.mode === 'new' && isConversationId(conversation.id)) return ['-p', prompt, '--session-id', conversation.id]
   return ['-p', prompt]

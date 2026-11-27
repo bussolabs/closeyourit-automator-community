@@ -274,6 +274,14 @@ describe('buildCodexArgv in skill-mode', () => {
     expect(argv).toContain('default_permissions="automator"')
   })
 
+  it('a resumed conversation can receive the correction the automator wrote instead of the restart text (CYAU-353)', () => {
+    const argv = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined,
+      {conversation: {mode: 'resume', id, prompt: 'Rewrite only the result.'}, lastMessageFile: '/repo/.git/result.txt'})
+    expect(argv.slice(0, 5)).toEqual(['--ask-for-approval', 'never', '--dangerously-bypass-hook-trust', 'exec', 'resume'])
+    expect(argv.slice(-3)).toEqual(['--', id, 'Rewrite only the result.'])
+    expect(argv).not.toContain(CONVERSATION_RESUME_PROMPT)
+  })
+
   it('without a result file the session runs as before, and a malformed name is never resumed', () => {
     const plain = buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails))
     expect(buildCodexArgv(codexAction({run: 'placeholder', skill}), settingsFile(guardrails), undefined,
