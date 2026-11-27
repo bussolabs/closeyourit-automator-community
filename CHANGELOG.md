@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.69.8-beta.1] - 2026-11-27
+
+### Fixed
+
+- **La rilettura non si ferma più per le librerie installate.** Le librerie che una sessione installa nella cartella di lavoro non contano come file dimenticati. (CYAU-357)
+
 ## [0.69.7-beta.1] - 2026-11-27
 
 ### Changed

@@ -469,7 +469,7 @@ export async function resolveReviewDiff(
     // and a copy of the tree kept there (a conflict round does it) carries the repository's own .gitignore files.
     const untrackedIgnoreFiles = await snapshotGit([
       'ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--', '.gitignore', ':(glob)**/.gitignore',
-      ':(exclude).closeyourit/session', ':(exclude).pnpm-store', ':(exclude).closeyourit-images',
+      ':(exclude).closeyourit/session', ':(exclude).pnpm-store', ':(exclude).closeyourit-images', ':(exclude)vendor/bundle',
     ])
     // A .gitignore inside a folder the repository already ignores hides nothing more: Git never reads it while
     // walking the tree. That is what python -m venv, pytest and ruff write in .venv/, .pytest_cache/, .ruff_cache/.
@@ -489,8 +489,10 @@ export async function resolveReviewDiff(
     // write the global one: a cache, never part of the work.
     // CYAU-298 — the same for .closeyourit-images, the ticket's images the machine downloads for the session: the
     // review runs before the session's folder is removed, and this temporary gitdir does not read the managed ignore.
+    // CYAU-357 — the same for vendor/bundle: a session cannot write the machine's gem directory, so the missing
+    // gems land there (schema.sh). Installed dependencies, never part of the work.
     const statusArgs = ['status', '--porcelain=v2', '-z', '--untracked-files=normal', '--ignore-submodules=none',
-      '--', '.', ':(exclude).closeyourit/session', ':(exclude).pnpm-store', ':(exclude).closeyourit-images']
+      '--', '.', ':(exclude).closeyourit/session', ':(exclude).pnpm-store', ':(exclude).closeyourit-images', ':(exclude)vendor/bundle']
     const statusBefore = (await snapshotGit(statusArgs)).toString('latin1')
     const statusEntriesBefore = statusBefore.split('\0')
     if (hasDirtyIgnoreEntries(statusEntriesBefore)) {

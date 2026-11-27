@@ -1153,10 +1153,14 @@ describe('resolveReviewDiff', () => {
       // CYRA-1197 — pnpm puts its package cache in the project when the sandbox cannot write the global one.
       fs.mkdirSync(path.join(repo, '.pnpm-store', 'v10'), {recursive: true})
       fs.writeFileSync(path.join(repo, '.pnpm-store', 'v10', 'index.json'), '{}\n')
+      // CYAU-357 — the gems a session installs in the worktree, because it cannot write the machine's own.
+      fs.mkdirSync(path.join(repo, 'vendor', 'bundle', 'machine', 'gems'), {recursive: true})
+      fs.writeFileSync(path.join(repo, 'vendor', 'bundle', 'machine', 'gems', 'rake.gemspec'), 'spec\n')
 
       const resolved = await resolveReviewDiff(base, repo)
       expect(resolved.diff).not.toContain('pr-body.md')
       expect(resolved.diff).not.toContain('index.json')
+      expect(resolved.diff).not.toContain('rake.gemspec')
 
       fs.writeFileSync(path.join(repo, 'new.ts'), 'must not vanish\n')
       await expect(resolveReviewDiff(base, repo)).rejects.toThrow(/non tracciati/)
